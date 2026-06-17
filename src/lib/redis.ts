@@ -11,10 +11,12 @@ export function getRedis(): Redis | null {
     return null
   }
 
+  const isRailwayInternal = url.includes('.railway.internal')
+
   client = new Redis(url, {
     lazyConnect: true,
     maxRetriesPerRequest: 1,
-    family: 6,
+    ...(isRailwayInternal ? { family: 6 } : {}),
   })
   client.on('error', (err) => {
     console.warn('redis error:', err instanceof Error ? err.message : err)
