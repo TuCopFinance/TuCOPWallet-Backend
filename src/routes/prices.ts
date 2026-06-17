@@ -1,8 +1,10 @@
 import { Router } from 'express'
 import { getXautPriceUsd } from '../lib/coinmarketcap'
+import { createLogger } from '../lib/logger'
 import { getRedis } from '../lib/redis'
 
 const router = Router()
+const log = createLogger('routes:prices')
 const CACHE_KEY = 'price:xaut:usd'
 const TTL_SECONDS = 60
 
@@ -19,7 +21,7 @@ router.get('/api/prices/xaut', async (req, res) => {
       return res.json(JSON.parse(cached))
     }
   } catch (err) {
-    console.warn('redis read failed:', err instanceof Error ? err.message : err)
+    log.warn('redis read failed:', err instanceof Error ? err.message : err)
   }
 
   try {
@@ -33,11 +35,11 @@ router.get('/api/prices/xaut', async (req, res) => {
     try {
       await cache?.set(CACHE_KEY, JSON.stringify(payload), 'EX', TTL_SECONDS)
     } catch (err) {
-      console.warn('redis write failed:', err instanceof Error ? err.message : err)
+      log.warn('redis write failed:', err instanceof Error ? err.message : err)
     }
     res.json(payload)
   } catch (err) {
-    console.warn('cmc error:', err instanceof Error ? err.message : err)
+    log.warn('upstream error:', err instanceof Error ? err.message : err)
     res.status(502).json({ error: 'upstream price feed unavailable' })
   }
 })
