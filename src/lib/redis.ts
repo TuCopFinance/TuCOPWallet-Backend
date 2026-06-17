@@ -1,4 +1,7 @@
 import Redis from 'ioredis'
+import { createLogger } from './logger'
+
+const log = createLogger('lib:redis')
 
 let client: Redis | null | undefined
 
@@ -19,7 +22,7 @@ export function getRedis(): Redis | null {
     ...(isRailwayInternal ? { family: 6 } : {}),
   })
   client.on('error', (err) => {
-    console.warn('redis error:', err instanceof Error ? err.message : err)
+    log.warn('connection error:', err instanceof Error ? err.message : err)
   })
   return client
 }

@@ -1,10 +1,18 @@
 import express, { Request, Response } from 'express'
-import pricesRouter from './routes/prices'
+import rateLimit from 'express-rate-limit'
+import { fetchWithTimeout } from './lib/http'
+import { createLogger } from './lib/logger'
 import blockscoutRouter from './routes/blockscout'
+import pricesRouter from './routes/prices'
+
+const log = createLogger('app')
+const reqLog = createLogger('app:req')
 
 const ETHERSCAN_API_URL = 'https://api.etherscan.io/v2/api'
 const CELO_CHAIN_ID = 42220
 
+// Lowercase 40-hex addresses only. The /events handler lower-cases incoming
+// addresses before lookup, so do NOT add checksummed entries here.
 const ALLOWED_CONTRACTS = new Set<string>([
   '0x947c6db1569edc9fd37b017b791ca0f008ab4946', // ReFi Colombia Subsidies
 ])
@@ -18,10 +26,23 @@ const isHex = (s: string, len?: number): boolean => {
 
 export const app = express()
 
+// Railway terminates TLS at one proxy hop. Telling Express to trust exactly one
+// hop lets express-rate-limit see the real client IP without enabling IP
+// spoofing via attacker-supplied X-Forwarded-For headers.
+app.set('trust proxy', 1)
+
+app.use(
+  rateLimit({
+    windowMs: 60_000,
+    limit: 120,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'rate limit exceeded' },
+  }),
+)
+
 app.use((req, _res, next) => {
-  console.log(
-    `[${new Date().toISOString()}] ${req.method} ${req.path} ${JSON.stringify(req.query)}`,
-  )
+  reqLog.info(`${req.method} ${req.path} ${JSON.stringify(req.query)}`)
   next()
 })
 
@@ -67,17 +88,19 @@ app.get('/events', async (req: Request, res: Response) => {
   if (topic1) params.set('topic1', topic1)
 
   try {
-    const upstream = await fetch(`${ETHERSCAN_API_URL}?${params.toString()}`)
+    const upstream = await fetchWithTimeout(`${ETHERSCAN_API_URL}?${params.toString()}`)
     const data = (await upstream.json()) as { status: string; message: string; result: unknown }
 
     if (data.status !== '1' && data.message !== 'No records found') {
-      console.warn('Etherscan error:', data.message)
-      return res.status(502).json({ error: 'etherscan error', detail: data.message })
+      // The Etherscan message can echo back the request including the apikey.
+      // Log it server-side, never return it to the client.
+      log.warn('etherscan error:', data.message)
+      return res.status(502).json({ error: 'etherscan error' })
     }
 
     res.json({ events: Array.isArray(data.result) ? data.result : [] })
   } catch (error) {
-    console.error('Etherscan unreachable:', error instanceof Error ? error.message : error)
+    log.error('etherscan unreachable:', error instanceof Error ? error.message : error)
     res.status(502).json({ error: 'etherscan unreachable' })
   }
 })

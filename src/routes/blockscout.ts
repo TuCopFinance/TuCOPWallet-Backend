@@ -1,8 +1,11 @@
 import { Router, Request, Response } from 'express'
 import { blockscoutGet } from '../lib/blockscout'
+import { createLogger } from '../lib/logger'
+import { buildCacheKey, stripReservedParams } from '../lib/query'
 import { getRedis } from '../lib/redis'
 
 const router = Router()
+const log = createLogger('routes:blockscout')
 
 const TX_HASH_RE = /^0x[a-fA-F0-9]{64}$/
 const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/
@@ -13,7 +16,10 @@ const TTL_ADDR_TOKEN_TRANSFERS = 300
 
 async function proxy(req: Request, res: Response, ttlSeconds: number): Promise<void> {
   const cache = getRedis()
-  const cacheKey = `blockscout:${req.originalUrl}`
+  // stripReservedParams runs at the public boundary so reserved params (e.g.
+  // `apikey`) never reach upstream nor balloon the cache key namespace.
+  const safeQuery = stripReservedParams(req.query as Record<string, string>)
+  const cacheKey = buildCacheKey('blockscout', req.path, safeQuery)
 
   try {
     const cached = await cache?.get(cacheKey)
@@ -22,19 +28,19 @@ async function proxy(req: Request, res: Response, ttlSeconds: number): Promise<v
       return
     }
   } catch (err) {
-    console.warn('redis read failed:', err instanceof Error ? err.message : err)
+    log.warn('redis read failed:', err instanceof Error ? err.message : err)
   }
 
   try {
-    const data = await blockscoutGet(req.originalUrl)
+    const data = await blockscoutGet({ path: req.path, query: safeQuery })
     try {
       await cache?.set(cacheKey, JSON.stringify(data), 'EX', ttlSeconds)
     } catch (err) {
-      console.warn('redis write failed:', err instanceof Error ? err.message : err)
+      log.warn('redis write failed:', err instanceof Error ? err.message : err)
     }
     res.json(data)
   } catch (err) {
-    console.warn('blockscout error:', err instanceof Error ? err.message : err)
+    log.warn('upstream error:', err instanceof Error ? err.message : err)
     res.status(502).json({ error: 'blockscout upstream unavailable' })
   }
 }
