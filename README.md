@@ -99,7 +99,7 @@ Required Railway env vars:
 - `COINMARKETCAP_API_KEY` -- CoinMarketCap Pro API key, needed by `/api/prices/xaut`
 - `BLOCKSCOUT_API_KEY` -- optional; injected as `apikey` query param when proxying Blockscout
 - `BLOCKSCOUT_BASE_URL` -- optional; defaults to `https://celo.blockscout.com`
-- `REDIS_URL` -- optional; when set, enables caching for price quotes and Blockscout responses
+- `REDIS_URL` -- optional; when set, enables caching for price quotes and Blockscout responses. Set to the literal string `disabled` to keep the var present but skip Redis entirely. On Railway, set this to `${{Redis.REDIS_URL}}` to point at the in-project Redis service (the client forces IPv6 lookup so Railway's internal hostnames resolve)
 - `PORT` -- injected automatically by Railway
 
 ## Adding a new whitelisted contract
