@@ -2,6 +2,13 @@
 
 Backend services for TuCopWallet. Hosts proxy endpoints used by the mobile app so third-party API keys (Etherscan, CoinMarketCap, Blockscout) never ship in app bundles.
 
+## Cross-cutting behaviour
+
+- **Rate limit:** 120 requests per IP per 60 s window across all endpoints (`express-rate-limit`, in-memory). Exceeding it returns `429 { "error": "rate limit exceeded" }`. Trust-proxy is set to one hop so Railway's LB forwards the real client IP.
+- **Upstream timeout:** every outbound call (Etherscan, CoinMarketCap, Blockscout) is wrapped in `fetchWithTimeout` with an 8 s default, so a hung upstream never holds an inbound request open indefinitely.
+- **Cache fallthrough:** when `REDIS_URL` is unset or set to the literal `disabled`, every request goes direct to upstream. Otherwise the cache is consulted with normalised keys; failed cache reads or writes fall through and never break the response.
+- **Logging:** all diagnostic output goes through `src/lib/logger.ts` with per-module namespaces (e.g. `[app:req]`, `[routes:blockscout]`). In production (`NODE_ENV=production`) only `warn` and `error` are emitted.
+
 ## Endpoints
 
 ### `GET /health`
@@ -35,7 +42,7 @@ Proxies a XAUt0 price quote (in USD) from CoinMarketCap. Cached in Redis for 60 
 
 ### `GET /events`
 
-Proxies a contract event-log query to Etherscan V2 API on Celo mainnet (chainid 42220). Only whitelisted contract addresses are accepted (see `ALLOWED_CONTRACTS` in `src/server.ts`).
+Proxies a contract event-log query to Etherscan V2 API on Celo mainnet (chainid 42220). Only whitelisted contract addresses are accepted (see `ALLOWED_CONTRACTS` in `src/app.ts`).
 
 **Query params:**
 
@@ -57,7 +64,8 @@ Proxies a contract event-log query to Etherscan V2 API on Celo mainnet (chainid 
 
 - `400` `{ "error": "invalid address" }` / `invalid topic0` / `invalid topic1`
 - `403` `{ "error": "contract not allowed" }`
-- `502` `{ "error": "etherscan error", "detail": "..." }` / `etherscan unreachable`
+- `502` `{ "error": "etherscan error" }` / `etherscan unreachable` (upstream message is logged server-side, never returned)
+- `503` `{ "error": "etherscan key not configured" }`
 
 ### Blockscout proxy
 
@@ -69,7 +77,7 @@ Passthrough proxy for Celo's Blockscout V2 API, injecting the API key on the ser
 | `GET /api/v2/addresses/:address/transactions` | 30 s |
 | `GET /api/v2/addresses/:address/token-transfers` | 300 s |
 
-Query string parameters (e.g. `filter`, `block_number`) are forwarded to upstream verbatim.
+Query string parameters (e.g. `filter`, `block_number`) are forwarded to upstream. The reserved `apikey` and `api_key` keys are stripped server-side so clients cannot override the server key. Cache keys are normalised (sorted, reserved params dropped, capped at 512 chars) so callers cannot blow up the Redis keyspace by passing junk params.
 
 Validation: `:hash` must match `0x` + 64 hex; `:address` must match `0x` + 40 hex. Otherwise `400 { "error": "invalid ..." }`. Upstream failures return `502 { "error": "blockscout upstream unavailable" }`.
 
@@ -99,7 +107,7 @@ Required Railway env vars:
 - `COINMARKETCAP_API_KEY` -- CoinMarketCap Pro API key, needed by `/api/prices/xaut`
 - `BLOCKSCOUT_API_KEY` -- optional; injected as `apikey` query param when proxying Blockscout
 - `BLOCKSCOUT_BASE_URL` -- optional; defaults to `https://celo.blockscout.com`
-- `REDIS_URL` -- optional; when set, enables caching for price quotes and Blockscout responses. Set to the literal string `disabled` to keep the var present but skip Redis entirely. On Railway, set this to `${{Redis.REDIS_URL}}` to point at the in-project Redis service (the client forces IPv6 lookup so Railway's internal hostnames resolve)
+- `REDIS_URL` -- optional; when set, enables caching for price quotes and Blockscout responses. Set to the literal string `disabled` to keep the var present but skip Redis entirely. On Railway use `${{Redis.REDIS_PUBLIC_URL}}` (public proxy) or `${{Redis.REDIS_URL}}` (private internal); the client only forces IPv6 lookup for hostnames containing `.railway.internal`, so public proxy URLs keep working.
 - `PORT` -- injected automatically by Railway
 
 ## Adding a new whitelisted contract

@@ -1,15 +1,24 @@
+import { fetchWithTimeout } from './http'
+import { buildSafeQueryString, stripReservedParams } from './query'
+
 const DEFAULT_BASE = 'https://celo.blockscout.com'
 
-export async function blockscoutGet(pathAndQuery: string): Promise<unknown> {
+export interface BlockscoutGetInput {
+  path: string
+  query?: Record<string, string | string[] | undefined>
+}
+
+export async function blockscoutGet({ path, query = {} }: BlockscoutGetInput): Promise<unknown> {
   const base = process.env.BLOCKSCOUT_BASE_URL?.replace(/\/$/, '') ?? DEFAULT_BASE
   const apiKey = process.env.BLOCKSCOUT_API_KEY
 
-  let url = `${base}${pathAndQuery}`
-  if (apiKey) {
-    url += pathAndQuery.includes('?') ? `&apikey=${apiKey}` : `?apikey=${apiKey}`
-  }
+  const safeQuery = stripReservedParams(query)
+  if (apiKey) safeQuery.apikey = apiKey
 
-  const res = await fetch(url, { headers: { accept: 'application/json' } })
+  const qs = buildSafeQueryString(safeQuery)
+  const url = qs ? `${base}${path}?${qs}` : `${base}${path}`
+
+  const res = await fetchWithTimeout(url, { headers: { accept: 'application/json' } })
   if (!res.ok) throw new Error(`Blockscout error: ${res.status}`)
 
   return (await res.json()) as unknown

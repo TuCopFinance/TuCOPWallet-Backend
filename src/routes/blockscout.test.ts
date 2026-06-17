@@ -28,7 +28,10 @@ describe('blockscout proxy', () => {
 
       expect(res.status).toBe(200)
       expect(res.body).toEqual({ hash: VALID_HASH, status: 'ok' })
-      expect(mockBlockscoutGet).toHaveBeenCalledWith(`/api/v2/transactions/${VALID_HASH}`)
+      expect(mockBlockscoutGet).toHaveBeenCalledWith({
+        path: `/api/v2/transactions/${VALID_HASH}`,
+        query: {},
+      })
     })
 
     it('rejects an invalid hash with 400', async () => {
@@ -54,9 +57,10 @@ describe('blockscout proxy', () => {
 
       expect(res.status).toBe(200)
       expect(res.body).toEqual({ items: [] })
-      expect(mockBlockscoutGet).toHaveBeenCalledWith(
-        `/api/v2/addresses/${VALID_ADDRESS}/transactions`,
-      )
+      expect(mockBlockscoutGet).toHaveBeenCalledWith({
+        path: `/api/v2/addresses/${VALID_ADDRESS}/transactions`,
+        query: {},
+      })
     })
 
     it('forwards filter/cursor query params to upstream', async () => {
@@ -66,9 +70,22 @@ describe('blockscout proxy', () => {
         `/api/v2/addresses/${VALID_ADDRESS}/transactions?filter=to&block_number=123`,
       )
 
-      expect(mockBlockscoutGet).toHaveBeenCalledWith(
-        `/api/v2/addresses/${VALID_ADDRESS}/transactions?filter=to&block_number=123`,
+      expect(mockBlockscoutGet).toHaveBeenCalledWith({
+        path: `/api/v2/addresses/${VALID_ADDRESS}/transactions`,
+        query: { filter: 'to', block_number: '123' },
+      })
+    })
+
+    it('strips reserved apikey query param so attackers cannot override the server key', async () => {
+      mockBlockscoutGet.mockResolvedValueOnce({ items: [] })
+
+      await request(app).get(
+        `/api/v2/addresses/${VALID_ADDRESS}/transactions?apikey=evil&filter=to`,
       )
+
+      const call = mockBlockscoutGet.mock.calls[0]?.[0]
+      expect(call?.query).not.toHaveProperty('apikey')
+      expect(call?.query).toMatchObject({ filter: 'to' })
     })
 
     it('rejects invalid address with 400', async () => {
@@ -88,9 +105,10 @@ describe('blockscout proxy', () => {
 
       expect(res.status).toBe(200)
       expect(res.body).toEqual({ items: [{ token: 'USDC' }] })
-      expect(mockBlockscoutGet).toHaveBeenCalledWith(
-        `/api/v2/addresses/${VALID_ADDRESS}/token-transfers`,
-      )
+      expect(mockBlockscoutGet).toHaveBeenCalledWith({
+        path: `/api/v2/addresses/${VALID_ADDRESS}/token-transfers`,
+        query: {},
+      })
     })
 
     it('rejects invalid address with 400', async () => {

@@ -19,3 +19,4 @@ jobs:
       - run: yarn lint
       - run: yarn typecheck
       - run: yarn test --ci --silent
+      - run: yarn build

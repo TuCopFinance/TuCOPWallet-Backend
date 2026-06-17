@@ -1,3 +1,5 @@
+import { fetchWithTimeout } from './http'
+
 const CMC_BASE = 'https://pro-api.coinmarketcap.com/v2'
 
 interface CmcQuoteResponse {
@@ -18,7 +20,7 @@ export async function getXautPriceUsd(): Promise<{ priceUsd: number; asOf: strin
   if (!key) throw new Error('COINMARKETCAP_API_KEY not set')
 
   const url = `${CMC_BASE}/cryptocurrency/quotes/latest?symbol=XAUT&convert=USD`
-  const res = await fetch(url, { headers: { 'X-CMC_PRO_API_KEY': key } })
+  const res = await fetchWithTimeout(url, { headers: { 'X-CMC_PRO_API_KEY': key } })
   if (!res.ok) throw new Error(`CMC error: ${res.status}`)
 
   const json = (await res.json()) as CmcQuoteResponse
