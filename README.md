@@ -59,6 +59,20 @@ Proxies a contract event-log query to Etherscan V2 API on Celo mainnet (chainid 
 - `403` `{ "error": "contract not allowed" }`
 - `502` `{ "error": "etherscan error", "detail": "..." }` / `etherscan unreachable`
 
+### Blockscout proxy
+
+Passthrough proxy for Celo's Blockscout V2 API, injecting the API key on the server side so the mobile app never sees it. Responses are returned exactly as Blockscout returns them.
+
+| Endpoint | Cache TTL |
+|----------|-----------|
+| `GET /api/v2/transactions/:hash` | 30 s |
+| `GET /api/v2/addresses/:address/transactions` | 30 s |
+| `GET /api/v2/addresses/:address/token-transfers` | 300 s |
+
+Query string parameters (e.g. `filter`, `block_number`) are forwarded to upstream verbatim.
+
+Validation: `:hash` must match `0x` + 64 hex; `:address` must match `0x` + 40 hex. Otherwise `400 { "error": "invalid ..." }`. Upstream failures return `502 { "error": "blockscout upstream unavailable" }`.
+
 ## Local development
 
 ```bash
@@ -83,7 +97,9 @@ Required Railway env vars:
 
 - `ETHERSCAN_API_KEY` -- Etherscan V2 unified API key (works across all supported chains)
 - `COINMARKETCAP_API_KEY` -- CoinMarketCap Pro API key, needed by `/api/prices/xaut`
-- `REDIS_URL` -- optional; when set, enables 60s caching for price quotes
+- `BLOCKSCOUT_API_KEY` -- optional; injected as `apikey` query param when proxying Blockscout
+- `BLOCKSCOUT_BASE_URL` -- optional; defaults to `https://celo.blockscout.com`
+- `REDIS_URL` -- optional; when set, enables caching for price quotes and Blockscout responses
 - `PORT` -- injected automatically by Railway
 
 ## Adding a new whitelisted contract

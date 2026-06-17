@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express'
 import pricesRouter from './routes/prices'
+import blockscoutRouter from './routes/blockscout'
 
 const ETHERSCAN_API_URL = 'https://api.etherscan.io/v2/api'
 const CELO_CHAIN_ID = 42220
@@ -82,6 +83,7 @@ app.get('/events', async (req: Request, res: Response) => {
 })
 
 app.use(pricesRouter)
+app.use(blockscoutRouter)
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'not found' })
