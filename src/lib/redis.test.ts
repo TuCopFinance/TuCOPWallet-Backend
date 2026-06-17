@@ -30,12 +30,21 @@ describe('getRedis', () => {
     client?.disconnect()
   })
 
-  it('uses IPv6 (family: 6) so Railway internal hostnames resolve', () => {
+  it('uses IPv6 (family: 6) for *.railway.internal hostnames', () => {
     process.env.REDIS_URL = 'redis://default:pw@redis.railway.internal:6379'
     const { getRedis } = require('./redis')
     const client = getRedis()
     expect(client).not.toBeNull()
     expect(client?.options.family).toBe(6)
+    client?.disconnect()
+  })
+
+  it('does NOT force IPv6 for non-Railway hostnames (e.g. public proxy, localhost)', () => {
+    process.env.REDIS_URL = 'redis://default:pw@turntable.proxy.rlwy.net:36515'
+    const { getRedis } = require('./redis')
+    const client = getRedis()
+    expect(client).not.toBeNull()
+    expect(client?.options.family).not.toBe(6)
     client?.disconnect()
   })
 })
