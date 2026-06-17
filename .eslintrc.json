@@ -12,5 +12,14 @@
   },
   "rules": {
     "@typescript-eslint/no-non-null-assertion": "off"
-  }
+  },
+  "overrides": [
+    {
+      "files": ["*.test.ts"],
+      "env": { "jest": true },
+      "rules": {
+        "@typescript-eslint/no-explicit-any": "off"
+      }
+    }
+  ]
 }
