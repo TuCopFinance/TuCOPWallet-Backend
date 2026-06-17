@@ -1,6 +1,6 @@
 # TuCOPWallet Backend
 
-Backend services for TuCopWallet. Currently hosts a single endpoint: an Etherscan V2 API proxy used by the mobile app to fetch event logs that the public Celo RPC (Forno) cannot reliably return.
+Backend services for TuCopWallet. Hosts proxy endpoints used by the mobile app so third-party API keys (Etherscan, CoinMarketCap, Blockscout) never ship in app bundles.
 
 ## Endpoints
 
@@ -11,6 +11,27 @@ Returns service status.
 ```json
 { "ok": true, "service": "tucopwallet-backend", "version": "0.1.0" }
 ```
+
+### `GET /api/prices/xaut`
+
+Proxies a XAUt0 price quote (in USD) from CoinMarketCap. Cached in Redis for 60 seconds when `REDIS_URL` is configured; serves direct otherwise.
+
+**Query params:**
+
+| Name | Required | Description |
+|------|----------|-------------|
+| `vs` | no | Quote currency. Only `usd` is supported. Defaults to `usd`. |
+
+**Success response:**
+
+```json
+{ "symbol": "XAUT", "vs": "usd", "priceUsd": 3421.5, "asOf": "2026-06-16T12:00:00.000Z" }
+```
+
+**Error responses:**
+
+- `400` `{ "error": "only vs=usd supported" }`
+- `502` `{ "error": "upstream price feed unavailable" }`
 
 ### `GET /events`
 
@@ -61,6 +82,8 @@ Hosted on Railway in the TuCop Wallet project, environment `production`. Auto-de
 Required Railway env vars:
 
 - `ETHERSCAN_API_KEY` -- Etherscan V2 unified API key (works across all supported chains)
+- `COINMARKETCAP_API_KEY` -- CoinMarketCap Pro API key, needed by `/api/prices/xaut`
+- `REDIS_URL` -- optional; when set, enables 60s caching for price quotes
 - `PORT` -- injected automatically by Railway
 
 ## Adding a new whitelisted contract
