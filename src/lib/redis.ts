@@ -6,7 +6,7 @@ export function getRedis(): Redis | null {
   if (client !== undefined) return client
 
   const url = process.env.REDIS_URL
-  if (!url) {
+  if (!url || url === 'disabled') {
     client = null
     return null
   }
@@ -14,6 +14,7 @@ export function getRedis(): Redis | null {
   client = new Redis(url, {
     lazyConnect: true,
     maxRetriesPerRequest: 1,
+    family: 6,
   })
   client.on('error', (err) => {
     console.warn('redis error:', err instanceof Error ? err.message : err)
