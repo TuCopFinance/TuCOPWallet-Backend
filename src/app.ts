@@ -4,6 +4,7 @@ import { fetchWithTimeout } from './lib/http'
 import { createLogger } from './lib/logger'
 import blockscoutRouter from './routes/blockscout'
 import pricesRouter from './routes/prices'
+import swapRouter from './routes/swap'
 
 const log = createLogger('app')
 const reqLog = createLogger('app:req')
@@ -107,6 +108,7 @@ app.get('/events', async (req: Request, res: Response) => {
 
 app.use(pricesRouter)
 app.use(blockscoutRouter)
+app.use(swapRouter)
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'not found' })
