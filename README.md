@@ -81,6 +81,60 @@ Query string parameters (e.g. `filter`, `block_number`) are forwarded to upstrea
 
 Validation: `:hash` must match `0x` + 64 hex; `:address` must match `0x` + 40 hex. Otherwise `400 { "error": "invalid ..." }`. Upstream failures return `502 { "error": "blockscout upstream unavailable" }`.
 
+### `GET /api/swap/quote`
+
+Drop-in replacement for Valora's `getSwapQuote` cloud function. Backend POSTs to Squid Router v2 with TuCop's `x-integrator-id` so swap volume attribution flows to TuCop. The response shape matches the wallet's `FetchQuoteResponse` (`src/swap/types.ts` in TuCopWallet) so the mobile-side change is a single URL flip.
+
+**Query params (strict allowlist; any other key returns `400 { "error": "unknown param: <name>" }`):**
+
+| Name | Required | Validation | Notes |
+|------|----------|------------|-------|
+| `buyToken` | yes | `0x` + 40 lowercase hex | destination token |
+| `buyIsNative` | yes | `'true'` or `'false'` | substitutes the EVM native sentinel upstream |
+| `buyNetworkId` | yes | matches `/^[a-z0-9-]+$/` | e.g. `celo-mainnet`, `ethereum-mainnet`, `arbitrum-one`, `op-mainnet`, `polygon-pos-mainnet`, `base-mainnet` |
+| `sellToken` | yes | `0x` + 40 lowercase hex | source token |
+| `sellIsNative` | yes | `'true'` or `'false'` | |
+| `sellNetworkId` | yes | same set as `buyNetworkId` | |
+| `sellAmount` | yes | decimal integer (smallest unit / wei) | |
+| `userAddress` | yes | `0x` + 40 lowercase hex | EOA used for `fromAddress` and `toAddress` upstream |
+| `slippagePercentage` | no | decimal in `[0, 100]` | defaults to `0.5` |
+
+**Success response (shape):**
+
+```json
+{
+  "unvalidatedSwapTransaction": {
+    "swapType": "same-chain",
+    "chainId": 42220,
+    "buyAmount": "998000",
+    "sellAmount": "1000000",
+    "buyTokenAddress": "0x...",
+    "sellTokenAddress": "0x...",
+    "price": "0.998",
+    "guaranteedPrice": "0.993",
+    "estimatedPriceImpact": "0.2",
+    "gas": "300000",
+    "estimatedGasUse": "200000",
+    "to": "0x...",
+    "value": "0",
+    "data": "0x...",
+    "from": "0x...",
+    "allowanceTarget": "0x..."
+  },
+  "details": { "swapProvider": "squid" }
+}
+```
+
+When `sellNetworkId !== buyNetworkId`, the `unvalidatedSwapTransaction` object additionally has `swapType: "cross-chain"` plus `estimatedDuration` (seconds), `maxCrossChainFee` and `estimatedCrossChainFee` (wei strings, sum of upstream `feeCosts`).
+
+**Error responses:**
+
+- `400` `{ "error": "invalid <field>" }` / `{ "error": "unknown param: <name>" }` / `{ "error": "unsupported sellNetworkId: <slug>" }`
+- `502` `{ "error": "squid upstream unavailable" }` (timeout or non-2xx from Squid; the upstream message is never echoed)
+- `503` `{ "error": "squid integrator id not configured" }` if `SQUID_INTEGRATOR_ID` is not set on the backend
+
+Cached in Redis for 30 s (quotes go stale fast). Cache key includes `userAddress` so we never serve another user's prepared transaction.
+
 ## Local development
 
 ```bash
@@ -107,6 +161,7 @@ Required Railway env vars:
 - `COINMARKETCAP_API_KEY` -- CoinMarketCap Pro API key, needed by `/api/prices/xaut`
 - `BLOCKSCOUT_API_KEY` -- optional; injected as `apikey` query param when proxying Blockscout
 - `BLOCKSCOUT_BASE_URL` -- optional; defaults to `https://celo.blockscout.com`
+- `SQUID_INTEGRATOR_ID` -- required for `/api/swap/quote`. Sent to Squid as the `x-integrator-id` header so revenue attribution lands on TuCop. Local value lives in Keychain (`acct=tucop-finance`, `svce=SQUID_INTEGRATOR_ID`).
 - `REDIS_URL` -- optional; when set, enables caching for price quotes and Blockscout responses. Set to the literal string `disabled` to keep the var present but skip Redis entirely. On Railway use `${{Redis.REDIS_PUBLIC_URL}}` (public proxy) or `${{Redis.REDIS_URL}}` (private internal); the client only forces IPv6 lookup for hostnames containing `.railway.internal`, so public proxy URLs keep working.
 - `PORT` -- injected automatically by Railway
 
