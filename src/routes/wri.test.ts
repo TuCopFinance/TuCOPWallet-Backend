@@ -219,17 +219,40 @@ describe('POST /api/wri/delegate-relay', () => {
     expect(res.body.error).toMatch(/reverted/i)
   })
 
-  it('returns 502 if post-mining code does not show our delegation', async () => {
+  it('returns 502 if post-mining code does not show our delegation after retries', async () => {
     mockRecoverAuthorizationAddress.mockResolvedValueOnce(VALID_USER)
     mockGetTransactionCount.mockResolvedValueOnce(5)
     mockGetCode.mockResolvedValueOnce('0x')
     mockGetBalance.mockResolvedValueOnce(10n * 10n ** 18n)
     mockSendTransaction.mockResolvedValueOnce(SAMPLE_TX_HASH)
     mockWaitForReceipt.mockResolvedValueOnce({ status: 'success' })
-    mockGetCode.mockResolvedValueOnce('0x')
+    mockGetCode.mockResolvedValue('0x')
 
     const res = await request(app).post('/api/wri/delegate-relay').send(validBody())
     expect(res.status).toBe(502)
     expect(res.body.error).toMatch(/unverified/i)
+    expect(mockGetCode).toHaveBeenCalledTimes(5)
+  })
+
+  it('succeeds after post-mining state lag (retry resolves on 2nd attempt)', async () => {
+    mockRecoverAuthorizationAddress.mockResolvedValueOnce(VALID_USER)
+    mockGetTransactionCount.mockResolvedValueOnce(5)
+    mockGetCode
+      .mockResolvedValueOnce('0x')
+      .mockResolvedValueOnce('0x')
+      .mockResolvedValueOnce(BATCH_EXECUTOR_DELEGATION_CODE)
+    mockGetBalance.mockResolvedValueOnce(10n * 10n ** 18n)
+    mockSendTransaction.mockResolvedValueOnce(SAMPLE_TX_HASH)
+    mockWaitForReceipt.mockResolvedValueOnce({ status: 'success' })
+
+    const res = await request(app).post('/api/wri/delegate-relay').send(validBody())
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      status: 'delegated',
+      txHash: SAMPLE_TX_HASH,
+      userAddress: VALID_USER,
+      delegatedTo: BATCH_EXECUTOR,
+    })
+    expect(mockGetCode).toHaveBeenCalledTimes(3)
   })
 })
