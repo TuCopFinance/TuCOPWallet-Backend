@@ -178,13 +178,34 @@ describe('GET /api/swap/quote', () => {
     })
   })
 
-  it('returns 502 when upstream times out / fails', async () => {
+  it('returns 502 when upstream returns 5xx (not rate-limit)', async () => {
     fetchSpy.mockResolvedValueOnce(new Response('', { status: 500 }))
 
     const res = await request(app).get('/api/swap/quote?' + paramsTo())
 
     expect(res.status).toBe(502)
     expect(res.body.error).toBe('squid upstream unavailable')
+  })
+
+  it('passes through 429 + Retry-After header when Squid rate-limits us', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response('', { status: 429, headers: { 'retry-after': '7' } }),
+    )
+
+    const res = await request(app).get('/api/swap/quote?' + paramsTo())
+
+    expect(res.status).toBe(429)
+    expect(res.body.error).toMatch(/rate limited/i)
+    expect(res.headers['retry-after']).toBe('7')
+  })
+
+  it('returns 429 without Retry-After when upstream did not send one', async () => {
+    fetchSpy.mockResolvedValueOnce(new Response('', { status: 429 }))
+
+    const res = await request(app).get('/api/swap/quote?' + paramsTo())
+
+    expect(res.status).toBe(429)
+    expect(res.headers['retry-after']).toBeUndefined()
   })
 
   it('does not echo upstream error body to the client', async () => {

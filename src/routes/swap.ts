@@ -3,7 +3,7 @@ import { createLogger } from '../lib/logger'
 import { NATIVE_TOKEN_SENTINEL, networkIdToChainId } from '../lib/networks'
 import { buildCacheKey } from '../lib/query'
 import { getRedis } from '../lib/redis'
-import { squidRoute, SquidRouteResponse } from '../lib/squid'
+import { squidRoute, SquidRouteResponse, SquidUpstreamError } from '../lib/squid'
 
 const router = Router()
 const log = createLogger('routes:swap')
@@ -215,6 +215,10 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
     res.json(payload)
   } catch (err) {
     log.warn('squid upstream error:', err instanceof Error ? err.message : err)
+    if (err instanceof SquidUpstreamError && err.status === 429) {
+      if (err.retryAfter) res.setHeader('Retry-After', err.retryAfter)
+      return res.status(429).json({ error: 'rate limited by squid, retry' })
+    }
     res.status(502).json({ error: 'squid upstream unavailable' })
   }
 })
