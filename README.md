@@ -130,7 +130,8 @@ When `sellNetworkId !== buyNetworkId`, the `unvalidatedSwapTransaction` object a
 **Error responses:**
 
 - `400` `{ "error": "invalid <field>" }` / `{ "error": "unknown param: <name>" }` / `{ "error": "unsupported sellNetworkId: <slug>" }`
-- `502` `{ "error": "squid upstream unavailable" }` (timeout or non-2xx from Squid; the upstream message is never echoed)
+- `429` `{ "error": "rate limited by squid, retry" }` (pass-through when Squid throttles us; the upstream `Retry-After` header is forwarded so the wallet's retry hook can back off correctly)
+- `502` `{ "error": "squid upstream unavailable" }` (timeout or non-429 non-2xx from Squid; the upstream message is never echoed)
 - `503` `{ "error": "squid integrator id not configured" }` if `SQUID_INTEGRATOR_ID` is not set on the backend
 
 Cached in Redis for 30 s (quotes go stale fast). Cache key includes `userAddress` so we never serve another user's prepared transaction.
