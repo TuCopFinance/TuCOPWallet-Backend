@@ -136,6 +136,76 @@ When `sellNetworkId !== buyNetworkId`, the `unvalidatedSwapTransaction` object a
 
 Cached in Redis for 30 s (quotes go stale fast). Cache key includes `userAddress` so we never serve another user's prepared transaction.
 
+### `POST /api/wri/delegate-relay`
+
+One-time, sponsored EIP-7702 delegation setup for TuCop's Wallet Relay Infrastructure (WRI). Most TuCop users hold only stables (USDT, USDC, USDm) and no CELO; this endpoint pays the gas for the single type 0x04 transaction that delegates a user's EOA to TuCop's hardened BatchExecutor at `0xaE6a87E88b55644Eda54C3AA55B11944eE5E1DFe`. After delegation, every Dolares to Pesos conversion is a normal CIP-64 (type 0x7b) transaction paying gas in stables; CIP-64 and 0x04 are mutually exclusive at the Celo protocol level, hence this dedicated setup tx.
+
+**Request body** (`application/json`):
+
+```json
+{
+  "userAddress": "0x...",
+  "signedAuthorization": {
+    "chainId": "0xa4ec",
+    "address": "0xaE6a87E88b55644Eda54C3AA55B11944eE5E1DFe",
+    "nonce": "0x...",
+    "yParity": "0x0",
+    "r": "0x...",
+    "s": "0x..."
+  }
+}
+```
+
+`signedAuthorization` is the JSON shape viem's `walletClient.signAuthorization(...)` emits.
+
+**Security invariants (any failure -> 400, no tx submitted):**
+
+- `userAddress` must match `0x` + 40 hex.
+- `signedAuthorization.chainId` must be `42220` (Celo mainnet only).
+- `signedAuthorization.address` must equal `0xaE6a87E88b55644Eda54C3AA55B11944eE5E1DFe` (case-insensitive). The relay refuses to delegate to any other contract, period. Hardcoded.
+- `signedAuthorization.nonce` must equal the on-chain nonce of `userAddress` plus or minus 1.
+- The signature must recover to `userAddress` via `recoverAuthorizationAddress`.
+
+**Operational invariants:**
+
+- If the user's EOA code already starts with `0xef0100` followed by the BatchExecutor address, the endpoint short-circuits with `{ "status": "already_delegated" }` and submits no tx.
+- Per-address rate limit: 1 successful relay per 5 minutes per `userAddress` (Redis-backed when `REDIS_URL` is configured, in-process Map otherwise; without Redis the limit is per-instance only).
+- Relay hot-wallet health check: if balance is below `WRI_RELAY_MIN_CELO_BALANCE`, returns 503 and logs an alert.
+- The global 120 req/min/IP rate limit from `app.ts` still applies on top.
+
+**Success response (delegation submitted and confirmed):**
+
+```json
+{
+  "status": "delegated",
+  "txHash": "0x...",
+  "userAddress": "0x...",
+  "delegatedTo": "0xaE6a87E88b55644Eda54C3AA55B11944eE5E1DFe"
+}
+```
+
+**Error responses:**
+
+- `400` `{ "error": "invalid userAddress" }` / `invalid signedAuthorization` / `invalid chainId` / `invalid delegation target` / `invalid signature` / `nonce mismatch`
+- `429` `{ "error": "address rate limited" }` with `Retry-After` header
+- `502` `{ "error": "rpc unavailable" }` / `relay tx submission failed` / `relay tx reverted` / `relay tx unconfirmed` / `relay tx unverified`
+- `503` `{ "error": "relay temporarily unavailable" }` (relay private key missing/invalid or balance below threshold)
+
+**Out of scope:** this endpoint ONLY handles the one-time delegation setup. The actual `execute(calls)` payload that uses the delegated EOA must be sent by the wallet as a regular CIP-64 transaction; the backend does not relay batch payloads.
+
+#### Provisioning the relay hot wallet (one-time, before enabling on Railway)
+
+1. Generate a throwaway key. Example with foundry:
+
+   ```bash
+   cast wallet new
+   # Address: 0x...
+   # Private key: 0x...
+   ```
+
+2. Fund the address with around 10 CELO (this covers thousands of delegation setups). Top up when balance approaches `WRI_RELAY_MIN_CELO_BALANCE`.
+3. On Railway, set `WRI_RELAY_PK` to the private key (with the `0x` prefix). The backend logs the derived address at startup so you can confirm the right key was loaded.
+
 ## Local development
 
 ```bash
@@ -164,6 +234,9 @@ Required Railway env vars:
 - `BLOCKSCOUT_BASE_URL` -- optional; defaults to `https://celo.blockscout.com`
 - `SQUID_INTEGRATOR_ID` -- required for `/api/swap/quote`. Sent to Squid as the `x-integrator-id` header so revenue attribution lands on TuCop. Local value lives in Keychain (`acct=tucop-finance`, `svce=SQUID_INTEGRATOR_ID`).
 - `REDIS_URL` -- optional; when set, enables caching for price quotes and Blockscout responses. Set to the literal string `disabled` to keep the var present but skip Redis entirely. On Railway use `${{Redis.REDIS_PUBLIC_URL}}` (public proxy) or `${{Redis.REDIS_URL}}` (private internal); the client only forces IPv6 lookup for hostnames containing `.railway.internal`, so public proxy URLs keep working.
+- `WRI_RELAY_PK` -- required for `/api/wri/delegate-relay`. 32-byte hex private key (with `0x` prefix) of the relay hot wallet that pays gas for one-time EIP-7702 delegation setup. Provision via `cast wallet new` and fund with about 10 CELO. The backend logs the derived address at startup so the correct key is easy to confirm.
+- `WRI_RELAY_MIN_CELO_BALANCE` -- optional; minimum relay balance in wei. Default `500000000000000000` (0.5 CELO). Below this the endpoint returns 503.
+- `WRI_RELAY_MAX_GAS` -- optional; gas cap (uint256) the relay will commit on a single delegation tx. Default `1000000`.
 - `PORT` -- injected automatically by Railway
 
 ## Adding a new whitelisted contract
