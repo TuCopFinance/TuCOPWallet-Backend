@@ -16,6 +16,8 @@ const BATCH_EXECUTOR_ADDRESS_LOWER = BATCH_EXECUTOR_ADDRESS.toLowerCase()
 const DEFAULT_MIN_BALANCE_WEI = 500000000000000000n
 const DEFAULT_MAX_GAS = 1000000n
 const RECEIPT_TIMEOUT_MS = 30_000
+const POST_MINING_MAX_ATTEMPTS = 4
+const POST_MINING_RETRY_DELAY_MS = 500
 
 const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/
 const HEX_RE = /^0x[a-fA-F0-9]*$/
@@ -248,17 +250,26 @@ router.post('/api/wri/delegate-relay', async (req: Request, res: Response) => {
     return res.status(502).json({ error: 'relay tx unconfirmed' })
   }
 
-  let postCode: Hex
-  try {
-    const fetched = await relay.publicClient.getCode({ address: userAddress })
-    postCode = (fetched ?? '0x') as Hex
-  } catch (err) {
-    log.warn('post-mining getCode failed:', err instanceof Error ? err.message : err)
-    return res.status(502).json({ error: 'relay tx unverified' })
+  // Forno occasionally lags state propagation behind receipt availability; the
+  // receipt is already SUCCESS at this point, so a short retry loop absorbs
+  // the gap without changing semantics.
+  let postCode: Hex = '0x' as Hex
+  for (let attempt = 0; attempt < POST_MINING_MAX_ATTEMPTS; attempt++) {
+    try {
+      const fetched = await relay.publicClient.getCode({ address: userAddress })
+      postCode = (fetched ?? '0x') as Hex
+    } catch (err) {
+      log.warn('post-mining getCode failed:', err instanceof Error ? err.message : err)
+      return res.status(502).json({ error: 'relay tx unverified' })
+    }
+    if (isDelegatedToBatchExecutor(postCode)) break
+    if (attempt < POST_MINING_MAX_ATTEMPTS - 1) {
+      await new Promise((resolve) => setTimeout(resolve, POST_MINING_RETRY_DELAY_MS))
+    }
   }
   if (!isDelegatedToBatchExecutor(postCode)) {
     log.error(
-      `post-mining delegation not detected: hash=${txHash} userAddress=${userAddress} code=${postCode}`,
+      `post-mining delegation not detected after ${POST_MINING_MAX_ATTEMPTS} attempts: hash=${txHash} userAddress=${userAddress} code=${postCode}`,
     )
     return res.status(502).json({ error: 'relay tx unverified' })
   }
