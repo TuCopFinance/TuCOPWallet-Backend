@@ -2,6 +2,16 @@ import { fetchWithTimeout } from './http'
 
 const SQUID_ROUTE_URL = 'https://apiplus.squidrouter.com/v2/route'
 
+export class SquidUpstreamError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly retryAfter?: string,
+  ) {
+    super(`Squid upstream ${status}`)
+    this.name = 'SquidUpstreamError'
+  }
+}
+
 export interface SquidRouteRequest {
   fromAddress: string
   fromChain: string
@@ -60,7 +70,8 @@ export async function squidRoute(
     body: JSON.stringify(body),
   })
   if (!res.ok) {
-    throw new Error(`Squid error: ${res.status}`)
+    const retryAfter = res.headers.get('retry-after') ?? undefined
+    throw new SquidUpstreamError(res.status, retryAfter)
   }
   return (await res.json()) as SquidRouteResponse
 }
