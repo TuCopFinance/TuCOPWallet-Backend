@@ -17,7 +17,3 @@ const NETWORK_ID_TO_CHAIN_ID: Record<string, number> = {
 export function networkIdToChainId(networkId: string): number | undefined {
   return NETWORK_ID_TO_CHAIN_ID[networkId]
 }
-
-export function isSupportedNetworkId(networkId: string): boolean {
-  return networkId in NETWORK_ID_TO_CHAIN_ID
-}

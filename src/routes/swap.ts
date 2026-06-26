@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express'
+import { HEX_ADDRESS_LOWER_RE } from '../lib/hex'
 import { createLogger } from '../lib/logger'
 import { NATIVE_TOKEN_SENTINEL, networkIdToChainId } from '../lib/networks'
 import { buildCacheKey } from '../lib/query'
@@ -23,7 +24,6 @@ const ALLOWED_PARAMS = new Set([
   'slippagePercentage',
 ])
 
-const ADDRESS_RE = /^0x[a-f0-9]{40}$/
 const NETWORK_ID_RE = /^[a-z0-9-]+$/
 const DECIMAL_RE = /^\d+(\.\d+)?$/
 const INT_DECIMAL_RE = /^\d+$/
@@ -64,19 +64,19 @@ function validate(req: Request): { ok: true; input: ValidatedInput } | { ok: fal
   const userAddress = get('userAddress')
   const slippagePercentage = get('slippagePercentage') ?? DEFAULT_SLIPPAGE
 
-  if (!buyToken || !ADDRESS_RE.test(buyToken)) return { ok: false, error: 'invalid buyToken' }
+  if (!buyToken || !HEX_ADDRESS_LOWER_RE.test(buyToken)) return { ok: false, error: 'invalid buyToken' }
   if (buyIsNativeRaw !== 'true' && buyIsNativeRaw !== 'false')
     return { ok: false, error: 'invalid buyIsNative' }
   if (!buyNetworkId || !NETWORK_ID_RE.test(buyNetworkId))
     return { ok: false, error: 'invalid buyNetworkId' }
-  if (!sellToken || !ADDRESS_RE.test(sellToken)) return { ok: false, error: 'invalid sellToken' }
+  if (!sellToken || !HEX_ADDRESS_LOWER_RE.test(sellToken)) return { ok: false, error: 'invalid sellToken' }
   if (sellIsNativeRaw !== 'true' && sellIsNativeRaw !== 'false')
     return { ok: false, error: 'invalid sellIsNative' }
   if (!sellNetworkId || !NETWORK_ID_RE.test(sellNetworkId))
     return { ok: false, error: 'invalid sellNetworkId' }
   if (!sellAmount || !INT_DECIMAL_RE.test(sellAmount))
     return { ok: false, error: 'invalid sellAmount' }
-  if (!userAddress || !ADDRESS_RE.test(userAddress))
+  if (!userAddress || !HEX_ADDRESS_LOWER_RE.test(userAddress))
     return { ok: false, error: 'invalid userAddress' }
   if (!DECIMAL_RE.test(slippagePercentage))
     return { ok: false, error: 'invalid slippagePercentage' }
@@ -134,7 +134,6 @@ function shapeResponse(upstream: SquidRouteResponse, input: ValidatedInput): unk
     sellTokenAddress: input.sellToken,
     price,
     guaranteedPrice,
-    appFeePercentageIncludedInPrice: undefined,
     estimatedPriceImpact: est.aggregatePriceImpact ?? null,
     gas: tx.gasLimit ?? '0',
     estimatedGasUse: est.gasCosts?.[0]?.limit ?? null,

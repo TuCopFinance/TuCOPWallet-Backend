@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import type { Hex } from 'viem'
 import { recoverAuthorizationAddress } from 'viem/utils'
+import { HEX_ADDRESS_RE } from '../lib/hex'
 import { createLogger } from '../lib/logger'
 import { getRedis } from '../lib/redis'
 import { getRelayClients } from '../lib/wriRelay'
@@ -19,7 +20,8 @@ const RECEIPT_TIMEOUT_MS = 30_000
 const POST_MINING_MAX_ATTEMPTS = 4
 const POST_MINING_RETRY_DELAY_MS = 500
 
-const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/
+// Variable-length hex string (signature components r/s); not a single fixed
+// width like the address/topic helpers in lib/hex.ts.
 const HEX_RE = /^0x[a-fA-F0-9]*$/
 const Y_PARITY_RE = /^0x[01]$/
 
@@ -66,7 +68,7 @@ function parseAuthorization(raw: unknown): ParsedAuth | null {
   if (chainIdBn > BigInt(Number.MAX_SAFE_INTEGER)) return null
   const chainId = Number(chainIdBn)
 
-  if (typeof obj.address !== 'string' || !ADDRESS_RE.test(obj.address)) return null
+  if (typeof obj.address !== 'string' || !HEX_ADDRESS_RE.test(obj.address)) return null
   const address = obj.address as Hex
 
   const nonceBn = parseHexBigInt(obj.nonce)
@@ -100,7 +102,7 @@ function isDelegatedToBatchExecutor(code: Hex | undefined): boolean {
 router.post('/api/wri/delegate-relay', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as RequestBody
 
-  if (typeof body.userAddress !== 'string' || !ADDRESS_RE.test(body.userAddress)) {
+  if (typeof body.userAddress !== 'string' || !HEX_ADDRESS_RE.test(body.userAddress)) {
     return res.status(400).json({ error: 'invalid userAddress' })
   }
   const userAddress = body.userAddress as Hex

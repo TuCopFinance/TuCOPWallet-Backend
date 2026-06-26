@@ -50,16 +50,6 @@ export interface IndexerRpcClient {
   }>
 }
 
-let stopFlag = false
-
-export function _resetIndexerStopFlagForTests(): void {
-  stopFlag = false
-}
-
-export function stopIndexer(): void {
-  stopFlag = true
-}
-
 function buildDefaultClient() {
   return createPublicClient({
     chain: celo,
@@ -304,7 +294,9 @@ export async function startIndexer(
   let watched = await loadWatchedAddresses(db)
   let watchedLoadedAt = Date.now()
 
-  while (!stopFlag) {
+  // No graceful stop wired today; server.ts dies on SIGTERM and Node tears
+  // the loop down with the process. Add a stop hook here if/when needed.
+  for (;;) {
     try {
       if (Date.now() - watchedLoadedAt > 60_000) {
         watched = await loadWatchedAddresses(db)

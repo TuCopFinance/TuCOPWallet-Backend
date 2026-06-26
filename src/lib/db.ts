@@ -25,18 +25,6 @@ export function getDb(): Pool | null {
   return pool
 }
 
-export async function pingDb(): Promise<boolean> {
-  const db = getDb()
-  if (!db) return false
-  try {
-    const r = await db.query('SELECT 1 AS ok')
-    return r.rows[0]?.ok === 1
-  } catch (err) {
-    log.warn('ping failed:', err instanceof Error ? err.message : err)
-    return false
-  }
-}
-
 export function _resetDbForTests(): void {
   if (pool) {
     pool.end().catch(() => {})
