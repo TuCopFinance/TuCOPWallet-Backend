@@ -17,10 +17,17 @@ export const app = express()
 // spoofing via attacker-supplied X-Forwarded-For headers.
 app.set('trust proxy', 1)
 
+// 300 req/min/IP is the global ceiling across every endpoint. Sized for the
+// observed worst case: a user firing ~10 swaps in 2-3 minutes triggers
+// quote-refresh polling + receipt polling + feed/balance refresh, which
+// realistically tops out around ~150-200 req/min for an active session.
+// 300 leaves comfortable headroom while still blocking sustained bot abuse
+// (5 req/s sustained for a minute is non-human). Per-endpoint tiering is on
+// the roadmap once we have production traffic data; see ROADMAP.md.
 app.use(
   rateLimit({
     windowMs: 60_000,
-    limit: 120,
+    limit: 300,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     message: { error: 'rate limit exceeded' },
