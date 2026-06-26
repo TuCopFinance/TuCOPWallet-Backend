@@ -1,5 +1,7 @@
 import { app } from './app'
+import { runMigrations } from './db/migrate'
 import { createLogger } from './lib/logger'
+import { startIndexer } from './transactions-indexer/worker'
 
 const log = createLogger('server')
 const PORT = Number(process.env.PORT) || 8080
@@ -17,6 +19,30 @@ if (blockscoutBaseUrl && !blockscoutBaseUrl.startsWith('https://')) {
   process.exit(1)
 }
 
-app.listen(PORT, () => {
-  log.info(`tucopwallet-backend listening on :${PORT}`)
-})
+async function boot(): Promise<void> {
+  if (process.env.DATABASE_URL && process.env.DATABASE_URL !== 'disabled') {
+    try {
+      const result = await runMigrations()
+      if (result.applied.length > 0) {
+        log.info(`migrations applied: ${result.applied.join(', ')}`)
+      }
+    } catch (err) {
+      log.error(
+        `FATAL: migration run failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+      process.exit(1)
+    }
+  }
+
+  app.listen(PORT, () => {
+    log.info(`tucopwallet-backend listening on :${PORT}`)
+  })
+
+  if (process.env.INDEXER_ENABLED === 'true') {
+    startIndexer().catch((err) => {
+      log.error(`indexer crashed: ${err instanceof Error ? err.message : String(err)}`)
+    })
+  }
+}
+
+void boot()
