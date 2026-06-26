@@ -141,7 +141,33 @@ describe('GET /api/swap/quote', () => {
       toChain: '42220',
       toToken: USDT,
       slippage: 0.5,
+      quoteOnly: false,
     })
+  })
+
+  it('forwards quoteOnly=true to upstream (planning phase, no per-wallet bucket charge)', async () => {
+    fetchSpy.mockResolvedValueOnce(squidResponse())
+
+    await request(app).get('/api/swap/quote?' + paramsTo({ quoteOnly: 'true' }))
+
+    const body = JSON.parse(fetchSpy.mock.calls[0]?.[1]?.body as string)
+    expect(body.quoteOnly).toBe(true)
+  })
+
+  it('defaults quoteOnly to false when omitted (commit phase)', async () => {
+    fetchSpy.mockResolvedValueOnce(squidResponse())
+
+    await request(app).get('/api/swap/quote?' + paramsTo())
+
+    const body = JSON.parse(fetchSpy.mock.calls[0]?.[1]?.body as string)
+    expect(body.quoteOnly).toBe(false)
+  })
+
+  it('rejects invalid quoteOnly', async () => {
+    const res = await request(app).get('/api/swap/quote?' + paramsTo({ quoteOnly: 'maybe' }))
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/quoteOnly/)
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 
   it('substitutes the native-token sentinel when sellIsNative or buyIsNative is true', async () => {

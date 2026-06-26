@@ -98,6 +98,7 @@ Drop-in replacement for Valora's `getSwapQuote` cloud function. Backend POSTs to
 | `sellAmount` | yes | decimal integer (smallest unit / wei) | |
 | `userAddress` | yes | `0x` + 40 lowercase hex | EOA used for `fromAddress` and `toAddress` upstream |
 | `slippagePercentage` | no | decimal in `[0, 100]` | defaults to `0.5` |
+| `quoteOnly` | no | `'true'` or `'false'` | defaults to `'false'`. Set to `'true'` for planning quotes (multi-step `dollarsSpend` flows that fan out 3-5 parallel quotes for the same user); Squid skips the `transactionRequest` build, and per their team this path does NOT charge the wallet-based 10 RPS bucket. Refetch with `quoteOnly=false` (or omit it) on commit, once the user picks a route — that single call IS the one that counts against the bucket. |
 
 **Success response (shape):**
 
@@ -130,7 +131,7 @@ When `sellNetworkId !== buyNetworkId`, the `unvalidatedSwapTransaction` object a
 **Error responses:**
 
 - `400` `{ "error": "invalid <field>" }` / `{ "error": "unknown param: <name>" }` / `{ "error": "unsupported sellNetworkId: <slug>" }`
-- `429` `{ "error": "rate limited by squid, retry" }` (pass-through when Squid throttles us; the upstream `Retry-After` header is forwarded so the wallet's retry hook can back off correctly)
+- `429` `{ "error": "rate limited by squid, retry" }` (pass-through when Squid throttles us; the upstream `Retry-After` header is forwarded). Squid throttles per-wallet at 10 RPS, so the safe pattern for parallel planning quotes is `quoteOnly=true` on the planner and `quoteOnly=false` only on commit.
 - `502` `{ "error": "squid upstream unavailable" }` (timeout or non-429 non-2xx from Squid; the upstream message is never echoed)
 - `503` `{ "error": "squid integrator id not configured" }` if `SQUID_INTEGRATOR_ID` is not set on the backend
 
