@@ -6,6 +6,7 @@ import blockscoutRouter from './routes/blockscout'
 import pricesRouter from './routes/prices'
 import swapRouter from './routes/swap'
 import wriRouter from './routes/wri'
+import transactionsRouter from './transactions-indexer/routes'
 
 const log = createLogger('app')
 const reqLog = createLogger('app:req')
@@ -113,6 +114,7 @@ app.use(pricesRouter)
 app.use(blockscoutRouter)
 app.use(swapRouter)
 app.use(wriRouter)
+app.use(transactionsRouter)
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'not found' })
