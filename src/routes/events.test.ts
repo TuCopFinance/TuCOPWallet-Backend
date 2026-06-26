@@ -1,7 +1,7 @@
 import request from 'supertest'
-import { app } from './app'
+import { app } from '../app'
 
-jest.mock('./lib/redis', () => ({ getRedis: () => null }))
+jest.mock('../lib/redis', () => ({ getRedis: () => null }))
 
 const WHITELISTED = '0x947c6db1569edc9fd37b017b791ca0f008ab4946'
 const NOT_WHITELISTED = '0x1111111111111111111111111111111111111111'

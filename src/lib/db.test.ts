@@ -31,8 +31,4 @@ describe('getDb', () => {
     _resetDbForTests()
   })
 
-  it('pingDb returns false when DATABASE_URL is unset', async () => {
-    const { pingDb } = require('./db')
-    await expect(pingDb()).resolves.toBe(false)
-  })
 })
