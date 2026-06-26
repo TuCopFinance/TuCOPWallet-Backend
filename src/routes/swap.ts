@@ -22,6 +22,7 @@ const ALLOWED_PARAMS = new Set([
   'sellAmount',
   'userAddress',
   'slippagePercentage',
+  'quoteOnly',
 ])
 
 const NETWORK_ID_RE = /^[a-z0-9-]+$/
@@ -38,6 +39,7 @@ interface ValidatedInput {
   sellAmount: string
   userAddress: string
   slippage: number
+  quoteOnly: boolean
   fromChainId: number
   toChainId: number
 }
@@ -63,6 +65,7 @@ function validate(req: Request): { ok: true; input: ValidatedInput } | { ok: fal
   const sellAmount = get('sellAmount')
   const userAddress = get('userAddress')
   const slippagePercentage = get('slippagePercentage') ?? DEFAULT_SLIPPAGE
+  const quoteOnlyRaw = get('quoteOnly') ?? 'false'
 
   if (!buyToken || !HEX_ADDRESS_LOWER_RE.test(buyToken)) return { ok: false, error: 'invalid buyToken' }
   if (buyIsNativeRaw !== 'true' && buyIsNativeRaw !== 'false')
@@ -85,6 +88,9 @@ function validate(req: Request): { ok: true; input: ValidatedInput } | { ok: fal
   if (!Number.isFinite(slippage) || slippage < 0 || slippage > 100)
     return { ok: false, error: 'invalid slippagePercentage' }
 
+  if (quoteOnlyRaw !== 'true' && quoteOnlyRaw !== 'false')
+    return { ok: false, error: 'invalid quoteOnly' }
+
   const fromChainId = networkIdToChainId(sellNetworkId)
   const toChainId = networkIdToChainId(buyNetworkId)
   if (fromChainId === undefined) return { ok: false, error: `unsupported sellNetworkId: ${sellNetworkId}` }
@@ -102,6 +108,7 @@ function validate(req: Request): { ok: true; input: ValidatedInput } | { ok: fal
       sellAmount,
       userAddress,
       slippage,
+      quoteOnly: quoteOnlyRaw === 'true',
       fromChainId,
       toChainId,
     },
@@ -198,7 +205,7 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
         toToken,
         toAddress: input.userAddress,
         slippage: input.slippage,
-        quoteOnly: false,
+        quoteOnly: input.quoteOnly,
       },
       integratorId,
     )
