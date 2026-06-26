@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { getDb } from '../lib/db'
+import { HEX_ADDRESS_RE } from '../lib/hex'
 import { createLogger } from '../lib/logger'
 import { classify } from './classifier'
 import type {
@@ -14,7 +15,6 @@ import type {
 const router = Router()
 const log = createLogger('routes:transactions')
 
-const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/
 const DEFAULT_NETWORK_ID: NetworkId = 'celo-mainnet'
 const DEFAULT_PAGE_SIZE = 20
 const MAX_PAGE_SIZE = 100
@@ -80,7 +80,7 @@ function rowToClassifierLog(row: RawLogRow): ClassifierLog {
 
 router.post('/api/transactions/watch', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as { address?: unknown }
-  if (typeof body.address !== 'string' || !ADDRESS_RE.test(body.address)) {
+  if (typeof body.address !== 'string' || !HEX_ADDRESS_RE.test(body.address)) {
     return res.status(400).json({ error: 'invalid address' })
   }
   const address = body.address.toLowerCase()
@@ -108,7 +108,7 @@ router.post('/api/transactions/watch', async (req: Request, res: Response) => {
 
 router.get('/api/transactions/feed', async (req: Request, res: Response) => {
   const addressRaw = typeof req.query.address === 'string' ? req.query.address : ''
-  if (!ADDRESS_RE.test(addressRaw)) {
+  if (!HEX_ADDRESS_RE.test(addressRaw)) {
     return res.status(400).json({ error: 'invalid address' })
   }
   const address = addressRaw.toLowerCase()

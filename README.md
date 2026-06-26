@@ -193,6 +193,45 @@ One-time, sponsored EIP-7702 delegation setup for TuCop's Wallet Relay Infrastru
 
 **Out of scope:** this endpoint ONLY handles the one-time delegation setup. The actual `execute(calls)` payload that uses the delegated EOA must be sent by the wallet as a regular CIP-64 transaction; the backend does not relay batch payloads.
 
+### Transaction feed (WRI Track C)
+
+Backend-owned replacement for Valora's `getWalletTransactions`. Indexes Celo blocks for opted-in addresses and classifies into the same `TokenTransaction` shape the wallet already consumes, with an extension for EIP-7702 atomic batches (which Valora omits).
+
+**Required env to enable on Railway:** `DATABASE_URL` (Postgres; migrations run on boot) and `INDEXER_ENABLED=true`. Without these the routes return `503` and the indexer loop is a no-op.
+
+#### `POST /api/transactions/watch`
+
+Registers an address for indexing. Called by the wallet at boot after `walletAddressInitialized`. Idempotent, safe to retry, the wallet should not block on its result.
+
+```json
+{ "address": "0x..." }
+```
+
+Response `200`: `{ "ok": true, "backfillStartedAt": null }`. The `backfillStartedAt` field will become an ISO8601 string when the backfill job (future PR) is implemented; today the indexer only catches the forward path.
+
+Errors: `400 invalid address`, `503 database not configured`, `500 database error`.
+
+#### `GET /api/transactions/feed`
+
+Byte-compatible replacement for Valora. Same response envelope (`{ transactions, pageInfo: { hasNextPage, endCursor } }`) and same `TokenTransaction` discriminated union (`SENT` / `RECEIVED` / `SWAP_TRANSACTION` / `APPROVAL`).
+
+**Query params:**
+
+| Name | Required | Notes |
+|------|----------|-------|
+| `address` | yes | `0x` + 40 hex (case-insensitive) |
+| `networkIds` | no | csv, defaults to `celo-mainnet` |
+| `includeTypes` | no | csv of `TokenTransaction` types, filter applied post-classification |
+| `localCurrencyCode` | no | reserved for future price conversion; today `localAmount` is always `null` |
+| `afterCursor` | no | opaque cursor returned by a previous page |
+| `pageSize` | no | 1 to 100, default 20 |
+
+**7702 atomic-batch extension:** when one tx atomically sells more than one token, the wallet receives a single `SwapTransaction` whose `fromTokenAmounts[]` lists every sold token; `outAmount` is the highest-value leg so existing single-leg renderers keep working unchanged. `inAmount` is the bought token. The selector keyed off is `0x3f707e6b` (`execute((address,uint256,bytes)[])` on the BatchExecutor at `0xaE6a87E88b55644Eda54C3AA55B11944eE5E1DFe`).
+
+**Token IDs:** ERC20s are emitted as `celo-mainnet:0x<contract>`. CELO native is emitted as its ERC20 contract id `celo-mainnet:0x471ece3750da237f93b8e339c536989b8978a438`, not a `:native` sentinel, so the wallet's token registry resolves it the same way as any other ERC20.
+
+Errors: `400 invalid address` / `invalid afterCursor`, `503 database not configured`, `500 database error`.
+
 #### Provisioning the relay hot wallet (one-time, before enabling on Railway)
 
 1. Generate a throwaway key. Example with foundry:
@@ -241,4 +280,4 @@ Required Railway env vars:
 
 ## Adding a new whitelisted contract
 
-Edit `ALLOWED_CONTRACTS` in `src/server.ts`. Use lowercase. Open a PR, merge to `main`, Railway redeploys.
+Edit `ALLOWED_CONTRACTS` in `src/routes/events.ts`. Use lowercase. Open a PR, merge to `main`, Railway redeploys.

@@ -1,14 +1,12 @@
 import { Router, Request, Response } from 'express'
 import { blockscoutGet } from '../lib/blockscout'
+import { HEX_ADDRESS_RE, HEX_BYTES32_RE } from '../lib/hex'
 import { createLogger } from '../lib/logger'
 import { buildCacheKey, stripReservedParams } from '../lib/query'
 import { getRedis } from '../lib/redis'
 
 const router = Router()
 const log = createLogger('routes:blockscout')
-
-const TX_HASH_RE = /^0x[a-fA-F0-9]{64}$/
-const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/
 
 const TTL_TX = 30
 const TTL_ADDR_TXS = 30
@@ -47,7 +45,7 @@ async function proxy(req: Request, res: Response, ttlSeconds: number): Promise<v
 
 router.get('/api/v2/transactions/:hash', async (req, res) => {
   const hash = req.params.hash ?? ''
-  if (!TX_HASH_RE.test(hash)) {
+  if (!HEX_BYTES32_RE.test(hash)) {
     return res.status(400).json({ error: 'invalid tx hash' })
   }
   await proxy(req, res, TTL_TX)
@@ -55,7 +53,7 @@ router.get('/api/v2/transactions/:hash', async (req, res) => {
 
 router.get('/api/v2/addresses/:address/transactions', async (req, res) => {
   const address = req.params.address ?? ''
-  if (!ADDRESS_RE.test(address)) {
+  if (!HEX_ADDRESS_RE.test(address)) {
     return res.status(400).json({ error: 'invalid address' })
   }
   await proxy(req, res, TTL_ADDR_TXS)
@@ -63,7 +61,7 @@ router.get('/api/v2/addresses/:address/transactions', async (req, res) => {
 
 router.get('/api/v2/addresses/:address/token-transfers', async (req, res) => {
   const address = req.params.address ?? ''
-  if (!ADDRESS_RE.test(address)) {
+  if (!HEX_ADDRESS_RE.test(address)) {
     return res.status(400).json({ error: 'invalid address' })
   }
   await proxy(req, res, TTL_ADDR_TOKEN_TRANSFERS)
