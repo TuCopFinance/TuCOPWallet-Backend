@@ -261,11 +261,11 @@ describe('chunkBlockRange', () => {
     ])
   })
 
-  it('splits a >10k range into 10k-block batches', () => {
-    expect(chunkBlockRange(1n, 25_000n)).toEqual([
-      { fromBlock: 1n, toBlock: 10_000n },
-      { fromBlock: 10_001n, toBlock: 20_000n },
-      { fromBlock: 20_001n, toBlock: 25_000n },
+  it('splits a range larger than MAX_BLOCKS_PER_BATCH into capped batches', () => {
+    expect(chunkBlockRange(1n, 12_000n)).toEqual([
+      { fromBlock: 1n, toBlock: 5_000n },
+      { fromBlock: 5_001n, toBlock: 10_000n },
+      { fromBlock: 10_001n, toBlock: 12_000n },
     ])
   })
 
@@ -286,17 +286,17 @@ describe('runTick', () => {
     ).toBe(0)
   })
 
-  it('chunks a >10k range into multiple getLogs batches and opens one tx per batch', async () => {
+  it('chunks a range larger than MAX_BLOCKS_PER_BATCH into multiple getLogs batches and opens one tx per batch', async () => {
     const { db, queries } = buildFakeDb({ lastScannedBlock: 1_234_567n })
     const { rpc, getLogsCalls } = buildRpc({
       latestBlock: 1_254_578n,
-      logsByBatch: [[], [], []],
+      logsByBatch: [[], [], [], [], []],
     })
     const result = await runTick({ db: db as never, rpc })
     expect(result.scanned).toBe(true)
     expect(result.fromBlock).toBe(1_234_568n)
     expect(result.toBlock).toBe(1_254_573n)
-    expect(getLogsCalls).toHaveLength(3)
+    expect(getLogsCalls).toHaveLength(5)
     for (const call of getLogsCalls) {
       expect((call.address as string).toLowerCase()).toBe(
         CONTRACT_ADDRESS.toLowerCase(),
@@ -308,8 +308,8 @@ describe('runTick', () => {
     const commits = queries.filter(
       (q) => q.sql.trim().toUpperCase() === 'COMMIT',
     ).length
-    expect(begins).toBe(3)
-    expect(commits).toBe(3)
+    expect(begins).toBe(5)
+    expect(commits).toBe(5)
   })
 
   it('throws when neeru_indexer_state row is missing', async () => {
