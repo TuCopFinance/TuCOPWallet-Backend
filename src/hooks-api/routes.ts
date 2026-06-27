@@ -12,6 +12,7 @@ import {
 import { APP_ID as ALLBRIDGE_APP_ID } from '../apps/allbridge/manifest'
 import { createNeeruRpc, type NeeruIndexerRpcClient } from '../neeru-indexer/rpc'
 import { hooksApiConfigured } from './config'
+import { mountNeeruDetailRoute } from './neeru/detail-route'
 import {
   getNeeruEarnPositions,
   getNeeruHeldPositions,
@@ -492,5 +493,7 @@ router.post('/hooks-api/triggerShortcut', async (req, res) => {
     return res.status(502).json({ error: 'shortcut build failed' })
   }
 })
+
+mountNeeruDetailRoute(router)
 
 export { router as hooksApiRouter }
