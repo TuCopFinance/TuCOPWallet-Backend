@@ -233,6 +233,22 @@ Byte-compatible replacement for Valora. Same response envelope (`{ transactions,
 
 Errors: `400 invalid address` / `invalid afterCursor`, `503 database not configured`, `500 database error`.
 
+#### Neeru indexer
+
+Postgres-backed indexer for a partner integration on Celo. Stores per-position state used by the Earn endpoints (forthcoming PRs).
+
+**Env to enable on Railway:**
+
+- `NEERU_INDEXER_ENABLED=true` to start the worker. No-op without it.
+- `NEERU_INDEXER_INTERVAL_MS` optional, defaults to `30000`.
+- Reuses `DATABASE_URL`.
+
+Tables created by the migration: `neeru_positions`, `neeru_indexer_state`.
+
+RPC fallback chain (`src/neeru-indexer/rpc.ts`): tries `https://forno.celo.org` first, then `https://rpc.ankr.com/celo`, then `https://celo.drpc.org`. After repeated Forno failures the indexer skips Forno for 5 minutes before retrying.
+
+Runs a daily reconciliation job at 03:00 UTC.
+
 #### Provisioning the relay hot wallet (one-time, before enabling on Railway)
 
 1. Generate a throwaway key. Example with foundry:
