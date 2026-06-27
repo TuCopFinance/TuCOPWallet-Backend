@@ -10,9 +10,15 @@ jest.mock('../lib/db', () => ({
 
 const allbridgeGetPositionsMock = jest.fn()
 const allbridgeGetShortcutsMock = jest.fn()
+const allbridgeTriggerDepositMock = jest.fn()
+const allbridgeTriggerWithdrawMock = jest.fn()
+const allbridgeTriggerClaimRewardsMock = jest.fn()
 jest.mock('../apps/allbridge', () => ({
   getPositions: (args: unknown) => allbridgeGetPositionsMock(args),
   getShortcuts: () => allbridgeGetShortcutsMock(),
+  triggerDeposit: (args: unknown) => allbridgeTriggerDepositMock(args),
+  triggerWithdraw: (args: unknown) => allbridgeTriggerWithdrawMock(args),
+  triggerClaimRewards: (args: unknown) => allbridgeTriggerClaimRewardsMock(args),
 }))
 
 const neeruGetEarnPositionsMock = jest.fn()
@@ -20,6 +26,16 @@ const neeruGetHeldPositionsMock = jest.fn()
 jest.mock('./neeru/positions', () => ({
   getNeeruEarnPositions: (args: unknown) => neeruGetEarnPositionsMock(args),
   getNeeruHeldPositions: (args: unknown) => neeruGetHeldPositionsMock(args),
+}))
+
+const neeruBuildDepositTxsMock = jest.fn()
+const neeruBuildWithdrawTxsMock = jest.fn()
+const neeruBuildWithdrawPrincipalOnlyTxsMock = jest.fn()
+jest.mock('./neeru/trigger', () => ({
+  buildDepositTxs: (args: unknown) => neeruBuildDepositTxsMock(args),
+  buildWithdrawTxs: (args: unknown) => neeruBuildWithdrawTxsMock(args),
+  buildWithdrawAmountOnlyTxs: (args: unknown) =>
+    neeruBuildWithdrawPrincipalOnlyTxsMock(args),
 }))
 
 // app must be imported AFTER the mocks above so the router pulls the
@@ -87,8 +103,14 @@ function buildNeeruApp(category: number, balance = '0') {
 beforeEach(() => {
   allbridgeGetPositionsMock.mockReset()
   allbridgeGetShortcutsMock.mockReset()
+  allbridgeTriggerDepositMock.mockReset()
+  allbridgeTriggerWithdrawMock.mockReset()
+  allbridgeTriggerClaimRewardsMock.mockReset()
   neeruGetEarnPositionsMock.mockReset()
   neeruGetHeldPositionsMock.mockReset()
+  neeruBuildDepositTxsMock.mockReset()
+  neeruBuildWithdrawTxsMock.mockReset()
+  neeruBuildWithdrawPrincipalOnlyTxsMock.mockReset()
   dbStub = { query: jest.fn(async () => ({ rows: [], rowCount: 0 })) }
 })
 
@@ -266,5 +288,241 @@ describe('GET /hooks-api/v2/getShortcuts', () => {
       '/hooks-api/v2/getShortcuts?networkIds=mars-mainnet',
     )
     expect(res.status).toBe(400)
+  })
+})
+
+describe('POST /hooks-api/triggerShortcut', () => {
+  const SAMPLE_TX = {
+    to: '0x000000000000000000000000000000000000beef',
+    data: '0xdeadbeef',
+    value: '0',
+    networkId: 'celo-mainnet',
+  }
+
+  it('400s when address is missing', async () => {
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        appId: 'neeru-vaults',
+        networkId: 'celo-mainnet',
+        shortcutId: 'deposit',
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/address/i)
+  })
+
+  it('400s on a malformed address', async () => {
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        address: 'not-an-address',
+        appId: 'neeru-vaults',
+        networkId: 'celo-mainnet',
+        shortcutId: 'deposit',
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/address/i)
+  })
+
+  it('400s on an unsupported networkId', async () => {
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        address: USER,
+        appId: 'neeru-vaults',
+        networkId: 'ethereum-mainnet',
+        shortcutId: 'deposit',
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/networkId/i)
+  })
+
+  it('400s on an unknown appId', async () => {
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        address: USER,
+        appId: 'bogus',
+        networkId: 'celo-mainnet',
+        shortcutId: 'deposit',
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/appId/i)
+  })
+
+  it('400s on an unknown shortcutId for Neeru', async () => {
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        address: USER,
+        appId: 'neeru-vaults',
+        networkId: 'celo-mainnet',
+        shortcutId: 'mystery',
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/shortcut/i)
+  })
+
+  it('happy-path Neeru deposit returns transactions + dataProps', async () => {
+    neeruBuildDepositTxsMock.mockResolvedValueOnce({
+      transactions: [SAMPLE_TX, SAMPLE_TX],
+    })
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        address: USER,
+        appId: 'neeru-vaults',
+        networkId: 'celo-mainnet',
+        shortcutId: 'deposit',
+        categoryId: 1,
+        tokens: [
+          {
+            tokenId: 'celo-mainnet:0x000000000000000000000000000000000000c0fe',
+            amount: '500',
+          },
+        ],
+      })
+    expect(res.status).toBe(200)
+    expect(res.body.data.transactions).toHaveLength(2)
+    expect(res.body.data.dataProps).toEqual({})
+    expect(neeruBuildDepositTxsMock).toHaveBeenCalledTimes(1)
+    const args = neeruBuildDepositTxsMock.mock.calls[0]?.[0]
+    expect(args?.address).toBe(USER)
+    expect(args?.categoryId).toBe(1)
+    expect(args?.amount).toBe('500')
+  })
+
+  it('happy-path Neeru withdraw returns the single closePosition tx', async () => {
+    neeruBuildWithdrawTxsMock.mockResolvedValueOnce({
+      transactions: [SAMPLE_TX],
+    })
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        address: USER,
+        appId: 'neeru-vaults',
+        networkId: 'celo-mainnet',
+        shortcutId: 'withdraw',
+        positionId: '42',
+      })
+    expect(res.status).toBe(200)
+    expect(res.body.data.transactions).toHaveLength(1)
+    expect(neeruBuildWithdrawTxsMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('happy-path Neeru withdraw-amount-only returns the single tx', async () => {
+    neeruBuildWithdrawPrincipalOnlyTxsMock.mockResolvedValueOnce({
+      transactions: [SAMPLE_TX],
+    })
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        address: USER,
+        appId: 'neeru-vaults',
+        networkId: 'celo-mainnet',
+        shortcutId: 'withdraw-amount-only',
+        positionId: '42',
+      })
+    expect(res.status).toBe(200)
+    expect(res.body.data.transactions).toHaveLength(1)
+    expect(neeruBuildWithdrawPrincipalOnlyTxsMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('maps documented Neeru error codes to 400 with the code in the body', async () => {
+    neeruBuildDepositTxsMock.mockRejectedValueOnce(
+      new Error('CATEGORY_CAP_EXCEEDED'),
+    )
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        address: USER,
+        appId: 'neeru-vaults',
+        networkId: 'celo-mainnet',
+        shortcutId: 'deposit',
+        categoryId: 1,
+        tokens: [{ tokenId: 'x', amount: '500' }],
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('CATEGORY_CAP_EXCEEDED')
+  })
+
+  it('maps a generic error to 502 with a non-leaking message', async () => {
+    neeruBuildDepositTxsMock.mockRejectedValueOnce(
+      new Error('rpc timeout: forno.celo.org'),
+    )
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        address: USER,
+        appId: 'neeru-vaults',
+        networkId: 'celo-mainnet',
+        shortcutId: 'deposit',
+        categoryId: 1,
+        tokens: [{ tokenId: 'x', amount: '500' }],
+      })
+    expect(res.status).toBe(502)
+    expect(res.body.error).toBe('shortcut build failed')
+  })
+
+  it('happy-path Allbridge deposit forwards to triggerDeposit', async () => {
+    allbridgeTriggerDepositMock.mockResolvedValueOnce({
+      transactions: [SAMPLE_TX],
+    })
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        address: USER,
+        appId: 'allbridge',
+        networkId: 'celo-mainnet',
+        shortcutId: 'deposit',
+        positionAddress: '0xfb2c7c10e731ebe96dabdf4a96d656bfe8e2b5af',
+        tokenAddress: '0xceba9300f2b948710d2653dd7b07f33a8b32118c',
+        tokenDecimals: 6,
+        tokens: [{ amount: '1.5' }],
+      })
+    expect(res.status).toBe(200)
+    expect(res.body.data.transactions).toHaveLength(1)
+    expect(allbridgeTriggerDepositMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('400s on an unknown shortcutId for Allbridge', async () => {
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        address: USER,
+        appId: 'allbridge',
+        networkId: 'celo-mainnet',
+        shortcutId: 'mystery',
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/shortcut/i)
+  })
+
+  it('400s when Neeru deposit body is missing the tokens array', async () => {
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        address: USER,
+        appId: 'neeru-vaults',
+        networkId: 'celo-mainnet',
+        shortcutId: 'deposit',
+        categoryId: 1,
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/tokens/i)
+  })
+
+  it('400s when Neeru withdraw body has a non-numeric positionId', async () => {
+    const res = await request(app)
+      .post('/hooks-api/triggerShortcut')
+      .send({
+        address: USER,
+        appId: 'neeru-vaults',
+        networkId: 'celo-mainnet',
+        shortcutId: 'withdraw',
+        positionId: 'abc',
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/positionId/i)
   })
 })
