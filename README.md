@@ -249,6 +249,51 @@ RPC fallback chain (`src/neeru-indexer/rpc.ts`): tries `https://forno.celo.org` 
 
 Runs a daily reconciliation job at 03:00 UTC.
 
+### Hooks API
+
+Drop-in replacement for Valora's `hooks-api`. Surfaces the catalogue of Earn products the wallet renders in the Earn tab. Two apps are wired today: the Allbridge native port (LP positions + reward claims) and the Neeru Vaults partner integration (4 categories keyed off the indexer above). The contract address and per-category metadata are read from env + on-chain at request time; no Neeru-specific constants are baked into source.
+
+Each endpoint returns `{ "data": [...] }` with a discriminated union of `app-token` / `contract-position` entries. Tranche metadata (TVL, daily rate, lock seconds, deposit-token decimals/symbol) is fetched via one Multicall3 call and cached in-process for 30 s; per-user balances are read from `neeru_positions` (Postgres) plus a per-batch Multicall3 for `previewAccruedInterest`. Allbridge calls are wrapped in try/catch and never fail the whole response - if upstream times out the wallet still sees the Neeru side.
+
+#### `GET /hooks-api/getPositions`
+
+Returns positions the user already holds (Allbridge LPs with non-zero balance + Neeru categories with non-zero amount-plus-accrued).
+
+| Param | Required | Notes |
+|------|----------|-------|
+| `address` | yes | `0x` + 40 hex (case-insensitive) |
+| `networkIds` | no | repeatable; defaults to `celo-mainnet` |
+
+Returns `{ "data": Position[] }`. 400 on invalid `address` or unsupported `networkIds`.
+
+#### `GET /hooks-api/getEarnPositions`
+
+Returns the full catalogue (4 Neeru categories + Allbridge LPs) regardless of holdings. When `address` is omitted, every entry has `balance: "0"`.
+
+| Param | Required | Notes |
+|------|----------|-------|
+| `address` | no | `0x` + 40 hex; when set, balances are populated |
+| `networkIds` | no | repeatable; restricts to listed networks |
+| `supportedAppIds` | no | repeatable; restricts to listed app ids (`allbridge`, `neeru-vaults`) |
+| `supportedPools` | no | repeatable; restricts to specific `positionId` values |
+
+#### `GET /hooks-api/v2/getShortcuts`
+
+Returns the merged shortcut catalogue (Allbridge `deposit` / `withdraw` / `claim-rewards` / `swap-deposit`, Neeru `deposit` / `withdraw` / `withdraw-amount-only`). `POST /hooks-api/v2/triggerShortcut` lands in a follow-up PR.
+
+| Param | Required | Notes |
+|------|----------|-------|
+| `address` | no | reserved; ignored for now |
+| `networkIds` | no | repeatable; restricts the shortcut list |
+
+#### Env vars
+
+- `NEERU_DEPOSIT_TOKEN_ADDRESS` (required for the Neeru catalogue; `0x` + 40 hex). The Neeru side of every endpoint is a no-op when unset: requests still succeed but return only the Allbridge slice.
+- `NEERU_CATEGORY_IMAGE_URL_TEMPLATE` (optional). Template with `{N}` placeholder, e.g. `https://cdn.tucop.xyz/neeru/category-{N}.png`. Empty string when unset.
+- `NEERU_MANAGE_URL` (optional). Surfaced in `displayProps.manageUrl` and `dataProps.manageUrl`. Empty string when unset.
+- `NEERU_TERMS_URL` (optional). Surfaced in `dataProps.termsUrl`. Empty string when unset.
+- `NEERU_CONTRACT_CREATED_AT_ISO` (optional). ISO 8601 string. Surfaced in `dataProps.contractCreatedAt`. `null` when unset.
+
 #### Provisioning the relay hot wallet (one-time, before enabling on Railway)
 
 1. Generate a throwaway key. Example with foundry:
