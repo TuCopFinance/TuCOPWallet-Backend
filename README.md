@@ -279,12 +279,82 @@ Returns the full catalogue (4 Neeru tranches + Allbridge LPs) regardless of hold
 
 #### `GET /hooks-api/v2/getShortcuts`
 
-Returns the merged shortcut catalogue (Allbridge `deposit` / `withdraw` / `claim-rewards` / `swap-deposit`, Neeru `deposit` / `withdraw` / `withdraw-principal-only`). `POST /hooks-api/v2/triggerShortcut` lands in a follow-up PR.
+Returns the merged shortcut catalogue (Allbridge `deposit` / `withdraw` / `claim-rewards` / `swap-deposit`, Neeru `deposit` / `withdraw` / `withdraw-principal-only`).
 
 | Param | Required | Notes |
 |------|----------|-------|
 | `address` | no | reserved; ignored for now |
 | `networkIds` | no | repeatable; restricts the shortcut list |
+
+#### `POST /hooks-api/triggerShortcut`
+
+Returns the ordered list of tx calldata the wallet signs and submits to execute one shortcut. The backend performs the preflight reads (allowance, pause flag, caps, ownership) so the wallet does not have to fan out and reason about per-shortcut invariants. No tx is submitted server-side.
+
+**Request body** (`application/json`):
+
+```json
+{
+  "address": "0x...",
+  "appId": "neeru-vaults",
+  "networkId": "celo-mainnet",
+  "shortcutId": "deposit",
+  "...": "protocol-specific args"
+}
+```
+
+Common fields:
+
+| Field | Validation |
+|------|------------|
+| `address` | `0x` + 40 hex (case-insensitive) |
+| `appId` | exact match: `allbridge` or `neeru-vaults` |
+| `networkId` | exact match: `celo-mainnet` |
+| `shortcutId` | string; valid set depends on `appId` |
+
+**Per-app body shape:**
+
+- `appId: "allbridge"`:
+  - `shortcutId: "deposit"`: `{ positionAddress, tokenAddress, tokenDecimals, tokens: [{ amount }] }`
+  - `shortcutId: "withdraw"`: `{ positionAddress, tokenDecimals, tokens: [{ amount }] }`
+  - `shortcutId: "claim-rewards"`: `{ positionAddress }`
+- `appId: "neeru-vaults"`:
+  - `shortcutId: "deposit"`: `{ trancheId, tokens: [{ tokenId, amount }] }`. `trancheId` is `0..3`, `amount` is a decimal integer in whole units (the backend reads the deposit-token decimals from chain and scales to wei).
+  - `shortcutId: "withdraw"`: `{ positionId }`. `positionId` is a decimal integer string.
+  - `shortcutId: "withdraw-principal-only"`: `{ positionId }`.
+
+**Success response:**
+
+```json
+{
+  "data": {
+    "transactions": [
+      { "to": "0x...", "data": "0x...", "value": "0", "networkId": "celo-mainnet" }
+    ],
+    "dataProps": {}
+  }
+}
+```
+
+Each transaction is JSON-safe: `value` is a string (`"0"` for non-payable calls), `data` is the encoded calldata, `to` is lowercase 40-hex. `dataProps` is reserved for upstream shapes that need to surface extra info (e.g. a future Squid-backed swap-deposit) and is currently always `{}`.
+
+**Error responses:**
+
+- `400` `{ "error": "invalid <field>" }` for body validation failures (`invalid address`, `invalid tokens`, `invalid positionId`, etc.) and `unknown appId` / `unknown shortcut` / `unsupported networkId`.
+- `400` `{ "error": "<code>" }` when the preflight catches a recoverable wallet-side issue. The code is one of:
+  - `INVALID_TRANCHE` -- `trancheId` not in `0..3`
+  - `INVALID_AMOUNT` -- amount string not a positive integer
+  - `DEPOSITS_PAUSED` -- contract reports the deposit path is paused
+  - `GLOBAL_CAP_EXCEEDED` -- contract-level TVL cap would be breached
+  - `TRANCHE_CAP_EXCEEDED` -- per-tranche cap would be breached
+  - `RATE_NOT_SET` -- tranche rate parameter not yet configured
+  - `AMOUNT_BELOW_MIN` -- amount under the contract's `minDeposit`
+  - `POSITION_NOT_FOUND` -- positionId not owned by the requester (per indexer)
+  - `POSITION_NOT_OWNED` -- on-chain owner mismatch (defense in depth vs. stale indexer)
+  - `POSITION_ALREADY_CLOSED` -- on-chain closed flag is set
+  - `NEERU_NOT_CONFIGURED` -- `NEERU_DEPOSIT_TOKEN_ADDRESS` env var not set on the backend
+- `502` `{ "error": "shortcut build failed" }` for any other (infra / RPC) failure. The underlying message is logged server-side and never echoed.
+- `503` `{ "error": "neeru not configured" }` when the Neeru env vars are not set.
+- `503` `{ "error": "database not configured" }` when a Neeru withdraw is requested without `DATABASE_URL`.
 
 #### Env vars
 
