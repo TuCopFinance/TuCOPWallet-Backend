@@ -1,5 +1,6 @@
 import express from 'express'
 import rateLimit from 'express-rate-limit'
+import { hooksApiRouter } from './hooks-api/routes'
 import { createLogger } from './lib/logger'
 import blockscoutRouter from './routes/blockscout'
 import eventsRouter from './routes/events'
@@ -51,6 +52,7 @@ app.use(blockscoutRouter)
 app.use(swapRouter)
 app.use(wriRouter)
 app.use(transactionsRouter)
+app.use(hooksApiRouter)
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'not found' })
