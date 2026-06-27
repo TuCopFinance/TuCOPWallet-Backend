@@ -286,6 +286,67 @@ Returns the merged shortcut catalogue (Allbridge `deposit` / `withdraw` / `claim
 | `address` | no | reserved; ignored for now |
 | `networkIds` | no | repeatable; restricts the shortcut list |
 
+#### `GET /api/earn/neeru/positions`
+
+Per-position detail surface for the wallet's "your positions" screen. Returns one entry per OPEN row in `neeru_positions`, enriched with live on-chain reads (per-position accrued interest, per-position frozen rate, tranche lockSeconds, current early-claim penalty). One Multicall3 batch per request; `earlyClaimPenaltyBps()`, `tranches(c).lockSeconds`, and `erc20.decimals()` are cached in-process for 30 s.
+
+| Param | Required | Notes |
+|------|----------|-------|
+| `address` | yes | `0x` + 40 lowercase hex |
+
+Any other query key returns `400` `unknown param: <name>` (strict allowlist).
+
+**Response shape:**
+
+```json
+{
+  "data": {
+    "address": "0x...",
+    "positions": [
+      {
+        "positionId": "100",
+        "tranche": 1,
+        "trancheLabel": "30 dias",
+        "principal": "10000",
+        "accruedInterest": "82.5",
+        "monthlyRatePercentage": 1.0,
+        "startTs": 1700000000,
+        "endTs": 1702592000,
+        "depositBlock": 70594027,
+        "depositTxHash": "0x...",
+        "renewedFromPositionId": null,
+        "currentPayoutIfClosed": {
+          "principal": "10000",
+          "interest": "82.5",
+          "penaltyBps": 2000,
+          "interestAfterPenalty": "66.0",
+          "total": "10066.0",
+          "isEarly": true
+        }
+      }
+    ],
+    "lastSyncedBlock": 70750000,
+    "lastSyncedAt": "2026-06-26T15:30:00Z"
+  }
+}
+```
+
+Notes:
+
+- `trancheLabel` is `Flexible` for category 0; otherwise `<days> dias` derived from on-chain `tranches(category).lockSeconds`.
+- `monthlyRatePercentage` is computed from the per-position frozen rate stored on-chain (`positions(positionId).r7`), not from the live tranche rate, so quotes don't drift after the tranche rate is updated.
+- `currentPayoutIfClosed.isEarly` is `true` only when the tranche is locked AND `now < endTs`. When `isEarly`, `interestAfterPenalty = accruedInterest * (10000 - penaltyBps) / 10000` (bigint floor division on the wei value before formatting).
+- `renewedFromPositionId` is always `null`; the indexer schema does not track renewal chains.
+- `lastSyncedBlock` / `lastSyncedAt` come from `neeru_indexer_state` so the wallet can warn if the partner indexer is stale.
+
+**Error responses:**
+
+- `400` `{ "error": "invalid address" }` if `address` is missing, not lowercase, or not 40 hex.
+- `400` `{ "error": "unknown param: <name>" }` for any query key other than `address`.
+- `503` `{ "error": "database not configured" }` when `DATABASE_URL` is unset.
+- `503` `{ "error": "neeru not configured" }` when `NEERU_DEPOSIT_TOKEN_ADDRESS` is unset.
+- `502` `{ "error": "detail fetch failed" }` on any infra/RPC failure. Underlying message is logged server-side and never echoed.
+
 #### `POST /hooks-api/triggerShortcut`
 
 Returns the ordered list of tx calldata the wallet signs and submits to execute one shortcut. The backend performs the preflight reads (allowance, pause flag, caps, ownership) so the wallet does not have to fan out and reason about per-shortcut invariants. No tx is submitted server-side.
