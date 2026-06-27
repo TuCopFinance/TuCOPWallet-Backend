@@ -1,6 +1,8 @@
 import { app } from './app'
 import { runMigrations } from './db/migrate'
+import { getDb } from './lib/db'
 import { createLogger } from './lib/logger'
+import { startNeeruIndexer } from './neeru-indexer/worker'
 import { startIndexer } from './transactions-indexer/worker'
 
 const log = createLogger('server')
@@ -41,6 +43,12 @@ async function boot(): Promise<void> {
   if (process.env.INDEXER_ENABLED === 'true') {
     startIndexer().catch((err) => {
       log.error(`indexer crashed: ${err instanceof Error ? err.message : String(err)}`)
+    })
+  }
+
+  if (process.env.NEERU_INDEXER_ENABLED === 'true') {
+    startNeeruIndexer({ db: getDb()! }).catch((err) => {
+      log.error(`neeru indexer crashed: ${err instanceof Error ? err.message : String(err)}`)
     })
   }
 }
