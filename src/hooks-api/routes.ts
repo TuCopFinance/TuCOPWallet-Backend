@@ -5,6 +5,9 @@ import { createLogger } from '../lib/logger'
 import {
   getPositions as getAllbridgePositions,
   getShortcuts as getAllbridgeShortcuts,
+  triggerClaimRewards as allbridgeTriggerClaimRewards,
+  triggerDeposit as allbridgeTriggerDeposit,
+  triggerWithdraw as allbridgeTriggerWithdraw,
 } from '../apps/allbridge'
 import { APP_ID as ALLBRIDGE_APP_ID } from '../apps/allbridge/manifest'
 import { createNeeruRpc, type NeeruIndexerRpcClient } from '../neeru-indexer/rpc'
@@ -14,6 +17,11 @@ import {
   getNeeruHeldPositions,
 } from './neeru/positions'
 import { NEERU_APP_ID, getNeeruShortcuts } from './neeru/shortcuts'
+import {
+  buildDepositTxs,
+  buildWithdrawPrincipalOnlyTxs,
+  buildWithdrawTxs,
+} from './neeru/trigger'
 import type {
   EarnPosition,
   NetworkId,
@@ -232,5 +240,257 @@ router.get(
     res.json({ data: filtered })
   },
 )
+
+// Error codes the trigger builders throw. When one of these surfaces it
+// is the wallet's fault (invalid input, stale UI state) and we map to a
+// 400. Anything else is treated as an upstream / infra failure and the
+// underlying message is logged but never echoed.
+const TRIGGER_USER_ERROR_CODES: ReadonlySet<string> = new Set([
+  'INVALID_TRANCHE',
+  'INVALID_AMOUNT',
+  'DEPOSITS_PAUSED',
+  'GLOBAL_CAP_EXCEEDED',
+  'TRANCHE_CAP_EXCEEDED',
+  'RATE_NOT_SET',
+  'AMOUNT_BELOW_MIN',
+  'POSITION_NOT_FOUND',
+  'POSITION_NOT_OWNED',
+  'POSITION_ALREADY_CLOSED',
+  'NEERU_NOT_CONFIGURED',
+])
+
+interface TriggerShortcutBody {
+  address?: unknown
+  appId?: unknown
+  networkId?: unknown
+  shortcutId?: unknown
+  [key: string]: unknown
+}
+
+function isPositiveInt(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value >= 0
+  )
+}
+
+function isDecimalString(value: unknown): value is string {
+  return typeof value === 'string' && /^\d+(\.\d+)?$/.test(value)
+}
+
+function isDigitString(value: unknown): value is string {
+  return typeof value === 'string' && /^\d+$/.test(value)
+}
+
+interface AllbridgeTokenLeg {
+  amount: string
+}
+
+function isAllbridgeTokens(value: unknown): value is AllbridgeTokenLeg[] {
+  if (!Array.isArray(value)) return false
+  for (const t of value) {
+    if (!t || typeof t !== 'object') return false
+    const amount = (t as { amount?: unknown }).amount
+    if (!isDecimalString(amount)) return false
+  }
+  return true
+}
+
+async function dispatchAllbridge(
+  shortcutId: string,
+  address: string,
+  body: TriggerShortcutBody,
+): Promise<{ ok: true; payload: unknown } | { ok: false; status: number; error: string }> {
+  if (shortcutId === 'deposit') {
+    const positionAddress = body.positionAddress
+    const tokenAddress = body.tokenAddress
+    const tokenDecimals = body.tokenDecimals
+    const tokens = body.tokens
+    if (
+      typeof positionAddress !== 'string' ||
+      !HEX_ADDRESS_RE.test(positionAddress)
+    ) {
+      return { ok: false, status: 400, error: 'invalid positionAddress' }
+    }
+    if (typeof tokenAddress !== 'string' || !HEX_ADDRESS_RE.test(tokenAddress)) {
+      return { ok: false, status: 400, error: 'invalid tokenAddress' }
+    }
+    if (!isPositiveInt(tokenDecimals)) {
+      return { ok: false, status: 400, error: 'invalid tokenDecimals' }
+    }
+    if (!isAllbridgeTokens(tokens)) {
+      return { ok: false, status: 400, error: 'invalid tokens' }
+    }
+    const result = await allbridgeTriggerDeposit({
+      address,
+      networkId: 'celo-mainnet',
+      positionAddress,
+      tokenAddress,
+      tokenDecimals,
+      tokens,
+    })
+    return { ok: true, payload: result }
+  }
+  if (shortcutId === 'withdraw') {
+    const positionAddress = body.positionAddress
+    const tokenDecimals = body.tokenDecimals
+    const tokens = body.tokens
+    if (
+      typeof positionAddress !== 'string' ||
+      !HEX_ADDRESS_RE.test(positionAddress)
+    ) {
+      return { ok: false, status: 400, error: 'invalid positionAddress' }
+    }
+    if (!isPositiveInt(tokenDecimals)) {
+      return { ok: false, status: 400, error: 'invalid tokenDecimals' }
+    }
+    if (!isAllbridgeTokens(tokens)) {
+      return { ok: false, status: 400, error: 'invalid tokens' }
+    }
+    const result = await allbridgeTriggerWithdraw({
+      address,
+      networkId: 'celo-mainnet',
+      positionAddress,
+      tokenDecimals,
+      tokens,
+    })
+    return { ok: true, payload: result }
+  }
+  if (shortcutId === 'claim-rewards') {
+    const positionAddress = body.positionAddress
+    if (
+      typeof positionAddress !== 'string' ||
+      !HEX_ADDRESS_RE.test(positionAddress)
+    ) {
+      return { ok: false, status: 400, error: 'invalid positionAddress' }
+    }
+    const result = await allbridgeTriggerClaimRewards({
+      address,
+      networkId: 'celo-mainnet',
+      positionAddress,
+    })
+    return { ok: true, payload: result }
+  }
+  return { ok: false, status: 400, error: 'unknown shortcut' }
+}
+
+async function dispatchNeeru(
+  shortcutId: string,
+  address: string,
+  body: TriggerShortcutBody,
+): Promise<{ ok: true; payload: unknown } | { ok: false; status: number; error: string }> {
+  if (!hooksApiConfigured()) {
+    return { ok: false, status: 503, error: 'neeru not configured' }
+  }
+
+  if (shortcutId === 'deposit') {
+    const trancheId = body.trancheId
+    const tokens = body.tokens
+    if (!isPositiveInt(trancheId)) {
+      return { ok: false, status: 400, error: 'invalid trancheId' }
+    }
+    if (
+      !Array.isArray(tokens) ||
+      tokens.length !== 1 ||
+      !tokens[0] ||
+      typeof tokens[0] !== 'object'
+    ) {
+      return { ok: false, status: 400, error: 'invalid tokens' }
+    }
+    const first = tokens[0] as { amount?: unknown; tokenId?: unknown }
+    if (!isDigitString(first.amount)) {
+      return { ok: false, status: 400, error: 'invalid tokens' }
+    }
+    const result = await buildDepositTxs({
+      address,
+      trancheId,
+      amount: first.amount,
+      rpc: getRpc(),
+    })
+    return { ok: true, payload: result }
+  }
+
+  if (shortcutId === 'withdraw' || shortcutId === 'withdraw-principal-only') {
+    const positionId = body.positionId
+    if (!isDigitString(positionId)) {
+      return { ok: false, status: 400, error: 'invalid positionId' }
+    }
+    const db = getDb()
+    if (!db) {
+      return { ok: false, status: 503, error: 'database not configured' }
+    }
+    const result =
+      shortcutId === 'withdraw'
+        ? await buildWithdrawTxs({
+            address,
+            positionId,
+            rpc: getRpc(),
+            db,
+          })
+        : await buildWithdrawPrincipalOnlyTxs({
+            address,
+            positionId,
+            rpc: getRpc(),
+            db,
+          })
+    return { ok: true, payload: result }
+  }
+
+  return { ok: false, status: 400, error: 'unknown shortcut' }
+}
+
+router.post('/hooks-api/triggerShortcut', async (req, res) => {
+  const body = (req.body ?? {}) as TriggerShortcutBody
+
+  const address = validateAddress(body.address)
+  if (!address) {
+    return res.status(400).json({ error: 'invalid address' })
+  }
+
+  if (body.networkId !== 'celo-mainnet') {
+    return res.status(400).json({ error: 'unsupported networkId' })
+  }
+
+  if (typeof body.shortcutId !== 'string' || body.shortcutId.length === 0) {
+    return res.status(400).json({ error: 'invalid shortcutId' })
+  }
+  const shortcutId = body.shortcutId
+
+  if (body.appId !== ALLBRIDGE_APP_ID && body.appId !== NEERU_APP_ID) {
+    return res.status(400).json({ error: 'unknown appId' })
+  }
+  const appId = body.appId
+
+  try {
+    const dispatched =
+      appId === ALLBRIDGE_APP_ID
+        ? await dispatchAllbridge(shortcutId, address, body)
+        : await dispatchNeeru(shortcutId, address, body)
+
+    if (!dispatched.ok) {
+      return res.status(dispatched.status).json({ error: dispatched.error })
+    }
+
+    const payload = dispatched.payload as {
+      transactions: unknown[]
+      dataProps?: Record<string, unknown>
+    }
+    return res.json({
+      data: {
+        transactions: payload.transactions,
+        dataProps: payload.dataProps ?? {},
+      },
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (TRIGGER_USER_ERROR_CODES.has(message)) {
+      return res.status(400).json({ error: message })
+    }
+    log.warn(`triggerShortcut failed appId=${String(appId)} shortcutId=${shortcutId}: ${message}`)
+    return res.status(502).json({ error: 'shortcut build failed' })
+  }
+})
 
 export { router as hooksApiRouter }
