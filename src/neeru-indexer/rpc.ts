@@ -1,10 +1,3 @@
-// Neeru indexer RPC client with a 3-endpoint fallback chain.
-//
-// Order is Forno -> Ankr -> dRPC. If Forno produces 3 consecutive failures we
-// skip it for 5 minutes before reattempting. The exposed surface is the
-// `NeeruIndexerRpcClient` interface (subset of viem `PublicClient`) so unit
-// tests can pass mocks without dragging in transport plumbing.
-
 import {
   createPublicClient,
   http,
@@ -22,12 +15,13 @@ import { createLogger } from '../lib/logger'
 
 const log = createLogger('neeru-indexer:rpc')
 
+export const PRIMARY_URL = 'https://rpc.celocolombia.org'
 export const FORNO_URL = 'https://forno.celo.org'
 export const ANKR_URL = 'https://rpc.ankr.com/celo'
 export const DRPC_URL = 'https://celo.drpc.org'
 
-export const FORNO_SKIP_AFTER_FAILURES = 3
-export const FORNO_SKIP_DURATION_MS = 5 * 60 * 1000
+export const PRIMARY_SKIP_AFTER_FAILURES = 3
+export const PRIMARY_SKIP_DURATION_MS = 5 * 60 * 1000
 
 export interface NeeruGetLogsArgs {
   address: `0x${string}`
@@ -48,8 +42,6 @@ export interface NeeruLog {
   removed: boolean
 }
 
-// Minimal surface the worker needs from the RPC layer.
-// Mirrors `IndexerRpcClient` in src/transactions-indexer/worker.ts:23-51.
 export interface NeeruBlockSummary {
   number: bigint
   timestamp: bigint
@@ -57,8 +49,6 @@ export interface NeeruBlockSummary {
 
 export interface NeeruIndexerRpcClient {
   getBlockNumber(): Promise<bigint>
-  // Lightweight block lookup. PR 2 only needs the timestamp; declaring the
-  // narrow shape here avoids dragging the full viem block type into mocks.
   getBlock(args: { blockNumber: bigint }): Promise<NeeruBlockSummary>
   getLogs(args: NeeruGetLogsArgs): Promise<ReadonlyArray<NeeruLog>>
   multicall<
@@ -76,13 +66,15 @@ export interface NeeruIndexerRpcClient {
   ): Promise<ReadContractReturnType<abi, functionName, args>>
 }
 
+type EndpointName = 'primary' | 'forno' | 'ankr' | 'drpc'
+
 interface Endpoint {
-  name: 'forno' | 'ankr' | 'drpc'
+  name: EndpointName
   url: string
   client: PublicClient
 }
 
-interface FornoState {
+interface PrimaryState {
   consecutiveFailures: number
   skipUntilMs: number | null
 }
@@ -95,9 +87,8 @@ function makeClient(url: string): PublicClient {
 }
 
 export interface CreateNeeruRpcOptions {
-  // Test seam: lets unit tests inject custom clients per endpoint without
-  // exercising the real network stack.
   endpoints?: {
+    primary?: PublicClient
     forno?: PublicClient
     ankr?: PublicClient
     drpc?: PublicClient
@@ -111,6 +102,11 @@ export function createNeeruRpc(
   const now = options.now ?? (() => Date.now())
 
   const endpoints: Endpoint[] = [
+    {
+      name: 'primary',
+      url: PRIMARY_URL,
+      client: options.endpoints?.primary ?? makeClient(PRIMARY_URL),
+    },
     {
       name: 'forno',
       url: FORNO_URL,
@@ -128,34 +124,34 @@ export function createNeeruRpc(
     },
   ]
 
-  const fornoState: FornoState = {
+  const primaryState: PrimaryState = {
     consecutiveFailures: 0,
     skipUntilMs: null,
   }
 
-  function fornoIsSkipped(): boolean {
-    if (fornoState.skipUntilMs == null) return false
-    if (now() >= fornoState.skipUntilMs) {
-      fornoState.skipUntilMs = null
-      fornoState.consecutiveFailures = 0
+  function primaryIsSkipped(): boolean {
+    if (primaryState.skipUntilMs == null) return false
+    if (now() >= primaryState.skipUntilMs) {
+      primaryState.skipUntilMs = null
+      primaryState.consecutiveFailures = 0
       return false
     }
     return true
   }
 
-  function recordFornoFailure(): void {
-    fornoState.consecutiveFailures += 1
-    if (fornoState.consecutiveFailures >= FORNO_SKIP_AFTER_FAILURES) {
-      fornoState.skipUntilMs = now() + FORNO_SKIP_DURATION_MS
+  function recordPrimaryFailure(): void {
+    primaryState.consecutiveFailures += 1
+    if (primaryState.consecutiveFailures >= PRIMARY_SKIP_AFTER_FAILURES) {
+      primaryState.skipUntilMs = now() + PRIMARY_SKIP_DURATION_MS
       log.warn(
-        `Forno (${FORNO_URL}) skipped for ${FORNO_SKIP_DURATION_MS}ms after ${fornoState.consecutiveFailures} consecutive failures`,
+        `Primary RPC (${PRIMARY_URL}) skipped for ${PRIMARY_SKIP_DURATION_MS}ms after ${primaryState.consecutiveFailures} consecutive failures`,
       )
     }
   }
 
-  function recordFornoSuccess(): void {
-    fornoState.consecutiveFailures = 0
-    fornoState.skipUntilMs = null
+  function recordPrimarySuccess(): void {
+    primaryState.consecutiveFailures = 0
+    primaryState.skipUntilMs = null
   }
 
   async function withFallback<T>(
@@ -164,17 +160,17 @@ export function createNeeruRpc(
   ): Promise<T> {
     const errors: Array<{ endpoint: string; error: string }> = []
     for (const endpoint of endpoints) {
-      if (endpoint.name === 'forno' && fornoIsSkipped()) {
+      if (endpoint.name === 'primary' && primaryIsSkipped()) {
         continue
       }
       try {
         const result = await invoke(endpoint.client)
-        if (endpoint.name === 'forno') recordFornoSuccess()
+        if (endpoint.name === 'primary') recordPrimarySuccess()
         return result
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         errors.push({ endpoint: endpoint.url, error: message })
-        if (endpoint.name === 'forno') recordFornoFailure()
+        if (endpoint.name === 'primary') recordPrimaryFailure()
         log.warn(
           `RPC ${label} failed on ${endpoint.url}: ${message} - falling back`,
         )
@@ -203,9 +199,6 @@ export function createNeeruRpc(
 
     async getLogs(args: NeeruGetLogsArgs): Promise<ReadonlyArray<NeeruLog>> {
       return withFallback('getLogs', async (client) => {
-        // viem's getLogs typing is event-aware; the worker passes raw topic
-        // strings, so we go through `request` which returns the wire-format
-        // log objects and normalise to our `NeeruLog` shape.
         const result = (await client.request({
           method: 'eth_getLogs',
           params: [
