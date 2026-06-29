@@ -18,6 +18,15 @@ const log = createLogger('routes:transactions')
 const DEFAULT_NETWORK_ID: NetworkId = 'celo-mainnet'
 const DEFAULT_PAGE_SIZE = 20
 const MAX_PAGE_SIZE = 100
+// Cache payloads are versioned so a TokenTransaction shape migration does not
+// silently return stale rows. Bump this when any TokenTransaction field is
+// added/removed/retyped.
+const CACHE_SCHEMA_VERSION = 1
+
+interface CachedPayload {
+  schemaVersion: number
+  transactions: TokenTransaction[]
+}
 
 interface CursorPosition {
   blockNumber: string
@@ -232,14 +241,26 @@ async function tryReadCache(
   userAddress: string,
 ): Promise<TokenTransaction[] | null> {
   try {
-    const { rows } = await db.query<{ payload_json: TokenTransaction[] }>(
+    const { rows } = await db.query<{ payload_json: unknown }>(
       `SELECT payload_json FROM classified_tx_cache
         WHERE network_id = $1 AND tx_hash = $2 AND user_address = $3`,
       [networkId, txHash, userAddress],
     )
     if (rows.length === 0) return null
     const payload = rows[0]?.payload_json
-    return Array.isArray(payload) ? payload : null
+    // Versioned payloads: { schemaVersion, transactions }. Legacy rows (raw
+    // arrays) are treated as v0 and invalidated so a re-classification fills
+    // the cache with the current shape.
+    if (
+      payload &&
+      typeof payload === 'object' &&
+      !Array.isArray(payload) &&
+      (payload as CachedPayload).schemaVersion === CACHE_SCHEMA_VERSION &&
+      Array.isArray((payload as CachedPayload).transactions)
+    ) {
+      return (payload as CachedPayload).transactions
+    }
+    return null
   } catch (err) {
     log.warn('cache read failed:', err instanceof Error ? err.message : err)
     return null
@@ -254,11 +275,15 @@ async function writeCache(
   payload: TokenTransaction[],
 ): Promise<void> {
   try {
+    const versioned: CachedPayload = {
+      schemaVersion: CACHE_SCHEMA_VERSION,
+      transactions: payload,
+    }
     await db.query(
       `INSERT INTO classified_tx_cache (network_id, tx_hash, user_address, payload_json)
        VALUES ($1, $2, $3, $4::jsonb)
        ON CONFLICT (network_id, tx_hash, user_address) DO NOTHING`,
-      [networkId, txHash, userAddress, JSON.stringify(payload)],
+      [networkId, txHash, userAddress, JSON.stringify(versioned)],
     )
   } catch (err) {
     log.warn('cache write failed:', err instanceof Error ? err.message : err)
