@@ -223,9 +223,12 @@ One-time, sponsored EIP-7702 delegation setup for TuCop's Wallet Relay Infrastru
 **Operational invariants:**
 
 - If the user's EOA code already starts with `0xef0100` followed by the BatchExecutor address, the endpoint short-circuits with `{ "status": "already_delegated" }` and submits no tx.
-- Per-address rate limit: 1 successful relay per 5 minutes per `userAddress` (Redis-backed when `REDIS_URL` is configured, in-process Map otherwise; without Redis the limit is per-instance only).
+- **Three-tier rate limiting** (each independent; all must pass):
+  - **Per-IP:** `WRI_RELAY_PER_IP_LIMIT` requests per minute per source IP (default `20`). Blocks address-spraying from a single source. Set to `0` to disable.
+  - **Global token bucket:** `WRI_RELAY_GLOBAL_LIMIT` requests per minute total across ALL addresses + IPs (default `60`). Defense against distributed spraying. Requires Redis; fail-closed (returns 503 `rate limiter unavailable`) when Redis is down. Set to `0` to disable.
+  - **Per-address:** 1 successful relay per 5 minutes per `userAddress` (Redis-backed when `REDIS_URL` is configured; bounded in-process Map otherwise, capped at 10k entries with the same 5 minute TTL).
+- The global 300 req/min/IP ceiling from `app.ts` still applies on top of these.
 - Relay hot-wallet health check: if balance is below `WRI_RELAY_MIN_CELO_BALANCE`, returns 503 and logs an alert.
-- The global 120 req/min/IP rate limit from `app.ts` still applies on top.
 
 **Success response (delegation submitted and confirmed):**
 
@@ -241,9 +244,9 @@ One-time, sponsored EIP-7702 delegation setup for TuCop's Wallet Relay Infrastru
 **Error responses:**
 
 - `400` `{ "error": "invalid userAddress" }` / `invalid signedAuthorization` / `invalid chainId` / `invalid delegation target` / `invalid signature` / `nonce mismatch`
-- `429` `{ "error": "address rate limited" }` with `Retry-After` header
+- `429` `{ "error": "ip rate limited" }` (per-IP tier) / `relay globally rate limited` (global token bucket) / `address rate limited` (per-address tier) - each with `Retry-After` header
 - `502` `{ "error": "rpc unavailable" }` / `relay tx submission failed` / `relay tx reverted` / `relay tx unconfirmed` / `relay tx unverified`
-- `503` `{ "error": "relay temporarily unavailable" }` (relay private key missing/invalid or balance below threshold)
+- `503` `{ "error": "relay temporarily unavailable" }` (relay private key missing/invalid or balance below threshold) / `rate limiter unavailable` (global tier requires Redis and Redis is down)
 
 **Out of scope:** this endpoint ONLY handles the one-time delegation setup. The actual `execute(calls)` payload that uses the delegated EOA must be sent by the wallet as a regular CIP-64 transaction; the backend does not relay batch payloads.
 
