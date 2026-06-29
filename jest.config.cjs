@@ -9,4 +9,18 @@ module.exports = {
   clearMocks: true,
   resetModules: true,
   setupFiles: ['<rootDir>/jest.setup.ts'],
+  collectCoverageFrom: [
+    'src/**/*.ts',
+    '!src/**/*.test.ts',
+    '!src/db/migrate.ts',
+    '!src/server.ts',
+  ],
+  coverageThreshold: {
+    global: {
+      statements: 70,
+      branches: 60,
+      functions: 70,
+      lines: 70,
+    },
+  },
 }
