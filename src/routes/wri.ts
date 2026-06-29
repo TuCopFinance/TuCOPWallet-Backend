@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express'
+import rateLimit from 'express-rate-limit'
 import type { Hex } from 'viem'
 import { recoverAuthorizationAddress } from 'viem/utils'
 import { parseEnvBigInt } from '../lib/env'
@@ -12,7 +13,13 @@ import {
 } from '../lib/networks'
 import { getRedis } from '../lib/redis'
 import { getRelayClients } from '../lib/wriRelay'
-import { tryAcquireDelegateRelaySlot, WRI_RATE_LIMIT_WINDOW_SECONDS } from '../lib/wriRateLimit'
+import {
+  tryAcquireDelegateRelaySlot,
+  tryAcquireGlobalRelaySlot,
+  WRI_GLOBAL_LIMIT_DEFAULT,
+  WRI_GLOBAL_LIMIT_WINDOW_SECONDS,
+  WRI_RATE_LIMIT_WINDOW_SECONDS,
+} from '../lib/wriRateLimit'
 
 const router = Router()
 const log = createLogger('routes:wri')
@@ -27,6 +34,29 @@ const DEFAULT_MAX_GAS = 1000000n
 const RECEIPT_TIMEOUT_MS = 30_000
 const POST_MINING_MAX_ATTEMPTS = 4
 const POST_MINING_RETRY_DELAY_MS = 500
+
+// Per-IP tier: 20 relays per IP per minute. The global 300 req/min/IP ceiling
+// in app.ts is shared across every endpoint; this tighter route-specific
+// limit blocks address-spraying from a single source. Tunable via env so the
+// number can be calibrated against real prod traffic. Setting the env var to
+// 0 disables the limiter (used in tests via jest.setup.ts).
+const DEFAULT_PER_IP_LIMIT = 20n
+const PER_IP_WINDOW_MS = 60_000
+
+function getPerIpLimit(): number {
+  return Number(parseEnvBigInt('WRI_RELAY_PER_IP_LIMIT', DEFAULT_PER_IP_LIMIT))
+}
+
+const perIpLimiter = rateLimit({
+  windowMs: PER_IP_WINDOW_MS,
+  limit: getPerIpLimit,
+  // Skip when the configured limit is 0. Returning true bypasses the limiter
+  // for this request without consuming a slot.
+  skip: () => getPerIpLimit() === 0,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'ip rate limited' },
+})
 
 const Y_PARITY_RE = /^0x[01]$/
 
@@ -110,7 +140,7 @@ function isDelegatedToBatchExecutor(code: Hex | undefined): boolean {
   return lower === expected
 }
 
-router.post('/api/wri/delegate-relay', async (req: Request, res: Response) => {
+router.post('/api/wri/delegate-relay', perIpLimiter, async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as RequestBody
 
   if (typeof body.userAddress !== 'string' || !HEX_ADDRESS_RE.test(body.userAddress)) {
@@ -139,6 +169,33 @@ router.post('/api/wri/delegate-relay', async (req: Request, res: Response) => {
   if (!relay) {
     log.error('relay hot wallet not configured (WRI_RELAY_PK missing or invalid)')
     return res.status(503).json({ error: 'relay temporarily unavailable' })
+  }
+
+  // Global token bucket: caps total relay submissions across ALL addresses + IPs
+  // per minute. Defense in depth against address-spraying that bypasses the
+  // per-IP tier (e.g. attacker distributed across many source IPs).
+  // Fail-closed when Redis is unavailable - the bucket needs shared state.
+  // Setting WRI_RELAY_GLOBAL_LIMIT=0 disables the tier (used in tests).
+  const redis = getRedis()
+  const globalLimit = Number(parseEnvBigInt('WRI_RELAY_GLOBAL_LIMIT', BigInt(WRI_GLOBAL_LIMIT_DEFAULT)))
+  if (globalLimit > 0) {
+    let globalSlot: { acquired: boolean; ttlSeconds?: number; count?: number }
+    try {
+      globalSlot = await tryAcquireGlobalRelaySlot(redis, globalLimit)
+    } catch (err) {
+      log.error('global rate-limit error:', err instanceof Error ? err.message : err)
+      return res.status(503).json({ error: 'rate limiter unavailable' })
+    }
+    if (!globalSlot.acquired) {
+      res.setHeader(
+        'Retry-After',
+        String(globalSlot.ttlSeconds ?? WRI_GLOBAL_LIMIT_WINDOW_SECONDS),
+      )
+      log.warn(
+        `global relay bucket exhausted: count=${globalSlot.count ?? 'unknown'} limit=${globalLimit}`,
+      )
+      return res.status(429).json({ error: 'relay globally rate limited' })
+    }
   }
 
   let recovered: string
@@ -224,9 +281,8 @@ router.post('/api/wri/delegate-relay', async (req: Request, res: Response) => {
 
   // Fail-closed: a Redis outage previously fell back to `acquired: true` so an
   // attacker could drain the relay hot wallet during downtime. The library now
-  // falls back to an in-memory store when Redis is absent (passing `null`),
+  // falls back to a bounded in-memory store when Redis is absent (passing `null`),
   // and any unexpected Redis error returns 503 instead of bypassing the limit.
-  const redis = getRedis()
   let slot: { acquired: boolean; ttlSeconds?: number }
   try {
     slot = await tryAcquireDelegateRelaySlot(redis, userAddressLower)

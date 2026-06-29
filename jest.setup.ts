@@ -37,3 +37,10 @@ process.env.NEERU_TERMS_URL =
 
 process.env.NEERU_CONTRACT_CREATED_AT_ISO =
   process.env.NEERU_CONTRACT_CREATED_AT_ISO ?? '2026-06-01T00:00:00.000Z'
+
+// Disable the WRI per-IP and global rate-limit tiers by default in jest so
+// the existing test suite (which sends many requests against the same mocked
+// IP and against null Redis) keeps working. Tests that exercise the new
+// tiers set these env vars locally inside their describe block.
+process.env.WRI_RELAY_PER_IP_LIMIT = process.env.WRI_RELAY_PER_IP_LIMIT ?? '0'
+process.env.WRI_RELAY_GLOBAL_LIMIT = process.env.WRI_RELAY_GLOBAL_LIMIT ?? '0'
