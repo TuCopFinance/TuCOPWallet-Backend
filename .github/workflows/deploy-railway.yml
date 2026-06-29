@@ -10,8 +10,16 @@ jobs:
   deploy:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    # GitHub Environment with required-reviewers protection rule gives manual
+    # approval gating for production. Configure in Settings -> Environments
+    # -> "production" -> Required reviewers. Until the reviewers list is
+    # populated, the workflow auto-runs (env exists but has no rule).
+    environment:
+      name: production
+      url: https://tucop-backend-production.up.railway.app
     steps:
       - name: Trigger Railway deploy
+        id: trigger
         env:
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
           RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
@@ -30,8 +38,87 @@ jobs:
             -d "$BODY")
           echo "$RESP"
           if echo "$RESP" | jq -e '.errors' >/dev/null; then
-            echo "Railway deploy failed"
+            echo "Railway deploy failed (GraphQL error)"
             exit 1
           fi
           DEPLOY_ID=$(echo "$RESP" | jq -r '.data.serviceInstanceDeployV2')
           echo "Deploy triggered: $DEPLOY_ID (commit $COMMIT_SHA)"
+          echo "deploy_id=$DEPLOY_ID" >> "$GITHUB_OUTPUT"
+
+      # Poll Railway until the deployment leaves BUILDING/INITIALIZING/DEPLOYING.
+      # The previous workflow exited the moment the GraphQL mutation returned
+      # successfully (the deploy was queued, not actually healthy). The
+      # post-Fase-2 prod crash (deployment ed149bfd) was a CRASHED status
+      # reported by Railway but the workflow had already exited green, so the
+      # GH Actions log said "success" while the new container looped on a
+      # FATAL exit and the previous container kept serving traffic. This step
+      # closes that gap.
+      - name: Wait for Railway deploy to finish
+        id: wait
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          DEPLOY_ID: ${{ steps.trigger.outputs.deploy_id }}
+        run: |
+          set -euo pipefail
+          MAX_ATTEMPTS=60   # 60 * 10s = 10 minutes
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            RESP=$(curl -sS -X POST https://backboard.railway.app/graphql/v2 \
+              -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"query\":\"{ deployment(id: \\\"$DEPLOY_ID\\\") { status } }\"}")
+            STATUS=$(echo "$RESP" | jq -r '.data.deployment.status' 2>/dev/null || echo "UNKNOWN")
+            echo "attempt $attempt: status=$STATUS"
+            case "$STATUS" in
+              SUCCESS)
+                echo "deploy_status=SUCCESS" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              CRASHED|FAILED|REMOVED)
+                echo "deploy_status=$STATUS" >> "$GITHUB_OUTPUT"
+                echo "Railway deployment $DEPLOY_ID ended with status $STATUS"
+                exit 1
+                ;;
+              SKIPPED)
+                echo "Railway skipped this deploy (likely a newer one took over). Treating as success."
+                echo "deploy_status=SKIPPED" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+            esac
+            sleep 10
+          done
+          echo "Timed out waiting for deployment $DEPLOY_ID to finish (>10min in non-terminal state)"
+          exit 1
+
+      # Post-deploy smoke against the live URL. Confirms the new container
+      # actually serves traffic + that /ready (introduced in Fase 2 PR 11)
+      # reports DB + Redis + RPC all healthy. Catches the case where Railway
+      # marks the deploy SUCCESS but the route registration broke or a
+      # dependency is unavailable.
+      - name: Smoke test live endpoints
+        env:
+          BASE_URL: https://tucop-backend-production.up.railway.app
+        run: |
+          set -euo pipefail
+          # /health is the liveness probe (no deps); /ready is the readiness
+          # probe (DB + Redis + RPC). Both should return 200. Retry briefly
+          # because Railway may need a moment to flip the public URL to the
+          # new container after status=SUCCESS.
+          for path in /health /ready; do
+            for attempt in $(seq 1 10); do
+              code=$(curl -sS -o /tmp/body -w '%{http_code}' -m 5 "$BASE_URL$path" || echo "000")
+              if [ "$code" = "200" ]; then
+                echo "$path -> 200 OK"
+                cat /tmp/body
+                echo
+                break
+              fi
+              echo "attempt $attempt: $path -> $code (retrying in 5s)"
+              if [ "$attempt" = "10" ]; then
+                echo "Smoke test failed: $path returned $code after 10 attempts"
+                cat /tmp/body 2>/dev/null || true
+                exit 1
+              fi
+              sleep 5
+            done
+          done
+          echo "Smoke test passed."
