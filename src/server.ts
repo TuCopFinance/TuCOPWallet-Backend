@@ -1,3 +1,8 @@
+// Sentry MUST be initialised before any other import that could throw at
+// load time, so the SDK can attach its async-context hooks first.
+import { initSentry } from './lib/sentry'
+initSentry()
+
 import { app } from './app'
 import { runMigrations } from './db/migrate'
 import { getDb } from './lib/db'

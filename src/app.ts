@@ -5,6 +5,7 @@ import { hooksApiRouter } from './hooks-api/routes'
 import { corsReadSkippingWrite, corsWrite, WRITE_PATHS } from './lib/cors'
 import { createLogger } from './lib/logger'
 import { httpRequestDurationSeconds } from './lib/metrics'
+import { Sentry } from './lib/sentry'
 import blockscoutRouter from './routes/blockscout'
 import eventsRouter from './routes/events'
 import healthRouter from './routes/health'
@@ -105,6 +106,10 @@ app.use(swapRouter)
 app.use(wriRouter)
 app.use(transactionsRouter)
 app.use(hooksApiRouter)
+
+// Sentry's error handler must be mounted AFTER all route handlers and BEFORE
+// the catch-all 404 / final error middleware. No-op when SENTRY_DSN is unset.
+Sentry.setupExpressErrorHandler(app)
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'not found' })
