@@ -128,7 +128,9 @@ function buildRpc(opts: {
 }
 
 const ADDR_USER = '0x1111111111111111111111111111111111111111'
-const ADDR_USER_2 = '0xa203bb000000000000000000000000000000beef'
+// Synthetic test address. The prior `0xa203bb...` prefix matched a real
+// maintainer wallet; the obvious `0x3333...` repeating pattern is unambiguous.
+const ADDR_USER_2 = '0x3333333333333333333333333333333333333333'
 
 function padAddress(a: string): `0x${string}` {
   return pad(a as `0x${string}`, { size: 32 })
