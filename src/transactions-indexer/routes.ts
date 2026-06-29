@@ -16,6 +16,13 @@ const router = Router()
 const log = createLogger('routes:transactions')
 
 const DEFAULT_NETWORK_ID: NetworkId = 'celo-mainnet'
+// Allowed networks. Mirrors the NetworkId union exactly. Any networkIds query
+// param outside this set returns 400 at the boundary; the underlying SQL
+// ANY($1::text[]) match would have just returned empty rows silently, which
+// hides client bugs and silently drops alerting on misconfigured wallets.
+const SUPPORTED_NETWORKS: ReadonlySet<NetworkId> = new Set<NetworkId>([
+  'celo-mainnet',
+])
 const DEFAULT_PAGE_SIZE = 20
 const MAX_PAGE_SIZE = 100
 // Cache payloads are versioned so a TokenTransaction shape migration does not
@@ -124,8 +131,18 @@ router.get('/api/transactions/feed', async (req: Request, res: Response) => {
 
   const networkIdsRaw =
     typeof req.query.networkIds === 'string' ? req.query.networkIds : DEFAULT_NETWORK_ID
-  const networkIds = networkIdsRaw.split(',').map((s) => s.trim()).filter(Boolean)
-  if (networkIds.length === 0) networkIds.push(DEFAULT_NETWORK_ID)
+  const networkIdsParsed = networkIdsRaw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const networkIds: NetworkId[] =
+    networkIdsParsed.length === 0 ? [DEFAULT_NETWORK_ID] : []
+  for (const nid of networkIdsParsed) {
+    if (!SUPPORTED_NETWORKS.has(nid as NetworkId)) {
+      return res.status(400).json({ error: 'unsupported networkId' })
+    }
+    networkIds.push(nid as NetworkId)
+  }
 
   const includeTypes = parseIncludeTypes(req.query.includeTypes)
   const afterCursorRaw =
