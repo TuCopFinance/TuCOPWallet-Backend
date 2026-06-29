@@ -311,6 +311,17 @@ export async function getNeeruPositionDetail(
     )
   }
 
+  // ERC20.decimals is a uint8 (range 0-255), but real tokens are 6-18. An
+  // upgradable contract returning a wildly out-of-range value (or a non-
+  // numeric type that Number() coerces to NaN) would propagate through
+  // decimalString and produce wrong user-facing numbers. Reject anything
+  // outside a sane range so the route 502s instead of returning garbage.
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
+    throw new Error(
+      `erc20.decimals returned an out-of-range value (${decimals}); refusing to format payouts`,
+    )
+  }
+
   const positions: NeeruPositionDetail[] = []
   const tsNow = nowSeconds()
 
