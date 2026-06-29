@@ -212,6 +212,35 @@ export interface IngestResult {
   logCount: number
 }
 
+// Concurrency limit for getTransactionReceipt fan-out. A block with 100 txs
+// historically generated 100 sequential RPC calls (~50ms each on Forno warm
+// path = 5s per block, 1000s per 200-block tick). Parallelizing with 10
+// workers brings tick latency from ~minutes to ~tens of seconds on the same
+// hardware. Not a dep on p-limit because the helper below is 10 LOC and
+// has no third-party surface to audit.
+const DEFAULT_RECEIPT_CONCURRENCY = 10
+
+async function withConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let cursor = 0
+  const worker = async (): Promise<void> => {
+    while (cursor < items.length) {
+      const i = cursor++
+      results[i] = await fn(items[i] as T)
+    }
+  }
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    () => worker(),
+  )
+  await Promise.all(workers)
+  return results
+}
+
 export async function ingestRange(
   rpc: IndexerRpcClient,
   db: Pool,
@@ -224,15 +253,21 @@ export async function ingestRange(
     const block = await rpc.getBlock({ blockNumber: bn, includeTransactions: true })
     const blockTimestampMs = Number(block.timestamp) * 1000
 
-    for (const tx of block.transactions) {
+    // Pre-fetch all receipts in this block concurrently. Persisting still
+    // happens sequentially below so the existing tx-ordering invariants
+    // (cursor advance, log ordering) are preserved exactly.
+    const receipts = await withConcurrency(
+      block.transactions,
+      DEFAULT_RECEIPT_CONCURRENCY,
+      (tx) => rpc.getTransactionReceipt({ hash: tx.hash }),
+    )
+
+    for (let i = 0; i < block.transactions.length; i++) {
+      const tx = block.transactions[i]!
+      const receipt = receipts[i]!
       const from = tx.from.toLowerCase()
       const to = tx.to ? tx.to.toLowerCase() : null
       const directTouch = opts.watched.has(from) || (to !== null && opts.watched.has(to))
-
-      // Always fetch receipt when direct touch; otherwise probe logs for
-      // ERC20 Transfer/Approval where one of the address-shaped topics
-      // matches a watched address (catches receives we'd miss otherwise).
-      const receipt = await rpc.getTransactionReceipt({ hash: tx.hash })
       const logTouch =
         !directTouch &&
         receipt.logs.some((lg) => logTouchesWatched(lg.topics, opts.watched))
@@ -336,6 +371,17 @@ export async function startIndexer(
         watched,
       })
 
+      // Cursor advance is at-least-once on purpose: ingestRange commits each
+      // matched tx in its own BEGIN/COMMIT transaction, then we bump the
+      // cursor here after the range completes. A crash between the per-tx
+      // commits and this cursor UPDATE means the next tick will re-fetch
+      // and re-attempt persist for those txs. The persistTx INSERTs use
+      // ON CONFLICT (network_id, tx_hash) DO NOTHING so the re-attempt is
+      // a safe no-op for already-persisted rows. Cost of at-least-once is
+      // wasted RPC + DB churn on crash recovery; benefit is simpler code
+      // and zero risk of "missed tx" (the alternative - cursor inside the
+      // per-tx tx - would require N cursor writes per tick, defeating the
+      // batching point).
       await db.query(
         `UPDATE indexer_state SET last_block = $1 WHERE network_id = $2`,
         [target.toString(), NETWORK_ID],
