@@ -30,26 +30,23 @@ Both items below were flagged on 2026-06-26 during the post-#11 cleanup pass. Pl
 
 ---
 
-## 2. `wriRateLimit` in-memory fallback when Redis is unavailable
+## 2. Per-address `wriRateLimit` Map fallback when Redis is unavailable
 
-**Status:** `src/lib/wriRateLimit.ts` enforces 1 successful relay per 5 minutes per `userAddress`. Storage is Redis when `REDIS_URL` is set, an in-process `Map` otherwise.
+**Status:** the WRI delegate relay now ships with a 3-tier limiter (per-IP via `express-rate-limit`, global token bucket via Redis, per-address via Redis-with-Map-fallback). The global tier is already Redis-required and fail-closed (returns 503 `rate limiter unavailable` when Redis is down), and the per-address Map fallback is bounded to 10k entries (`src/lib/wriRateLimit.ts`).
 
-**Why this matters:** the in-process Map is per-instance. Today we run **a single Railway instance** so the Map is global from the user's perspective. The moment we scale to 2 or more instances:
+That largely defuses the original "drain N times faster at N instances" concern: the global tier blocks the abuse pattern regardless of how many instances are running. The remaining gap is narrow but real -> when Redis is unavailable, the per-address tier degrades to per-instance Map, so a single user could theoretically retry once per instance within the 5-minute window before the global tier (which is also down) becomes moot.
 
-- User submits a relay request to instance A. Map A says "first time, allow". Limit set in Map A.
-- User immediately retries. Load balancer routes to instance B. Map B says "first time, allow". Limit set in Map B.
-- Repeat per instance.
-- **Result:** the user can call delegate-relay N times in a 5-minute window where N = number of instances, instead of the intended 1. The relay hot wallet drains N times faster than expected.
+**Why revisit:** we are still on a single Railway instance; the gap is dormant. Once we scale OR if we want consistency with the global tier, we should make the per-address tier Redis-required + fail-closed too.
 
 **What to look at when we revisit:**
 
-- Is Railway still on a single instance, or did we scale up? Check the deploy.
-- If still 1 instance: do nothing, this is a non-issue today. Close.
-- If 2+ instances: the in-memory path is now incorrect. Two options:
-  - **Option A:** make Redis a hard requirement for `/api/wri/delegate-relay`. Return `503 relay temporarily unavailable` if `REDIS_URL` is not set or unreachable. Smallest change.
-  - **Option B:** enforce the limit on-chain instead (e.g. read the user's nonce or a delegation marker). More work, no Redis dep, more correct but slower per request.
+- Is Railway still on a single instance? Check the deploy.
+- If still 1 instance: do nothing, this is a non-issue today.
+- If 2+ instances: align the per-address tier with the global tier:
+  - **Option A:** make Redis a hard requirement for `/api/wri/delegate-relay`. Return `503 relay temporarily unavailable` if the per-address limiter cannot reach Redis. Smallest change; consistent with the global tier's behaviour.
+  - **Option B:** enforce the per-address limit on-chain instead (e.g. read the user's nonce or a delegation marker). More work, no Redis dep, more correct but slower per request.
 
-**Recommendation when we revisit:** Option A is the right default. We already require Redis for other limits at scale; making the relay limit consistent is the cleanest.
+**Recommendation when we revisit:** Option A.
 
 ---
 
