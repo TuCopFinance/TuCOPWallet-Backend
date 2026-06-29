@@ -176,9 +176,18 @@ router.post('/api/wri/delegate-relay', async (req: Request, res: Response) => {
     log.warn('getTransactionCount failed:', err instanceof Error ? err.message : err)
     return res.status(502).json({ error: 'rpc unavailable' })
   }
+  // Nonce MUST equal the on-chain nonce exactly. The previous window of
+  // [-1, +1] admitted two ambiguous cases without payoff:
+  //   - delta = -1: stale auth (lower than chain) - tx submission would
+  //     always fail with "nonce too low"; we may as well reject up front.
+  //   - delta = +1: future-nonce auth - the wallet would need to submit a
+  //     prior tx before this one anyway; relaying it would either revert
+  //     (nonce gap) or burn relay gas on a redundant delegation after the
+  //     prior one already delegated the EOA. The already_delegated short-
+  //     circuit + the post-mining getCode poll downstream already cover
+  //     the propagation-lag case that motivated the original window.
   const submittedNonce = BigInt(auth.nonce)
-  const nonceDelta = submittedNonce - onChainNonce
-  if (nonceDelta < -1n || nonceDelta > 1n) {
+  if (submittedNonce !== onChainNonce) {
     return res.status(400).json({ error: 'nonce mismatch' })
   }
 
