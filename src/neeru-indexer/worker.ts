@@ -579,6 +579,11 @@ export interface StartNeeruIndexerOptions {
   intervalMs?: number
   iterations?: number
   enableReorgJob?: boolean
+  // Override the 5-minute ERROR_BACKOFF_MS sleep between failing ticks.
+  // Used by tests so an iterations:N run doesn't actually sleep 5min between
+  // every failure. Not exposed via env; production should always use the
+  // module-level default.
+  errorBackoffMs?: number
 }
 
 interface ReorgJobState {
@@ -636,6 +641,7 @@ export async function startNeeruIndexer(
   const intervalMs = options.intervalMs ?? parseIntervalMs()
   const maxIterations = options.iterations
   const enableReorgJob = options.enableReorgJob ?? true
+  const errorBackoffMs = options.errorBackoffMs ?? ERROR_BACKOFF_MS
 
   log.info(`starting neeru indexer (intervalMs=${intervalMs})`)
 
@@ -690,7 +696,7 @@ export async function startNeeruIndexer(
           log.warn(`tick failed: ${message}`)
         }
         await recordIndexerError(db, message)
-        await sleep(ERROR_BACKOFF_MS)
+        await sleep(errorBackoffMs)
       }
     }
   } finally {
