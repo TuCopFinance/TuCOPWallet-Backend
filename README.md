@@ -130,9 +130,19 @@ Passthrough proxy for Celo's Blockscout V2 API, injecting the API key on the ser
 | `GET /api/v2/addresses/:address/transactions` | 30 s |
 | `GET /api/v2/addresses/:address/token-transfers` | 300 s |
 
-Query string parameters (e.g. `filter`, `block_number`) are forwarded to upstream. The reserved `apikey` and `api_key` keys are stripped server-side so clients cannot override the server key. Cache keys are normalised (sorted, reserved params dropped, capped at 512 chars) so callers cannot blow up the Redis keyspace by passing junk params.
+**Query params** are strictly whitelisted per route. Unknown keys (including the reserved `apikey` / `api_key`) return `400 { "error": "unknown param" }`. Cache keys are normalised (sorted, reserved params dropped, capped at 512 chars) so callers cannot blow up the Redis keyspace.
 
-Validation: `:hash` must match `0x` + 64 hex; `:address` must match `0x` + 40 hex. Otherwise `400 { "error": "invalid ..." }`. Upstream failures return `502 { "error": "blockscout upstream unavailable" }`.
+| Route | Allowed query params |
+|---|---|
+| `GET /api/v2/transactions/:hash` | (none) |
+| `GET /api/v2/addresses/:address/transactions` | `filter`, `block_number`, `index`, `items_count` |
+| `GET /api/v2/addresses/:address/token-transfers` | `filter`, `type`, `token`, `block_number`, `index`, `items_count` |
+
+Adding a new param means a deliberate edit to `ALLOWED_*_PARAMS` in `src/routes/blockscout.ts`, not silent passthrough.
+
+**Host allowlist:** `BLOCKSCOUT_BASE_URL` must use https:// AND its hostname must appear in the static allowlist in `src/server.ts` (default: `celo.blockscout.com`). Operators can add hosts via the comma-separated `BLOCKSCOUT_ALLOWED_HOSTS` env. A misconfigured deploy now fails at boot with a clear error rather than turning the proxy into a generic SSRF gateway.
+
+**Validation:** `:hash` must match `0x` + 64 hex; `:address` must match `0x` + 40 hex. Otherwise `400 { "error": "invalid ..." }`. Upstream failures return `502 { "error": "blockscout upstream unavailable" }`.
 
 ### `GET /api/swap/quote`
 
