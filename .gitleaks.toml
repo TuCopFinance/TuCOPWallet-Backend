@@ -1,0 +1,35 @@
+# gitleaks config for tucop-backend.
+# Extends the default gitleaks ruleset and adds a global allowlist for
+# 40-hex (EVM addresses) and 64-hex (tx hashes / topics) patterns, which
+# are never secrets - they are public on-chain identifiers. The
+# corresponding private keys WOULD be secrets, but those follow a
+# different (64-hex with 0x prefix in env vars, never in tracked source)
+# pattern that the default ruleset catches via context (env var names,
+# explicit `WRI_RELAY_PK=`, etc.).
+#
+# This file is read automatically by `gitleaks detect` when present at
+# the repo root.
+
+title = "tucop-backend gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow EVM-shaped hex (public on-chain identifiers) anywhere in the tree"
+regexes = [
+  # 0x + 40 hex = EVM address. Public; never a secret on its own.
+  '''0x[0-9a-fA-F]{40}\b''',
+  # 0x + 64 hex = tx hash / event topic / merkle root. Also never a secret.
+  '''0x[0-9a-fA-F]{64}\b''',
+]
+# Paths that are auto-generated or known not to contain secrets. The
+# default config already excludes most of these, but listing them
+# explicitly makes the intent clear.
+paths = [
+  '''yarn\.lock''',
+  '''package-lock\.json''',
+  '''dist/''',
+  '''node_modules/''',
+  '''coverage/''',
+]
