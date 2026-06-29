@@ -291,20 +291,24 @@ export async function getNeeruPositionDetail(
     penaltyBps = 0
   }
 
+  // `decimals` MUST come from the live token or a fresh cache. Defaulting to
+  // 18 silently misformatted payouts by orders of magnitude if the deposit
+  // token used a different scale; fail-loud now so callers return 502 instead
+  // of returning wrong numbers to the wallet.
   let decimals: number
   if (decimalsCached && decimalsCache) {
     decimals = decimalsCache.decimals
   } else if (decimalsIdx !== null) {
     const r = results[decimalsIdx]
-    if (r && r.status === 'success') {
-      decimals = Number(r.result as number | bigint)
-      decimalsCache = { fetchedAtMs: now(), decimals }
-    } else {
-      log.warn('erc20.decimals read failed - defaulting to 18')
-      decimals = 18
+    if (!r || r.status !== 'success') {
+      throw new Error('erc20.decimals read failed - refusing to format payouts')
     }
+    decimals = Number(r.result as number | bigint)
+    decimalsCache = { fetchedAtMs: now(), decimals }
   } else {
-    decimals = 18
+    throw new Error(
+      'erc20.decimals missing from call results - indexer config inconsistency',
+    )
   }
 
   const positions: NeeruPositionDetail[] = []
