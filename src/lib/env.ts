@@ -90,9 +90,6 @@ const zHttpsUrl = z
 
 // Coerce-and-default helpers for vars that can be empty/missing.
 const zPositiveInt = z.coerce.number().int().nonnegative()
-const zBoolTrue = z
-  .string()
-  .transform((v) => v === 'true')
 
 const envSchema = z.object({
   // Required (boot fails if missing)
