@@ -1,0 +1,37 @@
+name: Deploy to Railway
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Railway deploy
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          BODY=$(jq -n \
+            --arg sid "$RAILWAY_SERVICE_ID" \
+            --arg eid "$RAILWAY_ENVIRONMENT_ID" \
+            --arg sha "$COMMIT_SHA" \
+            '{query:"mutation($sid: String!, $eid: String!, $sha: String!) { serviceInstanceDeployV2(serviceId: $sid, environmentId: $eid, commitSha: $sha) }", variables:{sid:$sid, eid:$eid, sha:$sha}}')
+          RESP=$(curl -sS -X POST https://backboard.railway.app/graphql/v2 \
+            -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$BODY")
+          echo "$RESP"
+          if echo "$RESP" | jq -e '.errors' >/dev/null; then
+            echo "Railway deploy failed"
+            exit 1
+          fi
+          DEPLOY_ID=$(echo "$RESP" | jq -r '.data.serviceInstanceDeployV2')
+          echo "Deploy triggered: $DEPLOY_ID (commit $COMMIT_SHA)"
