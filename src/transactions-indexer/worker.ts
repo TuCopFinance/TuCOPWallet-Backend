@@ -212,6 +212,35 @@ export interface IngestResult {
   logCount: number
 }
 
+// Concurrency limit for getTransactionReceipt fan-out. A block with 100 txs
+// historically generated 100 sequential RPC calls (~50ms each on Forno warm
+// path = 5s per block, 1000s per 200-block tick). Parallelizing with 10
+// workers brings tick latency from ~minutes to ~tens of seconds on the same
+// hardware. Not a dep on p-limit because the helper below is 10 LOC and
+// has no third-party surface to audit.
+const DEFAULT_RECEIPT_CONCURRENCY = 10
+
+async function withConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let cursor = 0
+  const worker = async (): Promise<void> => {
+    while (cursor < items.length) {
+      const i = cursor++
+      results[i] = await fn(items[i] as T)
+    }
+  }
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    () => worker(),
+  )
+  await Promise.all(workers)
+  return results
+}
+
 export async function ingestRange(
   rpc: IndexerRpcClient,
   db: Pool,
@@ -224,15 +253,21 @@ export async function ingestRange(
     const block = await rpc.getBlock({ blockNumber: bn, includeTransactions: true })
     const blockTimestampMs = Number(block.timestamp) * 1000
 
-    for (const tx of block.transactions) {
+    // Pre-fetch all receipts in this block concurrently. Persisting still
+    // happens sequentially below so the existing tx-ordering invariants
+    // (cursor advance, log ordering) are preserved exactly.
+    const receipts = await withConcurrency(
+      block.transactions,
+      DEFAULT_RECEIPT_CONCURRENCY,
+      (tx) => rpc.getTransactionReceipt({ hash: tx.hash }),
+    )
+
+    for (let i = 0; i < block.transactions.length; i++) {
+      const tx = block.transactions[i]!
+      const receipt = receipts[i]!
       const from = tx.from.toLowerCase()
       const to = tx.to ? tx.to.toLowerCase() : null
       const directTouch = opts.watched.has(from) || (to !== null && opts.watched.has(to))
-
-      // Always fetch receipt when direct touch; otherwise probe logs for
-      // ERC20 Transfer/Approval where one of the address-shaped topics
-      // matches a watched address (catches receives we'd miss otherwise).
-      const receipt = await rpc.getTransactionReceipt({ hash: tx.hash })
       const logTouch =
         !directTouch &&
         receipt.logs.some((lg) => logTouchesWatched(lg.topics, opts.watched))
@@ -275,6 +310,38 @@ export interface StartIndexerOptions {
   rpcClient?: IndexerRpcClient
   pollIntervalMs?: number
   maxBlocksPerTick?: number
+  // Stop the loop when this AbortSignal aborts. server.ts wires SIGTERM ->
+  // controller.abort() so a Railway shutdown signal lets the worker finish
+  // the current tick instead of being killed mid-INSERT.
+  signal?: AbortSignal
+  // Max iterations - tests only. Production leaves this undefined to loop
+  // forever (until signal aborts).
+  iterations?: number
+}
+
+// Postgres advisory-lock key for the transactions indexer. Different from the
+// Neeru indexer key (7320041002) so the two workers can run concurrently.
+// Two replicas race for this lock and the loser becomes a no-op for that
+// tick, preventing duplicate getTransactionReceipt RPC spend. Do NOT change
+// once deployed.
+export const TRANSACTIONS_INDEXER_ADVISORY_LOCK_KEY = 7320041003n
+
+export async function tryAcquireTransactionsIndexerLock(
+  db: Pool,
+): Promise<boolean> {
+  const { rows } = await db.query<{ ok: boolean }>(
+    'SELECT pg_try_advisory_lock($1::bigint) AS ok',
+    [TRANSACTIONS_INDEXER_ADVISORY_LOCK_KEY.toString()],
+  )
+  return rows[0]?.ok === true
+}
+
+export async function releaseTransactionsIndexerLock(
+  db: Pool,
+): Promise<void> {
+  await db.query('SELECT pg_advisory_unlock($1::bigint)', [
+    TRANSACTIONS_INDEXER_ADVISORY_LOCK_KEY.toString(),
+  ])
 }
 
 export async function startIndexer(
@@ -289,6 +356,8 @@ export async function startIndexer(
   const rpc = options.rpcClient ?? (buildDefaultClient() as unknown as IndexerRpcClient)
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS
   const maxBlocksPerTick = options.maxBlocksPerTick ?? DEFAULT_MAX_BLOCKS_PER_TICK
+  const signal = options.signal
+  const maxIterations = options.iterations
 
   log.info(
     `starting indexer (pollIntervalMs=${pollIntervalMs} maxBlocksPerTick=${maxBlocksPerTick})`,
@@ -297,56 +366,90 @@ export async function startIndexer(
   let watched = await loadWatchedAddresses(db)
   let watchedLoadedAt = Date.now()
   let consecutiveErrors = 0
+  let count = 0
 
-  // No graceful stop wired today; server.ts dies on SIGTERM and Node tears
-  // the loop down with the process. Add a stop hook here if/when needed.
+  // Graceful stop: signal aborted = exit the loop AFTER the current tick.
+  // Lock release runs in finally so a SIGTERM mid-tick still frees it for the
+  // next replica.
   for (;;) {
-    try {
-      if (Date.now() - watchedLoadedAt > 60_000) {
-        watched = await loadWatchedAddresses(db)
-        watchedLoadedAt = Date.now()
-      }
+    if (signal?.aborted) {
+      log.info('shutdown signal received; transactions indexer stopping')
+      return
+    }
+    if (maxIterations != null && count >= maxIterations) return
+    count += 1
 
-      const tip = await rpc.getBlockNumber()
-      const last = await getLastBlock(db, tip)
-      if (tip <= last) {
-        consecutiveErrors = 0
+    try {
+      // Multi-replica safety: skip the tick if another replica holds the
+      // advisory lock. Acquired-and-released per iteration so a crash
+      // between ticks frees it for the next replica.
+      const haveLock = await tryAcquireTransactionsIndexerLock(db)
+      if (!haveLock) {
         await sleep(pollIntervalMs)
         continue
       }
 
-      const cap = last + BigInt(maxBlocksPerTick)
-      const target = tip < cap ? tip : cap
-      const from = last + 1n
+      try {
+        if (Date.now() - watchedLoadedAt > 60_000) {
+          watched = await loadWatchedAddresses(db)
+          watchedLoadedAt = Date.now()
+        }
 
-      if (watched.size === 0) {
-        // Nothing to ingest; advance the cursor so we don't refetch later.
+        const tip = await rpc.getBlockNumber()
+        const last = await getLastBlock(db, tip)
+        if (tip <= last) {
+          consecutiveErrors = 0
+          continue
+        }
+
+        const cap = last + BigInt(maxBlocksPerTick)
+        const target = tip < cap ? tip : cap
+        const from = last + 1n
+
+        if (watched.size === 0) {
+          // Nothing to ingest; advance the cursor so we don't refetch later.
+          await db.query(
+            `UPDATE indexer_state SET last_block = $1 WHERE network_id = $2`,
+            [target.toString(), NETWORK_ID],
+          )
+          consecutiveErrors = 0
+          continue
+        }
+
+        const result = await ingestRange(rpc, db, {
+          fromBlock: from,
+          toBlock: target,
+          watched,
+        })
+
+        // Cursor advance is at-least-once on purpose: ingestRange commits each
+        // matched tx in its own BEGIN/COMMIT transaction, then we bump the
+        // cursor here after the range completes. A crash between the per-tx
+        // commits and this cursor UPDATE means the next tick will re-fetch
+        // and re-attempt persist for those txs. persistTx uses ON CONFLICT
+        // (network_id, tx_hash) DO NOTHING so the re-attempt is a safe no-op.
+        // Cost: wasted RPC + DB churn on crash recovery. Benefit: simpler
+        // code, zero risk of "missed tx", batched cursor write per-tick
+        // instead of per-tx.
         await db.query(
           `UPDATE indexer_state SET last_block = $1 WHERE network_id = $2`,
           [target.toString(), NETWORK_ID],
         )
+
+        if (result.txCount > 0) {
+          log.info(
+            `tick complete: blocks=${from}..${target} txs=${result.txCount} logs=${result.logCount}`,
+          )
+        }
         consecutiveErrors = 0
-        await sleep(pollIntervalMs)
-        continue
+      } finally {
+        await releaseTransactionsIndexerLock(db).catch((err) => {
+          log.warn(
+            `advisory unlock failed: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        })
       }
 
-      const result = await ingestRange(rpc, db, {
-        fromBlock: from,
-        toBlock: target,
-        watched,
-      })
-
-      await db.query(
-        `UPDATE indexer_state SET last_block = $1 WHERE network_id = $2`,
-        [target.toString(), NETWORK_ID],
-      )
-
-      if (result.txCount > 0) {
-        log.info(
-          `tick complete: blocks=${from}..${target} txs=${result.txCount} logs=${result.logCount}`,
-        )
-      }
-      consecutiveErrors = 0
       await sleep(pollIntervalMs)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)

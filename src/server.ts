@@ -80,8 +80,22 @@ async function boot(): Promise<void> {
     log.info(`tucopwallet-backend listening on :${PORT}`)
   })
 
+  // Graceful shutdown: SIGTERM (Railway's standard pod-stop signal) +
+  // SIGINT (Ctrl+C in dev) flip the AbortController so the transactions
+  // indexer finishes its current tick instead of being killed mid-INSERT.
+  // Neeru indexer's lock release is in finally + per-batch BEGIN/COMMIT, so
+  // its mid-tick crash is already idempotent and doesn't need the signal
+  // hook today; revisit if Neeru gains long-running per-tick state.
+  const indexerAbort = new AbortController()
+  for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(sig, () => {
+      log.info(`${sig} received; aborting indexer + draining`)
+      indexerAbort.abort()
+    })
+  }
+
   if (process.env.INDEXER_ENABLED === 'true') {
-    startIndexer().catch((err) => {
+    startIndexer({ signal: indexerAbort.signal }).catch((err) => {
       log.error(`indexer crashed: ${err instanceof Error ? err.message : String(err)}`)
     })
   }
