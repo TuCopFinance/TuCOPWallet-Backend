@@ -1,4 +1,5 @@
 import path from 'path'
+import cors from 'cors'
 import express from 'express'
 import rateLimit from 'express-rate-limit'
 import { hooksApiRouter } from './hooks-api/routes'
@@ -18,6 +19,12 @@ export const app = express()
 // hop lets express-rate-limit see the real client IP without enabling IP
 // spoofing via attacker-supplied X-Forwarded-For headers.
 app.set('trust proxy', 1)
+
+// The primary caller is the TuCop wallet (React Native), which does not enforce
+// CORS. Permissive CORS is set as defense-in-depth so future browser-based
+// callers (webview/mini-app) work without code changes; credentials are off so
+// no cookie/session surface is exposed.
+app.use(cors({ origin: '*', credentials: false }))
 
 // 300 req/min/IP is the global ceiling across every endpoint. Sized for the
 // observed worst case: a user firing ~10 swaps in 2-3 minutes triggers
