@@ -27,7 +27,12 @@ export function getDb(): Pool | null {
 
 export function _resetDbForTests(): void {
   if (pool) {
-    pool.end().catch(() => {})
+    pool.end().catch((err) => {
+      log.warn(
+        'pool teardown error during test reset:',
+        err instanceof Error ? err.message : err,
+      )
+    })
   }
   pool = undefined
 }
