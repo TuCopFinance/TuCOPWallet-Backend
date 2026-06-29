@@ -291,7 +291,7 @@ Returns the merged shortcut catalogue (Allbridge `deposit` / `withdraw` / `claim
 
 #### `GET /api/earn/neeru/positions`
 
-Per-position detail surface for the wallet's "your positions" screen. Returns one entry per OPEN row in `neeru_positions`, enriched with live on-chain reads (per-position accrued interest, per-position frozen rate, tranche lockSeconds, current early-claim penalty). One Multicall3 batch per request; `earlyClaimPenaltyBps()`, `tranches(c).lockSeconds`, and `erc20.decimals()` are cached in-process for 30 s.
+Per-position detail surface for the wallet's "your positions" screen. Returns one entry per OPEN row in `neeru_positions`, enriched with live on-chain reads from the partner contract via a single batched Multicall3 request. Read responses (per-tranche metadata, deposit-token decimals, and any global view fields) are cached in-process for 30 s.
 
 | Param | Required | Notes |
 |------|----------|-------|
@@ -299,7 +299,7 @@ Per-position detail surface for the wallet's "your positions" screen. Returns on
 
 Any other query key returns `400` `unknown param: <name>` (strict allowlist).
 
-**Response shape:**
+**Response shape (placeholder values):**
 
 ```json
 {
@@ -307,38 +307,38 @@ Any other query key returns `400` `unknown param: <name>` (strict allowlist).
     "address": "0x...",
     "positions": [
       {
-        "positionId": "100",
+        "positionId": "<opaque>",
         "tranche": 1,
-        "trancheLabel": "30 dias",
-        "principal": "10000",
-        "accruedInterest": "82.5",
-        "monthlyRatePercentage": 1.0,
+        "trancheLabel": "<derived from on-chain tranche metadata>",
+        "principal": "<decimal-formatted>",
+        "accruedInterest": "<decimal-formatted>",
+        "monthlyRatePercentage": "<numeric>",
         "startTs": 1700000000,
         "endTs": 1702592000,
-        "depositBlock": 70594027,
+        "depositBlock": "<opaque>",
         "depositTxHash": "0x...",
         "renewedFromPositionId": null,
         "currentPayoutIfClosed": {
-          "principal": "10000",
-          "interest": "82.5",
-          "penaltyBps": 2000,
-          "interestAfterPenalty": "66.0",
-          "total": "10066.0",
+          "principal": "<decimal-formatted>",
+          "interest": "<decimal-formatted>",
+          "penaltyBps": "<numeric>",
+          "interestAfterPenalty": "<decimal-formatted>",
+          "total": "<decimal-formatted>",
           "isEarly": true
         }
       }
     ],
-    "lastSyncedBlock": 70750000,
-    "lastSyncedAt": "2026-06-26T15:30:00Z"
+    "lastSyncedBlock": "<opaque>",
+    "lastSyncedAt": "<iso-8601>"
   }
 }
 ```
 
 Notes:
 
-- `trancheLabel` is `Flexible` for category 0; otherwise `<days> dias` derived from on-chain `tranches(category).lockSeconds`.
-- `monthlyRatePercentage` is computed from the per-position frozen rate stored on-chain (`positions(positionId).r7`), not from the live tranche rate, so quotes don't drift after the tranche rate is updated.
-- `currentPayoutIfClosed.isEarly` is `true` only when the tranche is locked AND `now < endTs`. When `isEarly`, `interestAfterPenalty = accruedInterest * (10000 - penaltyBps) / 10000` (bigint floor division on the wei value before formatting).
+- `trancheLabel` is `Flexible` for the flexible-tranche category; otherwise a `<days> dias` label derived from the on-chain tranche metadata.
+- `monthlyRatePercentage` is computed from the per-position frozen-rate field stored on chain at deposit time, not from the live tranche rate, so quotes do not drift after a tranche-rate update.
+- `currentPayoutIfClosed.isEarly` is `true` only when the position is locked AND `now < endTs`. The early-claim penalty math runs in wei (bigint floor division) before the value is formatted.
 - `renewedFromPositionId` is always `null`; the indexer schema does not track renewal chains.
 - `lastSyncedBlock` / `lastSyncedAt` come from `neeru_indexer_state` so the wallet can warn if the partner indexer is stale.
 
@@ -404,18 +404,7 @@ Each transaction is JSON-safe: `value` is a string (`"0"` for non-payable calls)
 **Error responses:**
 
 - `400` `{ "error": "invalid <field>" }` for body validation failures (`invalid address`, `invalid tokens`, `invalid positionId`, etc.) and `unknown appId` / `unknown shortcut` / `unsupported networkId`.
-- `400` `{ "error": "<code>" }` when the preflight catches a recoverable wallet-side issue. The code is one of:
-  - `INVALID_TRANCHE` -- `trancheId` not in `0..3`
-  - `INVALID_AMOUNT` -- amount string not a positive integer
-  - `DEPOSITS_PAUSED` -- contract reports the deposit path is paused
-  - `GLOBAL_CAP_EXCEEDED` -- contract-level TVL cap would be breached
-  - `TRANCHE_CAP_EXCEEDED` -- per-tranche cap would be breached
-  - `RATE_NOT_SET` -- tranche rate parameter not yet configured
-  - `AMOUNT_BELOW_MIN` -- amount under the contract's `minDeposit`
-  - `POSITION_NOT_FOUND` -- positionId not owned by the requester (per indexer)
-  - `POSITION_NOT_OWNED` -- on-chain owner mismatch (defense in depth vs. stale indexer)
-  - `POSITION_ALREADY_CLOSED` -- on-chain closed flag is set
-  - `NEERU_NOT_CONFIGURED` -- `NEERU_DEPOSIT_TOKEN_ADDRESS` env var not set on the backend
+- `400` `{ "error": "<code>" }` when the preflight catches a recoverable wallet-side issue. The set of codes is the contract's own validation surface; the wallet handles each code as a user-facing message. Codes are stable but intentionally not enumerated in this public doc to keep the partner contract's behavior model private. The full list is in `src/hooks-api/routes.ts` (`TRIGGER_USER_ERROR_CODES`).
 - `502` `{ "error": "shortcut build failed" }` for any other (infra / RPC) failure. The underlying message is logged server-side and never echoed.
 - `503` `{ "error": "neeru not configured" }` when the Neeru env vars are not set.
 - `503` `{ "error": "database not configured" }` when a Neeru withdraw is requested without `DATABASE_URL`.
