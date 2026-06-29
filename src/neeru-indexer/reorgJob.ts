@@ -7,6 +7,11 @@ const log = createLogger('neeru-indexer:reorg')
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const MULTICALL_CHUNK_SIZE = 100
+// On a failed multicall entry, retry the row as a single readContract before
+// concluding it should be deleted. allowFailure mixes "tx reverted on chain"
+// with "RPC transport blip on this one entry"; a single re-read distinguishes
+// transient infra failures from real contract reverts.
+const SINGLE_RETRY_TIMEOUT_LABEL = 'positions-retry'
 
 export interface RunReorgReconciliationOptions {
   db: Pool
@@ -75,8 +80,30 @@ export async function runReorgReconciliation(
       let onchainStatus: string
 
       if (result.status === 'failure') {
-        shouldDelete = true
-        onchainStatus = `revert: ${result.error.message}`
+        // Single retry to distinguish a transient RPC blip on this entry
+        // from a genuine on-chain revert. The original multicall error is
+        // preserved in the log line so operators can see the contract's
+        // revert reason; the retry only decides whether we should delete.
+        const originalError = result.error.message
+        const retried = await retryPositionsRead(rpc, BigInt(positionId))
+        if (retried.kind === 'transient') {
+          onchainStatus = `transient: ${retried.error} - keeping row`
+          log.warn(
+            `[neeru:reorg] transient failure on positionId=${positionId} depositBlock=${depositBlock} depositTxHash=${depositTxHash} (${SINGLE_RETRY_TIMEOUT_LABEL}): ${onchainStatus} (original=${originalError})`,
+          )
+          continue
+        } else if (retried.kind === 'reverted') {
+          shouldDelete = true
+          onchainStatus = `revert: ${originalError}`
+        } else {
+          const ownerStr = retried.ownerLower
+          if (ownerStr === ZERO_ADDRESS) {
+            shouldDelete = true
+            onchainStatus = 'owner=0x0000000000000000000000000000000000000000'
+          } else {
+            onchainStatus = `owner=${ownerStr} - on-chain row present (recovered)`
+          }
+        }
       } else {
         const owner = result.result[0]
         const ownerStr =
@@ -108,4 +135,47 @@ export async function runReorgReconciliation(
     `reorg reconciliation complete: scanned=${rows.length} deleted=${deleted}`,
   )
   return { scanned: rows.length, deleted }
+}
+
+// "Transport" or "ECONNREFUSED" or "fetch failed" markers in the error message
+// are treated as transient; anything else (including viem `ContractFunctionRevertedError`
+// or a parsed revert reason) is treated as a real revert.
+const TRANSIENT_PATTERNS = [
+  /fetch failed/i,
+  /ECONNREFUSED/i,
+  /ECONNRESET/i,
+  /ETIMEDOUT/i,
+  /timeout/i,
+  /5\d{2}/, // any 5xx status echoed in the message
+  /network/i,
+  /socket hang up/i,
+]
+
+type RetryResult =
+  | { kind: 'transient'; error: string }
+  | { kind: 'reverted'; error: string }
+  | { kind: 'success'; ownerLower: string }
+
+async function retryPositionsRead(
+  rpc: NeeruIndexerRpcClient,
+  positionId: bigint,
+): Promise<RetryResult> {
+  try {
+    const raw = (await rpc.readContract({
+      address: CONTRACT_ADDRESS,
+      abi: READ_ABI,
+      functionName: 'positions',
+      args: [positionId] as unknown as readonly [bigint],
+    })) as readonly unknown[]
+    const owner = raw[0]
+    const ownerStr =
+      typeof owner === 'string' ? owner.toLowerCase() : String(owner)
+    return { kind: 'success', ownerLower: ownerStr }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    const transient = TRANSIENT_PATTERNS.some((re) => re.test(message))
+    return transient
+      ? { kind: 'transient', error: message }
+      : { kind: 'reverted', error: message }
+  }
 }
