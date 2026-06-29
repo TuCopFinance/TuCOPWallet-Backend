@@ -1,6 +1,4 @@
 import {
-  createPublicClient,
-  http,
   type MulticallParameters,
   type MulticallReturnType,
   type PublicClient,
@@ -10,13 +8,19 @@ import {
   type ContractFunctionName,
   type ContractFunctionArgs,
 } from 'viem'
-import { celo } from 'viem/chains'
+import {
+  createCeloPublicClient,
+  FORNO_URL as FORNO_DEFAULT_URL,
+} from '../lib/celoClient'
 import { createLogger } from '../lib/logger'
 
 const log = createLogger('neeru-indexer:rpc')
 
 export const PRIMARY_URL = 'https://rpc.celocolombia.org'
-export const FORNO_URL = 'https://forno.celo.org'
+// Indexer falls back through Forno -> Ankr -> dRPC if the primary is down.
+// FORNO_URL is exported so callers can keep importing it; the actual URL used
+// is `process.env.FORNO_URL || default` via the helper.
+export const FORNO_URL = FORNO_DEFAULT_URL
 export const ANKR_URL = 'https://rpc.ankr.com/celo'
 export const DRPC_URL = 'https://celo.drpc.org'
 
@@ -80,10 +84,7 @@ interface PrimaryState {
 }
 
 function makeClient(url: string): PublicClient {
-  return createPublicClient({
-    chain: celo,
-    transport: http(url),
-  }) as unknown as PublicClient
+  return createCeloPublicClient({ url })
 }
 
 export interface CreateNeeruRpcOptions {
