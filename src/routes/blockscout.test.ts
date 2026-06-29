@@ -13,7 +13,8 @@ const mockBlockscoutGet = blockscout.blockscoutGet as jest.MockedFunction<
 
 const VALID_HASH =
   '0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789'
-const VALID_ADDRESS = '0xa203bb4b3eba27ad3a5e3da6b8d6b8d6b8d6b8d6'
+// Synthetic test address; do not use a real-looking prefix.
+const VALID_ADDRESS = '0x3333333333333333333333333333333333333333'
 
 describe('blockscout proxy', () => {
   beforeEach(() => {

@@ -10,7 +10,9 @@ jest.mock('../lib/redis', () => ({
   getRedis: () => (useRedis ? mockRedisClient : null),
 }))
 
-const USER = '0xa203bb4b3eba27ad3a5e3da6b8d6b8d6b8d6b8d6'
+// Synthetic test address. Avoid wallet-shaped prefixes that might collide with
+// a real maintainer key.
+const USER = '0x3333333333333333333333333333333333333333'
 const USDC = '0xceba9300f2b948710d2653dd7b07f33a8b32118c'
 const USDT = '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e'
 const SWAP_TARGET = '0x1111111111111111111111111111111111111111'
