@@ -23,7 +23,14 @@ if (!process.env.ETHERSCAN_API_KEY) {
 // deploy or env-var hijack could turn the /api/v2/* routes into a generic
 // SSRF gateway. Hosts must explicitly appear here. Operators add via the
 // BLOCKSCOUT_ALLOWED_HOSTS env (comma-separated) when adding a new chain.
-const BLOCKSCOUT_DEFAULT_ALLOWED_HOSTS = ['celo.blockscout.com']
+//
+// `api.blockscout.com` is the Blockscout multichain Pro gateway (path-prefixed
+// by chainId, e.g. /42220). Production uses this because the Pro API key was
+// issued against it. `celo.blockscout.com` is the public per-chain instance.
+const BLOCKSCOUT_DEFAULT_ALLOWED_HOSTS = [
+  'celo.blockscout.com',
+  'api.blockscout.com',
+]
 
 const blockscoutBaseUrl = process.env.BLOCKSCOUT_BASE_URL
 if (blockscoutBaseUrl) {
