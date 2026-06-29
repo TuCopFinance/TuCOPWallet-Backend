@@ -27,9 +27,11 @@ export function mountNeeruDetailRoute(router: Router): void {
   router.get(
     '/api/earn/neeru/positions',
     async (req: Request, res: Response) => {
+      // Canonical message; do not echo the attacker-supplied key name in
+      // the response (mirrors the swap-quote handler's pattern).
       for (const key of Object.keys(req.query)) {
         if (!ALLOWED_QUERY_PARAMS.has(key)) {
-          return res.status(400).json({ error: `unknown param: ${key}` })
+          return res.status(400).json({ error: 'unknown param' })
         }
       }
 

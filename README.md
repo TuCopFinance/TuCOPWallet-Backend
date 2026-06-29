@@ -138,7 +138,7 @@ Validation: `:hash` must match `0x` + 64 hex; `:address` must match `0x` + 40 he
 
 Drop-in replacement for Valora's `getSwapQuote` cloud function. Backend POSTs to Squid Router v2 with TuCop's `x-integrator-id` so swap volume attribution flows to TuCop. The response shape matches the wallet's `FetchQuoteResponse` (`src/swap/types.ts` in TuCopWallet) so the mobile-side change is a single URL flip.
 
-**Query params (strict allowlist; any other key returns `400 { "error": "unknown param: <name>" }`):**
+**Query params (strict allowlist; any other key returns `400 { "error": "unknown param" }`):**
 
 | Name | Required | Validation | Notes |
 |------|----------|------------|-------|
@@ -183,7 +183,7 @@ When `sellNetworkId !== buyNetworkId`, the `unvalidatedSwapTransaction` object a
 
 **Error responses:**
 
-- `400` `{ "error": "invalid <field>" }` / `{ "error": "unknown param: <name>" }` / `{ "error": "unsupported sellNetworkId: <slug>" }`
+- `400` `{ "error": "invalid <field>" }` / `{ "error": "unknown param" }` / `{ "error": "unsupported sellNetworkId" }` / `{ "error": "unsupported buyNetworkId" }`
 - `429` `{ "error": "rate limited by squid, retry" }` (pass-through when Squid throttles us; the upstream `Retry-After` header is forwarded). Squid throttles per-wallet at 10 RPS, so the safe pattern for parallel planning quotes is `quoteOnly=true` on the planner and `quoteOnly=false` only on commit.
 - `502` `{ "error": "squid upstream unavailable" }` (timeout or non-429 non-2xx from Squid; the upstream message is never echoed)
 - `503` `{ "error": "squid integrator id not configured" }` if `SQUID_INTEGRATOR_ID` is not set on the backend
@@ -347,7 +347,7 @@ Per-position detail surface for the wallet's "your positions" screen. Returns on
 |------|----------|-------|
 | `address` | yes | `0x` + 40 lowercase hex |
 
-Any other query key returns `400` `unknown param: <name>` (strict allowlist).
+Any other query key returns `400 { "error": "unknown param" }` (strict allowlist).
 
 **Response shape (placeholder values):**
 
@@ -395,7 +395,7 @@ Notes:
 **Error responses:**
 
 - `400` `{ "error": "invalid address" }` if `address` is missing, not lowercase, or not 40 hex.
-- `400` `{ "error": "unknown param: <name>" }` for any query key other than `address`.
+- `400` `{ "error": "unknown param" }` for any query key other than `address`.
 - `503` `{ "error": "database not configured" }` when `DATABASE_URL` is unset.
 - `503` `{ "error": "neeru not configured" }` when `NEERU_DEPOSIT_TOKEN_ADDRESS` is unset.
 - `502` `{ "error": "detail fetch failed" }` on any infra/RPC failure. Underlying message is logged server-side and never echoed.
