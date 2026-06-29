@@ -66,11 +66,44 @@ Both workers use Postgres advisory locks for multi-replica safety and back off o
 
 ### `GET /health`
 
-Returns service status.
+Liveness probe. Returns 200 with static service info as long as the process is responsive. Does NOT check dependencies; use `/ready` for that.
 
 ```json
 { "ok": true, "service": "tucopwallet-backend", "version": "0.1.0" }
 ```
+
+### `GET /ready`
+
+Readiness probe. Checks Postgres, Redis, and Celo RPC each with a 1s timeout. Returns 200 when all healthy or when the optional deps (DB, Redis) are unconfigured; returns 503 with a per-dependency status when any required check fails.
+
+```json
+{ "ok": true, "checks": { "db": "ok", "redis": "ok", "rpc": "ok" } }
+```
+
+```json
+{ "ok": false, "checks": { "db": "fail: connection refused", "redis": "ok", "rpc": "ok" } }
+```
+
+Operator alerts should page on `/ready` 503s, not `/health`.
+
+### `GET /health/relay`
+
+Relay hot-wallet health surface. Returns the relay address and current CELO balance (private key never exposed). Lets external monitors alert on low balance without an Sentry / Grafana integration.
+
+```json
+{
+  "ok": true,
+  "address": "0x...",
+  "balanceWei": "10000000000000000000",
+  "balanceCelo": "10"
+}
+```
+
+Returns `503 { "ok": false, "error": "relay not configured" }` when `WRI_RELAY_PK` is missing or invalid, or `502 { "ok": false, "error": "rpc unavailable", "address": "0x..." }` on RPC failure.
+
+### `GET /metrics`
+
+Prometheus scrape endpoint (text format). Includes default Node/process metrics, an `http_request_duration_seconds` histogram labeled by method/route/status, custom `wri_relay_*` counters/gauges, `pg_pool_*` gauges, and Neeru indexer gauges. Scrape interval recommendation: 30s.
 
 ### `GET /api/prices/xaut`
 
@@ -130,9 +163,19 @@ Passthrough proxy for Celo's Blockscout V2 API, injecting the API key on the ser
 | `GET /api/v2/addresses/:address/transactions` | 30 s |
 | `GET /api/v2/addresses/:address/token-transfers` | 300 s |
 
-Query string parameters (e.g. `filter`, `block_number`) are forwarded to upstream. The reserved `apikey` and `api_key` keys are stripped server-side so clients cannot override the server key. Cache keys are normalised (sorted, reserved params dropped, capped at 512 chars) so callers cannot blow up the Redis keyspace by passing junk params.
+**Query params** are strictly whitelisted per route. Unknown keys (including the reserved `apikey` / `api_key`) return `400 { "error": "unknown param" }`. Cache keys are normalised (sorted, reserved params dropped, capped at 512 chars) so callers cannot blow up the Redis keyspace.
 
-Validation: `:hash` must match `0x` + 64 hex; `:address` must match `0x` + 40 hex. Otherwise `400 { "error": "invalid ..." }`. Upstream failures return `502 { "error": "blockscout upstream unavailable" }`.
+| Route | Allowed query params |
+|---|---|
+| `GET /api/v2/transactions/:hash` | (none) |
+| `GET /api/v2/addresses/:address/transactions` | `filter`, `block_number`, `index`, `items_count` |
+| `GET /api/v2/addresses/:address/token-transfers` | `filter`, `type`, `token`, `block_number`, `index`, `items_count` |
+
+Adding a new param means a deliberate edit to `ALLOWED_*_PARAMS` in `src/routes/blockscout.ts`, not silent passthrough.
+
+**Host allowlist:** `BLOCKSCOUT_BASE_URL` must use https:// AND its hostname must appear in the static allowlist in `src/server.ts` (default: `celo.blockscout.com`). Operators can add hosts via the comma-separated `BLOCKSCOUT_ALLOWED_HOSTS` env. A misconfigured deploy now fails at boot with a clear error rather than turning the proxy into a generic SSRF gateway.
+
+**Validation:** `:hash` must match `0x` + 64 hex; `:address` must match `0x` + 40 hex. Otherwise `400 { "error": "invalid ..." }`. Upstream failures return `502 { "error": "blockscout upstream unavailable" }`.
 
 ### `GET /api/swap/quote`
 
@@ -223,9 +266,12 @@ One-time, sponsored EIP-7702 delegation setup for TuCop's Wallet Relay Infrastru
 **Operational invariants:**
 
 - If the user's EOA code already starts with `0xef0100` followed by the BatchExecutor address, the endpoint short-circuits with `{ "status": "already_delegated" }` and submits no tx.
-- Per-address rate limit: 1 successful relay per 5 minutes per `userAddress` (Redis-backed when `REDIS_URL` is configured, in-process Map otherwise; without Redis the limit is per-instance only).
+- **Three-tier rate limiting** (each independent; all must pass):
+  - **Per-IP:** `WRI_RELAY_PER_IP_LIMIT` requests per minute per source IP (default `20`). Blocks address-spraying from a single source. Set to `0` to disable.
+  - **Global token bucket:** `WRI_RELAY_GLOBAL_LIMIT` requests per minute total across ALL addresses + IPs (default `60`). Defense against distributed spraying. Requires Redis; fail-closed (returns 503 `rate limiter unavailable`) when Redis is down. Set to `0` to disable.
+  - **Per-address:** 1 successful relay per 5 minutes per `userAddress` (Redis-backed when `REDIS_URL` is configured; bounded in-process Map otherwise, capped at 10k entries with the same 5 minute TTL).
+- The global 300 req/min/IP ceiling from `app.ts` still applies on top of these.
 - Relay hot-wallet health check: if balance is below `WRI_RELAY_MIN_CELO_BALANCE`, returns 503 and logs an alert.
-- The global 120 req/min/IP rate limit from `app.ts` still applies on top.
 
 **Success response (delegation submitted and confirmed):**
 
@@ -241,9 +287,9 @@ One-time, sponsored EIP-7702 delegation setup for TuCop's Wallet Relay Infrastru
 **Error responses:**
 
 - `400` `{ "error": "invalid userAddress" }` / `invalid signedAuthorization` / `invalid chainId` / `invalid delegation target` / `invalid signature` / `nonce mismatch`
-- `429` `{ "error": "address rate limited" }` with `Retry-After` header
+- `429` `{ "error": "ip rate limited" }` (per-IP tier) / `relay globally rate limited` (global token bucket) / `address rate limited` (per-address tier) - each with `Retry-After` header
 - `502` `{ "error": "rpc unavailable" }` / `relay tx submission failed` / `relay tx reverted` / `relay tx unconfirmed` / `relay tx unverified`
-- `503` `{ "error": "relay temporarily unavailable" }` (relay private key missing/invalid or balance below threshold)
+- `503` `{ "error": "relay temporarily unavailable" }` (relay private key missing/invalid or balance below threshold) / `rate limiter unavailable` (global tier requires Redis and Redis is down)
 
 **Out of scope:** this endpoint ONLY handles the one-time delegation setup. The actual `execute(calls)` payload that uses the delegated EOA must be sent by the wallet as a regular CIP-64 transaction; the backend does not relay batch payloads.
 

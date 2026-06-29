@@ -12,10 +12,46 @@ const TTL_TX = 30
 const TTL_ADDR_TXS = 30
 const TTL_ADDR_TOKEN_TRANSFERS = 300
 
+// Per-route query-param allowlists. Anything outside the set returns 400 at
+// the boundary, so attacker-supplied params never reach upstream or get
+// folded into the cache-key namespace. Mirrors what the wallet client
+// actually sends today (Blockscout V2 pagination + filter keys). Adding a
+// new param means a deliberate edit here, not silent passthrough.
+const ALLOWED_TX_PARAMS = new Set<string>([])
+const ALLOWED_ADDR_TXS_PARAMS = new Set<string>([
+  'filter',
+  'block_number',
+  'index',
+  'items_count',
+])
+const ALLOWED_ADDR_TOKEN_TRANSFERS_PARAMS = new Set<string>([
+  'filter',
+  'type',
+  'token',
+  'block_number',
+  'index',
+  'items_count',
+])
+
+function rejectUnknownParams(
+  req: Request,
+  res: Response,
+  allowed: Set<string>,
+): boolean {
+  for (const key of Object.keys(req.query)) {
+    if (!allowed.has(key)) {
+      res.status(400).json({ error: 'unknown param' })
+      return true
+    }
+  }
+  return false
+}
+
 async function proxy(req: Request, res: Response, ttlSeconds: number): Promise<void> {
   const cache = getRedis()
   // stripReservedParams runs at the public boundary so reserved params (e.g.
   // `apikey`) never reach upstream nor balloon the cache key namespace.
+  // Combined with the per-route allowlist above this is belt + suspenders.
   const safeQuery = stripReservedParams(req.query as Record<string, string>)
   const cacheKey = buildCacheKey('blockscout', req.path, safeQuery)
 
@@ -48,6 +84,7 @@ router.get('/api/v2/transactions/:hash', async (req, res) => {
   if (!HEX_BYTES32_RE.test(hash)) {
     return res.status(400).json({ error: 'invalid tx hash' })
   }
+  if (rejectUnknownParams(req, res, ALLOWED_TX_PARAMS)) return
   await proxy(req, res, TTL_TX)
 })
 
@@ -56,6 +93,7 @@ router.get('/api/v2/addresses/:address/transactions', async (req, res) => {
   if (!HEX_ADDRESS_RE.test(address)) {
     return res.status(400).json({ error: 'invalid address' })
   }
+  if (rejectUnknownParams(req, res, ALLOWED_ADDR_TXS_PARAMS)) return
   await proxy(req, res, TTL_ADDR_TXS)
 })
 
@@ -64,6 +102,7 @@ router.get('/api/v2/addresses/:address/token-transfers', async (req, res) => {
   if (!HEX_ADDRESS_RE.test(address)) {
     return res.status(400).json({ error: 'invalid address' })
   }
+  if (rejectUnknownParams(req, res, ALLOWED_ADDR_TOKEN_TRANSFERS_PARAMS)) return
   await proxy(req, res, TTL_ADDR_TOKEN_TRANSFERS)
 })
 
