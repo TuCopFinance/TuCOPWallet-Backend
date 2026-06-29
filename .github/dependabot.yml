@@ -1,0 +1,49 @@
+version: 2
+
+updates:
+  # npm: weekly minor/patch group, separate majors for manual review.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Bogota"
+    open-pull-requests-limit: 5
+    target-branch: "development"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+      include: "scope"
+    groups:
+      # Patch + minor for runtime + dev deps land as a single PR per week.
+      # Majors stay separate so each breaking change gets explicit review.
+      minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # viem moves fast; we pin a specific minor and bump deliberately to
+      # avoid landing an EIP-7702 / multicall API change without a test pass.
+      - dependency-name: "viem"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+
+  # GitHub Actions: monthly check for action version bumps.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+      day: "first monday"
+      time: "09:00"
+      timezone: "America/Bogota"
+    open-pull-requests-limit: 3
+    target-branch: "development"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "ci(deps)"
+      include: "scope"

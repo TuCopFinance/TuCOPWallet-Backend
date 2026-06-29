@@ -86,10 +86,12 @@ describe('GET /api/swap/quote', () => {
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
-  it('rejects unknown query param', async () => {
+  it('rejects unknown query param without echoing param name', async () => {
     const res = await request(app).get('/api/swap/quote?' + paramsTo() + '&evil=1')
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/unknown param: evil/)
+    // Canonical message; the param name 'evil' MUST NOT be reflected.
+    expect(res.body.error).toBe('unknown param')
+    expect(res.body.error).not.toMatch(/evil/)
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
