@@ -77,16 +77,27 @@ describe('blockscout proxy', () => {
       })
     })
 
-    it('strips reserved apikey query param so attackers cannot override the server key', async () => {
-      mockBlockscoutGet.mockResolvedValueOnce({ items: [] })
-
-      await request(app).get(
+    it('rejects unknown apikey param with 400 so it never reaches upstream', async () => {
+      // Per-route allowlist now rejects the reserved `apikey` key explicitly
+      // rather than silently stripping it. Earlier rejection = clearer signal
+      // that the client is misbehaving, plus defense in depth.
+      const res = await request(app).get(
         `/api/v2/addresses/${VALID_ADDRESS}/transactions?apikey=evil&filter=to`,
       )
 
-      const call = mockBlockscoutGet.mock.calls[0]?.[0]
-      expect(call?.query).not.toHaveProperty('apikey')
-      expect(call?.query).toMatchObject({ filter: 'to' })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('unknown param')
+      expect(mockBlockscoutGet).not.toHaveBeenCalled()
+    })
+
+    it('rejects any unknown query param with 400', async () => {
+      const res = await request(app).get(
+        `/api/v2/addresses/${VALID_ADDRESS}/transactions?bogus=1`,
+      )
+
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('unknown param')
+      expect(mockBlockscoutGet).not.toHaveBeenCalled()
     })
 
     it('rejects invalid address with 400', async () => {
