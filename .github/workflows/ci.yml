@@ -18,5 +18,16 @@ jobs:
       - run: yarn install --frozen-lockfile
       - run: yarn lint
       - run: yarn typecheck
-      - run: yarn test --ci --silent
+      - run: yarn test --ci --silent --coverage --coverageReporters=lcov --coverageReporters=text-summary
       - run: yarn build
+      # Coverage upload to Codecov. Token is OPTIONAL for public repos but
+      # recommended (avoids upload rate limits + lets the PR comment link
+      # back). When CODECOV_TOKEN secret is unset, the action no-ops.
+      - name: Upload coverage to Codecov
+        if: ${{ always() && hashFiles('coverage/lcov.info') != '' }}
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage/lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          verbose: false

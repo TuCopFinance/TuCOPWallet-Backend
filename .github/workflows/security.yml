@@ -1,0 +1,69 @@
+name: Security
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so gitleaks can scan the diff range, not just HEAD.
+          fetch-depth: 0
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE is OPTIONAL for OSS / public repos; the action
+          # is free without it. Keep the env var present so future
+          # private-org migrations only need to flip the secret.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  dependency-review:
+    name: Dependency review (CVEs in new deps)
+    runs-on: ubuntu-latest
+    # Pull-request only; on push there's no compare-base to review against.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          # Block PRs that introduce HIGH or CRITICAL severity CVEs.
+          fail-on-severity: high
+          # Allow licenses commonly used in our deps. Add as needed.
+          allow-licenses: Apache-2.0, MIT, ISC, BSD-2-Clause, BSD-3-Clause, CC0-1.0, CC-BY-4.0, 0BSD, Unlicense
+
+  commitlint:
+    name: Commit message lint (conventional commits)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # Install commitlint inline (no devDep added to package.json so the
+      # production install stays small). Allows the in-repo commit history
+      # convention to be enforced without an extra dep on the runtime.
+      - name: Install commitlint
+        run: |
+          npm install --no-save --no-package-lock \
+            @commitlint/cli@19 \
+            @commitlint/config-conventional@19
+      - name: Lint PR commits
+        run: |
+          npx commitlint \
+            --from "${{ github.event.pull_request.base.sha }}" \
+            --to "${{ github.event.pull_request.head.sha }}" \
+            --config <(echo "module.exports = { extends: ['@commitlint/config-conventional'] }")
