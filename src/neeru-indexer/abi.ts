@@ -1,26 +1,10 @@
 import type { AbiFunction } from 'viem'
-
-const ZERO_HEX_40 = '0x0000000000000000000000000000000000000000' as const
-const ZERO_HEX_64 =
-  '0x0000000000000000000000000000000000000000000000000000000000000000' as const
-
-function readEnvAddress(name: string): `0x${string}` {
-  const v = process.env[name]
-  if (!v) return ZERO_HEX_40
-  if (!/^0x[0-9a-fA-F]{40}$/.test(v)) {
-    throw new Error(`${name} must be 0x + 40 hex (got: ${v.length} chars)`)
-  }
-  return v as `0x${string}`
-}
-
-function readEnvTopic0(name: string): `0x${string}` {
-  const v = process.env[name]
-  if (!v) return ZERO_HEX_64
-  if (!/^0x[0-9a-fA-F]{64}$/.test(v)) {
-    throw new Error(`${name} must be 0x + 64 hex (got: ${v.length} chars)`)
-  }
-  return v.toLowerCase() as `0x${string}`
-}
+import {
+  readEnvAddress,
+  readEnvTopic0,
+  ZERO_ADDRESS,
+  ZERO_TOPIC,
+} from '../lib/env'
 
 export const CONTRACT_ADDRESS = readEnvAddress('NEERU_CONTRACT_ADDRESS')
 
@@ -60,7 +44,7 @@ export const POSITIONS_FN_ABI = {
 export const READ_ABI = [POSITIONS_FN_ABI] as const
 
 export function assertIndexerConfig(): void {
-  if (CONTRACT_ADDRESS === ZERO_HEX_40) {
+  if (CONTRACT_ADDRESS === ZERO_ADDRESS) {
     throw new Error('NEERU_CONTRACT_ADDRESS not set')
   }
   if (INDEXER_GENESIS_BLOCK === 0n) {
@@ -73,7 +57,7 @@ export function assertIndexerConfig(): void {
     ['NEERU_EVENT_D_TOPIC0', EVENT_D_TOPIC0],
   ]
   for (const [name, value] of required) {
-    if (value === ZERO_HEX_64) {
+    if (value === ZERO_TOPIC) {
       throw new Error(`${name} not set`)
     }
   }
