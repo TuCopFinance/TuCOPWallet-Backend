@@ -153,6 +153,26 @@ describe('POST /api/wri/delegate-relay', () => {
     expect(mockSendTransaction).not.toHaveBeenCalled()
   })
 
+  it('rejects truncated r (not 32-byte hex)', async () => {
+    const body = validBody({
+      signedAuthorization: { r: '0x' },
+    })
+    const res = await request(app).post('/api/wri/delegate-relay').send(body)
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/signedAuthorization/i)
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('rejects truncated s (not 32-byte hex)', async () => {
+    const body = validBody({
+      signedAuthorization: { s: '0x' + 'bb'.repeat(31) },
+    })
+    const res = await request(app).post('/api/wri/delegate-relay').send(body)
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/signedAuthorization/i)
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
   it('rate-limits same address within 5 min', async () => {
     setupHappyPathDefaults()
     const first = await request(app).post('/api/wri/delegate-relay').send(validBody())

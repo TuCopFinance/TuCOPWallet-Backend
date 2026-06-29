@@ -1,8 +1,15 @@
 import { Router, Request, Response } from 'express'
 import type { Hex } from 'viem'
 import { recoverAuthorizationAddress } from 'viem/utils'
-import { HEX_ADDRESS_RE } from '../lib/hex'
+import { parseEnvBigInt } from '../lib/env'
+import { HEX_ADDRESS_RE, HEX_BYTES32_RE } from '../lib/hex'
 import { createLogger } from '../lib/logger'
+import {
+  BATCH_EXECUTOR_ADDRESS,
+  BATCH_EXECUTOR_ADDRESS_LOWER,
+  CELO_MAINNET_CHAIN_ID,
+  EIP_7702_DELEGATED_CODE_PREFIX,
+} from '../lib/networks'
 import { getRedis } from '../lib/redis'
 import { getRelayClients } from '../lib/wriRelay'
 import { tryAcquireDelegateRelaySlot, WRI_RATE_LIMIT_WINDOW_SECONDS } from '../lib/wriRateLimit'
@@ -10,9 +17,10 @@ import { tryAcquireDelegateRelaySlot, WRI_RATE_LIMIT_WINDOW_SECONDS } from '../l
 const router = Router()
 const log = createLogger('routes:wri')
 
-export const CELO_CHAIN_ID = 42220
-export const BATCH_EXECUTOR_ADDRESS = '0xaE6a87E88b55644Eda54C3AA55B11944eE5E1DFe'
-const BATCH_EXECUTOR_ADDRESS_LOWER = BATCH_EXECUTOR_ADDRESS.toLowerCase()
+// Re-exports kept for the small number of tests that import these from the
+// route module rather than from `lib/networks`.
+export const CELO_CHAIN_ID = CELO_MAINNET_CHAIN_ID
+export { BATCH_EXECUTOR_ADDRESS }
 
 const DEFAULT_MIN_BALANCE_WEI = 500000000000000000n
 const DEFAULT_MAX_GAS = 1000000n
@@ -20,9 +28,6 @@ const RECEIPT_TIMEOUT_MS = 30_000
 const POST_MINING_MAX_ATTEMPTS = 4
 const POST_MINING_RETRY_DELAY_MS = 500
 
-// Variable-length hex string (signature components r/s); not a single fixed
-// width like the address/topic helpers in lib/hex.ts.
-const HEX_RE = /^0x[a-fA-F0-9]*$/
 const Y_PARITY_RE = /^0x[01]$/
 
 interface IncomingSignedAuthorization {
@@ -48,9 +53,13 @@ interface ParsedAuth {
   s: Hex
 }
 
+// Hex string of any length, used only to parse small numeric fields (chainId,
+// nonce) where r/s would be rejected by the bytes32 check below.
+const SHORT_HEX_RE = /^0x[a-fA-F0-9]*$/
+
 function parseHexBigInt(value: unknown): bigint | null {
   if (typeof value !== 'string') return null
-  if (!HEX_RE.test(value)) return null
+  if (!SHORT_HEX_RE.test(value)) return null
   if (value === '0x') return 0n
   try {
     return BigInt(value)
@@ -79,8 +88,10 @@ function parseAuthorization(raw: unknown): ParsedAuth | null {
   if (typeof obj.yParity !== 'string' || !Y_PARITY_RE.test(obj.yParity)) return null
   const yParity = obj.yParity === '0x1' ? 1 : 0
 
-  if (typeof obj.r !== 'string' || !HEX_RE.test(obj.r)) return null
-  if (typeof obj.s !== 'string' || !HEX_RE.test(obj.s)) return null
+  // r/s MUST be exactly 32 bytes. Variable-length hex would let `0x` or other
+  // truncated values reach viem's signature recovery with undefined behavior.
+  if (typeof obj.r !== 'string' || !HEX_BYTES32_RE.test(obj.r)) return null
+  if (typeof obj.s !== 'string' || !HEX_BYTES32_RE.test(obj.s)) return null
 
   return {
     chainId,
@@ -95,7 +106,7 @@ function parseAuthorization(raw: unknown): ParsedAuth | null {
 function isDelegatedToBatchExecutor(code: Hex | undefined): boolean {
   if (!code) return false
   const lower = code.toLowerCase()
-  const expected = `0xef0100${BATCH_EXECUTOR_ADDRESS_LOWER.slice(2)}`
+  const expected = `${EIP_7702_DELEGATED_CODE_PREFIX}${BATCH_EXECUTOR_ADDRESS_LOWER.slice(2)}`
   return lower === expected
 }
 
@@ -113,7 +124,7 @@ router.post('/api/wri/delegate-relay', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'invalid signedAuthorization' })
   }
 
-  if (auth.chainId !== CELO_CHAIN_ID) {
+  if (auth.chainId !== CELO_MAINNET_CHAIN_ID) {
     return res.status(400).json({ error: 'invalid chainId' })
   }
 
@@ -202,11 +213,18 @@ router.post('/api/wri/delegate-relay', async (req: Request, res: Response) => {
     return res.status(503).json({ error: 'relay temporarily unavailable' })
   }
 
+  // Fail-closed: a Redis outage previously fell back to `acquired: true` so an
+  // attacker could drain the relay hot wallet during downtime. The library now
+  // falls back to an in-memory store when Redis is absent (passing `null`),
+  // and any unexpected Redis error returns 503 instead of bypassing the limit.
   const redis = getRedis()
-  const slot = await tryAcquireDelegateRelaySlot(redis, userAddressLower).catch((err) => {
-    log.warn('rate-limit store error:', err instanceof Error ? err.message : err)
-    return { acquired: true as const }
-  })
+  let slot: { acquired: boolean; ttlSeconds?: number }
+  try {
+    slot = await tryAcquireDelegateRelaySlot(redis, userAddressLower)
+  } catch (err) {
+    log.error('rate-limit store error:', err instanceof Error ? err.message : err)
+    return res.status(503).json({ error: 'rate limiter unavailable' })
+  }
   if (!slot.acquired) {
     res.setHeader('Retry-After', String(slot.ttlSeconds ?? WRI_RATE_LIMIT_WINDOW_SECONDS))
     return res.status(429).json({ error: 'address rate limited' })
@@ -283,16 +301,5 @@ router.post('/api/wri/delegate-relay', async (req: Request, res: Response) => {
     delegatedTo: BATCH_EXECUTOR_ADDRESS,
   })
 })
-
-function parseEnvBigInt(name: string, fallback: bigint): bigint {
-  const raw = process.env[name]
-  if (!raw) return fallback
-  try {
-    const v = BigInt(raw)
-    return v >= 0n ? v : fallback
-  } catch {
-    return fallback
-  }
-}
 
 export default router
