@@ -10,7 +10,7 @@ Backend services for [TuCopWallet](https://tucop.xyz). Proxies third-party APIs 
 
 ## About TuCop
 
-TuCop is a mobile wallet for Colombian users, aligned with the [MiniPay](https://www.opera.com/products/minipay) ecosystem on the [Celo](https://celo.org) L1. The wallet is stablecoin-first (COPm, USDm, USDT, USDC) and never asks users to hold CELO for gas. This backend is the server-side counterpart that the mobile app (React Native) calls; it replaces several Valora cloud functions the wallet used to depend on, plus adds TuCop-specific pieces (Neeru Earn, WRI delegate relay, COPm/Dolares conversion paths).
+TuCop is a mobile wallet for Colombian users built on the [Celo](https://celo.org) L1. The wallet is stablecoin-first (COPm, USDm, USDT, USDC) and never asks users to hold CELO for gas. This backend is the server-side counterpart that the mobile app (React Native) calls; it replaces several Valora cloud functions the wallet used to depend on, plus adds TuCop-specific pieces (Neeru Earn, WRI delegate relay, COPm/Dolares conversion paths).
 
 - Wallet repository: [TuCopFinance/TuCopWallet](https://github.com/TuCopFinance/TuCopWallet)
 - Hosted backend: `https://tucop-backend-production.up.railway.app`
