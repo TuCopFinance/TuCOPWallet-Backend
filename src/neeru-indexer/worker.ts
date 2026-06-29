@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from 'pg'
 import { decodeAbiParameters } from 'viem'
 import { getDb } from '../lib/db'
+import { HEX_ADDRESS_LOWER_RE, HEX_BYTES32_RE } from '../lib/hex'
 import { createLogger } from '../lib/logger'
 import {
   assertIndexerConfig,
@@ -44,6 +45,10 @@ const ERROR_BACKOFF_MS = 5 * 60 * 1000
 const REORG_BUFFER_BLOCKS = 5n
 const MAX_BLOCKS_PER_BATCH = 5_000n
 const REORG_RUN_UTC_HOUR = 3
+// After this many consecutive tick failures, escalate the log line from warn
+// to error so operator monitoring (Sentry/log-based alerts) can page on the
+// difference between transient RPC blips and a permanently stuck indexer.
+const ERROR_ESCALATION_THRESHOLD = 5
 
 function parseIntervalMs(): number {
   const raw = process.env.NEERU_INDEXER_INTERVAL_MS
@@ -68,7 +73,7 @@ function isNeeruCategory(value: number): value is NeeruCategory {
 
 function ensureFullAddress(value: string, label: string): string {
   const lower = value.toLowerCase()
-  if (!/^0x[0-9a-f]{40}$/.test(lower)) {
+  if (!HEX_ADDRESS_LOWER_RE.test(lower)) {
     throw new Error(
       `neeru indexer: invalid ${label} address "${value}" - expected 0x + 40 lowercase hex`,
     )
@@ -77,7 +82,7 @@ function ensureFullAddress(value: string, label: string): string {
 }
 
 function ensureFullTxHash(value: string | null, label: string): string {
-  if (!value || !/^0x[0-9a-f]{64}$/i.test(value)) {
+  if (!value || !HEX_BYTES32_RE.test(value)) {
     throw new Error(
       `neeru indexer: invalid ${label} tx hash "${value ?? '<null>'}"`,
     )
@@ -484,6 +489,26 @@ export function chunkBlockRange(
   return out
 }
 
+// Postgres advisory-lock key for the Neeru indexer. Pinning a specific 64-bit
+// integer means two replicas can race for the lock and the loser becomes a
+// no-op for that tick, preventing duplicate RPC spend and double-write races.
+// The number is arbitrary but stable; do NOT change it once deployed.
+export const NEERU_INDEXER_ADVISORY_LOCK_KEY = 7320041002n
+
+export async function tryAcquireIndexerLock(db: Pool): Promise<boolean> {
+  const { rows } = await db.query<{ ok: boolean }>(
+    'SELECT pg_try_advisory_lock($1::bigint) AS ok',
+    [NEERU_INDEXER_ADVISORY_LOCK_KEY.toString()],
+  )
+  return rows[0]?.ok === true
+}
+
+export async function releaseIndexerLock(db: Pool): Promise<void> {
+  await db.query('SELECT pg_advisory_unlock($1::bigint)', [
+    NEERU_INDEXER_ADVISORY_LOCK_KEY.toString(),
+  ])
+}
+
 export async function runTick(opts: TickOptions): Promise<{
   scanned: boolean
   fromBlock?: bigint
@@ -623,22 +648,47 @@ export async function startNeeruIndexer(
   }
 
   let count = 0
+  let consecutiveErrors = 0
   try {
     for (;;) {
       if (maxIterations != null && count >= maxIterations) return
       count += 1
 
       try {
-        const result = await runTick({ db, rpc })
-        if (result.scanned) {
-          log.info(
-            `tick complete: blocks=${result.fromBlock}..${result.toBlock} logs=${result.logCount}`,
-          )
+        // Multi-replica safety: skip the tick if another replica holds the
+        // advisory lock. Acquired-and-released per iteration so a crash
+        // between ticks frees it for the next replica.
+        const haveLock = await tryAcquireIndexerLock(db)
+        if (!haveLock) {
+          await sleep(intervalMs)
+          continue
         }
+        try {
+          const result = await runTick({ db, rpc })
+          if (result.scanned) {
+            log.info(
+              `tick complete: blocks=${result.fromBlock}..${result.toBlock} logs=${result.logCount}`,
+            )
+          }
+        } finally {
+          await releaseIndexerLock(db).catch((err) => {
+            log.warn(
+              `advisory unlock failed: ${err instanceof Error ? err.message : String(err)}`,
+            )
+          })
+        }
+        consecutiveErrors = 0
         await sleep(intervalMs)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        log.warn(`tick failed: ${message}`)
+        consecutiveErrors += 1
+        if (consecutiveErrors >= ERROR_ESCALATION_THRESHOLD) {
+          log.error(
+            `tick failed (${consecutiveErrors} consecutive): ${message}`,
+          )
+        } else {
+          log.warn(`tick failed: ${message}`)
+        }
         await recordIndexerError(db, message)
         await sleep(ERROR_BACKOFF_MS)
       }
