@@ -2,8 +2,58 @@
 
 [![CI](https://github.com/TuCopFinance/TuCOPWallet-Backend/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/TuCopFinance/TuCOPWallet-Backend/actions/workflows/ci.yml)
 [![Deploy to Railway](https://github.com/TuCopFinance/TuCOPWallet-Backend/actions/workflows/deploy-railway.yml/badge.svg?branch=main)](https://github.com/TuCopFinance/TuCOPWallet-Backend/actions/workflows/deploy-railway.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-43853d.svg)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](https://www.typescriptlang.org/)
 
-Backend services for TuCopWallet. Hosts proxy endpoints used by the mobile app so third-party API keys (Etherscan, CoinMarketCap, Blockscout) never ship in app bundles.
+Backend services for [TuCopWallet](https://tucop.xyz). Proxies third-party APIs (Etherscan, CoinMarketCap, Blockscout, Squid) so API keys never ship in app bundles, runs two on-chain indexers (transactions feed + Neeru partner integration), serves the wallet's Earn surface via a `hooks-api` compatible HTTP contract, and operates a one-time EIP-7702 sponsored delegation relay so users without CELO can opt into the WRI (Wallet Relay Infrastructure) batch-execution path.
+
+## About TuCop
+
+TuCop is a mobile wallet for Colombian users, aligned with the [MiniPay](https://www.opera.com/products/minipay) ecosystem on the [Celo](https://celo.org) L1. The wallet is stablecoin-first (COPm, USDm, USDT, USDC) and never asks users to hold CELO for gas. This backend is the server-side counterpart that the mobile app (React Native) calls; it replaces several Valora cloud functions the wallet used to depend on, plus adds TuCop-specific pieces (Neeru Earn, WRI delegate relay, COPm/Dolares conversion paths).
+
+- Wallet repository: [TuCopFinance/TuCopWallet](https://github.com/TuCopFinance/TuCopWallet)
+- Hosted backend: `https://tucop-backend-production.up.railway.app`
+- Project home: [tucop.xyz](https://tucop.xyz)
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Wallet[TuCop wallet<br/>React Native]
+    Backend[TuCopWallet-Backend<br/>Express + TypeScript<br/>Railway]
+    Postgres[(Postgres<br/>indexer state +<br/>tx classification cache)]
+    Redis[(Redis<br/>quote + price cache<br/>WRI rate-limit slots)]
+
+    subgraph Upstreams [Third-party upstreams]
+        direction TB
+        Etherscan[Etherscan V2 API]
+        CMC[CoinMarketCap]
+        Blockscout[Celo Blockscout]
+        Squid[Squid Router v2]
+        CeloRPC[Celo RPC<br/>celocolombia &rarr; forno &rarr; ankr &rarr; drpc]
+        Allbridge[Allbridge V2]
+    end
+
+    Wallet -->|proxy + earn + relay| Backend
+    Backend --> Postgres
+    Backend --> Redis
+    Backend --> Etherscan
+    Backend --> CMC
+    Backend --> Blockscout
+    Backend --> Squid
+    Backend --> CeloRPC
+    Backend --> Allbridge
+
+    CeloRPC -.->|indexed logs| Postgres
+```
+
+Two worker loops boot inside the same process:
+
+- **Transactions indexer** (`src/transactions-indexer/`) ingests Celo blocks for opted-in addresses, classifies txs into the wallet's `TokenTransaction` shape, and persists to Postgres. Includes the EIP-7702 atomic-batch extension that Valora's feed omits.
+- **Neeru indexer** (`src/neeru-indexer/`) watches four event topics on the partner contract, persists per-position state, and runs a daily reconciliation job at 03:00 UTC.
+
+Both workers use Postgres advisory locks for multi-replica safety and back off on consecutive errors with escalating log levels for operator monitoring.
 
 ## Cross-cutting behaviour
 
@@ -88,7 +138,7 @@ Validation: `:hash` must match `0x` + 64 hex; `:address` must match `0x` + 40 he
 
 Drop-in replacement for Valora's `getSwapQuote` cloud function. Backend POSTs to Squid Router v2 with TuCop's `x-integrator-id` so swap volume attribution flows to TuCop. The response shape matches the wallet's `FetchQuoteResponse` (`src/swap/types.ts` in TuCopWallet) so the mobile-side change is a single URL flip.
 
-**Query params (strict allowlist; any other key returns `400 { "error": "unknown param: <name>" }`):**
+**Query params (strict allowlist; any other key returns `400 { "error": "unknown param" }`):**
 
 | Name | Required | Validation | Notes |
 |------|----------|------------|-------|
@@ -133,7 +183,7 @@ When `sellNetworkId !== buyNetworkId`, the `unvalidatedSwapTransaction` object a
 
 **Error responses:**
 
-- `400` `{ "error": "invalid <field>" }` / `{ "error": "unknown param: <name>" }` / `{ "error": "unsupported sellNetworkId: <slug>" }`
+- `400` `{ "error": "invalid <field>" }` / `{ "error": "unknown param" }` / `{ "error": "unsupported sellNetworkId" }` / `{ "error": "unsupported buyNetworkId" }`
 - `429` `{ "error": "rate limited by squid, retry" }` (pass-through when Squid throttles us; the upstream `Retry-After` header is forwarded). Squid throttles per-wallet at 10 RPS, so the safe pattern for parallel planning quotes is `quoteOnly=true` on the planner and `quoteOnly=false` only on commit.
 - `502` `{ "error": "squid upstream unavailable" }` (timeout or non-429 non-2xx from Squid; the upstream message is never echoed)
 - `503` `{ "error": "squid integrator id not configured" }` if `SQUID_INTEGRATOR_ID` is not set on the backend
@@ -167,7 +217,7 @@ One-time, sponsored EIP-7702 delegation setup for TuCop's Wallet Relay Infrastru
 - `userAddress` must match `0x` + 40 hex.
 - `signedAuthorization.chainId` must be `42220` (Celo mainnet only).
 - `signedAuthorization.address` must equal `0xaE6a87E88b55644Eda54C3AA55B11944eE5E1DFe` (case-insensitive). The relay refuses to delegate to any other contract, period. Hardcoded.
-- `signedAuthorization.nonce` must equal the on-chain nonce of `userAddress` plus or minus 1.
+- `signedAuthorization.nonce` must equal the on-chain nonce of `userAddress` exactly. A stale or future nonce is rejected up front; the `already_delegated` short-circuit + post-mining `getCode` poll handle the propagation-lag case.
 - The signature must recover to `userAddress` via `recoverAuthorizationAddress`.
 
 **Operational invariants:**
@@ -297,7 +347,7 @@ Per-position detail surface for the wallet's "your positions" screen. Returns on
 |------|----------|-------|
 | `address` | yes | `0x` + 40 lowercase hex |
 
-Any other query key returns `400` `unknown param: <name>` (strict allowlist).
+Any other query key returns `400 { "error": "unknown param" }` (strict allowlist).
 
 **Response shape (placeholder values):**
 
@@ -345,7 +395,7 @@ Notes:
 **Error responses:**
 
 - `400` `{ "error": "invalid address" }` if `address` is missing, not lowercase, or not 40 hex.
-- `400` `{ "error": "unknown param: <name>" }` for any query key other than `address`.
+- `400` `{ "error": "unknown param" }` for any query key other than `address`.
 - `503` `{ "error": "database not configured" }` when `DATABASE_URL` is unset.
 - `503` `{ "error": "neeru not configured" }` when `NEERU_DEPOSIT_TOKEN_ADDRESS` is unset.
 - `502` `{ "error": "detail fetch failed" }` on any infra/RPC failure. Underlying message is logged server-side and never echoed.

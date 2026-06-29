@@ -138,6 +138,26 @@ describe('POST /api/wri/delegate-relay', () => {
     expect(mockSendTransaction).not.toHaveBeenCalled()
   })
 
+  it('rejects nonce delta of -1 (stale auth)', async () => {
+    // validBody nonce is '0x5' (5); on-chain at 6 => delta = -1
+    mockRecoverAuthorizationAddress.mockResolvedValueOnce(VALID_USER)
+    mockGetTransactionCount.mockResolvedValueOnce(6)
+    const res = await request(app).post('/api/wri/delegate-relay').send(validBody())
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/nonce/i)
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('rejects nonce delta of +1 (future auth)', async () => {
+    // validBody nonce is '0x5' (5); on-chain at 4 => delta = +1
+    mockRecoverAuthorizationAddress.mockResolvedValueOnce(VALID_USER)
+    mockGetTransactionCount.mockResolvedValueOnce(4)
+    const res = await request(app).post('/api/wri/delegate-relay').send(validBody())
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/nonce/i)
+    expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
   it('returns already_delegated fast path when user is already delegated', async () => {
     mockRecoverAuthorizationAddress.mockResolvedValueOnce(VALID_USER)
     mockGetTransactionCount.mockResolvedValueOnce(5)
