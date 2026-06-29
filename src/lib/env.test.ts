@@ -1,4 +1,6 @@
 import {
+  _resetParsedEnvForTests,
+  parseEnv,
   parseEnvBigInt,
   readEnvAddress,
   readEnvTopic0,
@@ -52,6 +54,88 @@ describe('readEnvTopic0', () => {
   it('throws when value is malformed', () => {
     process.env[VAR] = '0xshort'
     expect(() => readEnvTopic0(VAR)).toThrow(/64 hex/)
+  })
+})
+
+describe('parseEnv (zod schema)', () => {
+  const ORIG_ENV = { ...process.env }
+
+  beforeEach(() => {
+    _resetParsedEnvForTests()
+    // Reset to a known-good baseline. Required field present, optionals empty.
+    process.env = { ...ORIG_ENV }
+  })
+
+  afterAll(() => {
+    process.env = ORIG_ENV
+    _resetParsedEnvForTests()
+  })
+
+  it('parses a minimal env (only ETHERSCAN_API_KEY set)', () => {
+    process.env = { ETHERSCAN_API_KEY: 'test' } as NodeJS.ProcessEnv
+    const e = parseEnv()
+    expect(e.ETHERSCAN_API_KEY).toBe('test')
+    expect(e.PORT).toBe(8080) // default
+    expect(e.WRI_RELAY_PER_IP_LIMIT).toBe(20) // default
+    expect(e.INDEXER_ENABLED).toBe(false) // default (string 'false' -> bool false)
+    expect(e.NEERU_INDEXER_ENABLED).toBe(false)
+  })
+
+  it('throws when ETHERSCAN_API_KEY is missing', () => {
+    process.env = {} as NodeJS.ProcessEnv
+    expect(() => parseEnv()).toThrow(/ETHERSCAN_API_KEY/)
+  })
+
+  it('throws on malformed BLOCKSCOUT_BASE_URL (not https)', () => {
+    process.env = {
+      ETHERSCAN_API_KEY: 'test',
+      BLOCKSCOUT_BASE_URL: 'http://evil.example',
+    } as NodeJS.ProcessEnv
+    expect(() => parseEnv()).toThrow(/BLOCKSCOUT_BASE_URL/)
+  })
+
+  it('throws on malformed WRI_RELAY_PK (wrong length)', () => {
+    process.env = {
+      ETHERSCAN_API_KEY: 'test',
+      WRI_RELAY_PK: '0xshort',
+    } as NodeJS.ProcessEnv
+    expect(() => parseEnv()).toThrow(/WRI_RELAY_PK/)
+  })
+
+  it('coerces PORT/PG_POOL_MAX strings to numbers', () => {
+    process.env = {
+      ETHERSCAN_API_KEY: 'test',
+      PORT: '9090',
+      PG_POOL_MAX: '50',
+    } as NodeJS.ProcessEnv
+    const e = parseEnv()
+    expect(e.PORT).toBe(9090)
+    expect(e.PG_POOL_MAX).toBe(50)
+  })
+
+  it('throws when NEERU_INDEXER_ENABLED=true but contract vars missing', () => {
+    process.env = {
+      ETHERSCAN_API_KEY: 'test',
+      NEERU_INDEXER_ENABLED: 'true',
+      DATABASE_URL: 'postgres://...',
+      // missing NEERU_INDEXER_GENESIS_BLOCK, NEERU_CONTRACT_ADDRESS, topics
+    } as NodeJS.ProcessEnv
+    expect(() => parseEnv()).toThrow(/NEERU_INDEXER_ENABLED.*required vars/)
+  })
+
+  it('throws when INDEXER_ENABLED=true but DATABASE_URL missing', () => {
+    process.env = {
+      ETHERSCAN_API_KEY: 'test',
+      INDEXER_ENABLED: 'true',
+    } as NodeJS.ProcessEnv
+    expect(() => parseEnv()).toThrow(/INDEXER_ENABLED.*DATABASE_URL/)
+  })
+
+  it('caches the parsed env across calls', () => {
+    process.env = { ETHERSCAN_API_KEY: 'test' } as NodeJS.ProcessEnv
+    const first = parseEnv()
+    const second = parseEnv()
+    expect(second).toBe(first) // same reference (cached)
   })
 })
 
