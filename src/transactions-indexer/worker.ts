@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from 'pg'
-import { createPublicClient, http, type Hash } from 'viem'
-import { celo } from 'viem/chains'
+import type { Hash } from 'viem'
+import { createCeloPublicClient, getFornoUrl } from '../lib/celoClient'
 import { getDb } from '../lib/db'
 import { createLogger } from '../lib/logger'
 
@@ -15,7 +15,13 @@ const ERC20_APPROVAL_TOPIC0 =
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000
 const DEFAULT_MAX_BLOCKS_PER_TICK = 200
-const DEFAULT_GENESIS_OFFSET = 25 // when first run, start N blocks behind tip
+// When first run, start N blocks behind tip. 25 blocks is ~2 minutes on Celo
+// (5 s block time) - a small backfill window that catches in-flight txs the
+// wallet may already be polling for, without scanning historical state.
+const DEFAULT_GENESIS_OFFSET = 25
+// After this many consecutive tick failures escalate the log line so operator
+// monitoring can page on a stuck indexer vs transient RPC blips.
+const ERROR_ESCALATION_THRESHOLD = 5
 
 // Minimal subset of the viem PublicClient we depend on. Defining it as an
 // interface lets the worker accept a mocked client in unit tests without
@@ -51,10 +57,7 @@ export interface IndexerRpcClient {
 }
 
 function buildDefaultClient() {
-  return createPublicClient({
-    chain: celo,
-    transport: http(process.env.FORNO_URL || 'https://forno.celo.org'),
-  })
+  return createCeloPublicClient({ url: getFornoUrl() })
 }
 
 function isWatchedTopic(topic: string | null, watched: Set<string>): boolean {
@@ -293,6 +296,7 @@ export async function startIndexer(
 
   let watched = await loadWatchedAddresses(db)
   let watchedLoadedAt = Date.now()
+  let consecutiveErrors = 0
 
   // No graceful stop wired today; server.ts dies on SIGTERM and Node tears
   // the loop down with the process. Add a stop hook here if/when needed.
@@ -306,6 +310,7 @@ export async function startIndexer(
       const tip = await rpc.getBlockNumber()
       const last = await getLastBlock(db, tip)
       if (tip <= last) {
+        consecutiveErrors = 0
         await sleep(pollIntervalMs)
         continue
       }
@@ -320,6 +325,7 @@ export async function startIndexer(
           `UPDATE indexer_state SET last_block = $1 WHERE network_id = $2`,
           [target.toString(), NETWORK_ID],
         )
+        consecutiveErrors = 0
         await sleep(pollIntervalMs)
         continue
       }
@@ -340,13 +346,17 @@ export async function startIndexer(
           `tick complete: blocks=${from}..${target} txs=${result.txCount} logs=${result.logCount}`,
         )
       }
+      consecutiveErrors = 0
+      await sleep(pollIntervalMs)
     } catch (err) {
-      log.warn(
-        `tick failed: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      const message = err instanceof Error ? err.message : String(err)
+      consecutiveErrors += 1
+      if (consecutiveErrors >= ERROR_ESCALATION_THRESHOLD) {
+        log.error(`tick failed (${consecutiveErrors} consecutive): ${message}`)
+      } else {
+        log.warn(`tick failed: ${message}`)
+      }
       await sleep(pollIntervalMs)
     }
-
-    await sleep(pollIntervalMs)
   }
 }
