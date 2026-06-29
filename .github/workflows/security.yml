@@ -17,21 +17,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history so gitleaks can scan the diff range, not just HEAD.
+          # Full history so gitleaks scans the diff range, not just HEAD.
           fetch-depth: 0
-      - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # GITLEAKS_LICENSE is OPTIONAL for OSS / public repos; the action
-          # is free without it. Keep the env var present so future
-          # private-org migrations only need to flip the secret.
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+      # Use the OSS gitleaks binary directly. The gitleaks/gitleaks-action@v2
+      # GitHub Action requires a paid GITLEAKS_LICENSE for any repo owned by
+      # an organisation, even when the repo is public. The binary itself
+      # stays MIT-licensed and free; the action is the licensed wrapper.
+      # Running the binary directly gets the same scan without a paid licence.
+      - name: Run gitleaks (OSS binary, no license required)
+        run: |
+          set -euo pipefail
+          GITLEAKS_VERSION=8.18.4
+          curl -fsSL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks detect --source . --redact --verbose --exit-code 1
 
   dependency-review:
     name: Dependency review (CVEs in new deps)
     runs-on: ubuntu-latest
     # Pull-request only; on push there's no compare-base to review against.
+    # Requires "Dependency graph" enabled in repo Settings -> Code security
+    # -> Dependency graph. If disabled, the action fails with a clear
+    # "not supported on this repository" message - that's a one-click
+    # operator action, not a code fix.
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
@@ -61,9 +70,17 @@ jobs:
           npm install --no-save --no-package-lock \
             @commitlint/cli@19 \
             @commitlint/config-conventional@19
+      # Write the config to a real file. Previous attempt used
+      # `--config <(echo "module.exports = ...")` but commitlint's
+      # cosmiconfig loader treats process-substitution paths as YAML first
+      # and errors out before falling back to the JS loader.
       - name: Lint PR commits
         run: |
+          set -euo pipefail
+          cat > .commitlintrc.cjs <<'EOF'
+          module.exports = { extends: ['@commitlint/config-conventional'] }
+          EOF
           npx commitlint \
             --from "${{ github.event.pull_request.base.sha }}" \
             --to "${{ github.event.pull_request.head.sha }}" \
-            --config <(echo "module.exports = { extends: ['@commitlint/config-conventional'] }")
+            --config .commitlintrc.cjs
