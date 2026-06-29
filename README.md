@@ -167,7 +167,7 @@ One-time, sponsored EIP-7702 delegation setup for TuCop's Wallet Relay Infrastru
 - `userAddress` must match `0x` + 40 hex.
 - `signedAuthorization.chainId` must be `42220` (Celo mainnet only).
 - `signedAuthorization.address` must equal `0xaE6a87E88b55644Eda54C3AA55B11944eE5E1DFe` (case-insensitive). The relay refuses to delegate to any other contract, period. Hardcoded.
-- `signedAuthorization.nonce` must equal the on-chain nonce of `userAddress` plus or minus 1.
+- `signedAuthorization.nonce` must equal the on-chain nonce of `userAddress` exactly. A stale or future nonce is rejected up front; the `already_delegated` short-circuit + post-mining `getCode` poll handle the propagation-lag case.
 - The signature must recover to `userAddress` via `recoverAuthorizationAddress`.
 
 **Operational invariants:**
