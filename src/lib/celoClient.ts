@@ -21,3 +21,19 @@ export const FORNO_URL = 'https://forno.celo.org'
 export function getFornoUrl(): string {
   return process.env.FORNO_URL || FORNO_URL
 }
+
+// Cached singleton client for shared read-only probes (health checks,
+// metrics, occasional one-shot reads). Long-running consumers (indexer,
+// WRI relay) still build their own client with custom fallback chains.
+let cachedClient: PublicClient | null = null
+
+export function getCeloPublicClient(): PublicClient {
+  if (!cachedClient) {
+    cachedClient = createCeloPublicClient({ url: getFornoUrl() })
+  }
+  return cachedClient
+}
+
+export function _resetCeloClientForTests(): void {
+  cachedClient = null
+}
