@@ -94,6 +94,21 @@ describe('GET /api/transactions/feed', () => {
     expect(res.body).toEqual({ error: 'invalid afterCursor' })
   })
 
+  it('rejects unsupported networkIds with 400', async () => {
+    const res = await request(app).get(
+      `/api/transactions/feed?address=${VALID_ADDRESS}&networkIds=ethereum-mainnet`,
+    )
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'unsupported networkId' })
+  })
+
+  it('accepts celo-mainnet networkId explicitly', async () => {
+    const res = await request(app).get(
+      `/api/transactions/feed?address=${VALID_ADDRESS}&networkIds=celo-mainnet`,
+    )
+    expect(res.status).toBe(200)
+  })
+
   it('returns 503 when DB is not configured', async () => {
     dbMode = 'disabled'
     const res = await request(app).get(`/api/transactions/feed?address=${VALID_ADDRESS}`)
