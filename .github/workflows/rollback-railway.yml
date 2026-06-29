@@ -1,0 +1,135 @@
+name: Rollback Railway
+
+# Manual rollback: redeploys a specified commit SHA without going through
+# CI / build. Useful when a bad deploy is live and the regular forward path
+# (revert commit -> merge to main -> auto-deploy) is too slow.
+#
+# Usage:
+# - GitHub Actions tab -> Rollback Railway -> Run workflow
+# - Inputs: commit SHA (must already exist in the repo) + a one-line reason
+#
+# Mechanism: same serviceInstanceDeployV2 mutation the auto-deploy uses, just
+# with an operator-supplied SHA instead of the latest main HEAD. Railway
+# rebuilds from source at that SHA, so this is a true rollback (or roll-
+# forward to an arbitrary committed SHA), not a container snapshot recall.
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Commit SHA to deploy (full or short). Must exist in this repo.'
+        required: true
+        type: string
+      reason:
+        description: 'One-line reason (logged to Slack / audit trail).'
+        required: true
+        type: string
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://tucop-backend-production.up.railway.app
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate SHA exists in repo
+        id: resolve
+        env:
+          RAW_SHA: ${{ github.event.inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          # git rev-parse expands short SHAs to full + verifies existence
+          if ! FULL=$(git rev-parse --verify --quiet "${RAW_SHA}^{commit}"); then
+            echo "ERROR: $RAW_SHA does not resolve to a commit in this repo."
+            exit 1
+          fi
+          echo "Resolved $RAW_SHA -> $FULL"
+          echo "full_sha=$FULL" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Railway deploy at SHA
+        id: trigger
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ secrets.RAILWAY_ENVIRONMENT_ID }}
+          COMMIT_SHA: ${{ steps.resolve.outputs.full_sha }}
+          REASON: ${{ github.event.inputs.reason }}
+        run: |
+          set -euo pipefail
+          echo "Rollback target: $COMMIT_SHA"
+          echo "Reason: $REASON"
+          BODY=$(jq -n \
+            --arg sid "$RAILWAY_SERVICE_ID" \
+            --arg eid "$RAILWAY_ENVIRONMENT_ID" \
+            --arg sha "$COMMIT_SHA" \
+            '{query:"mutation($sid: String!, $eid: String!, $sha: String!) { serviceInstanceDeployV2(serviceId: $sid, environmentId: $eid, commitSha: $sha) }", variables:{sid:$sid, eid:$eid, sha:$sha}}')
+          RESP=$(curl -sS -X POST https://backboard.railway.app/graphql/v2 \
+            -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$BODY")
+          echo "$RESP"
+          if echo "$RESP" | jq -e '.errors' >/dev/null; then
+            echo "Railway rollback failed (GraphQL error)"
+            exit 1
+          fi
+          DEPLOY_ID=$(echo "$RESP" | jq -r '.data.serviceInstanceDeployV2')
+          echo "Rollback deploy triggered: $DEPLOY_ID"
+          echo "deploy_id=$DEPLOY_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for Railway deploy to finish
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          DEPLOY_ID: ${{ steps.trigger.outputs.deploy_id }}
+        run: |
+          set -euo pipefail
+          MAX_ATTEMPTS=60
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            RESP=$(curl -sS -X POST https://backboard.railway.app/graphql/v2 \
+              -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"query\":\"{ deployment(id: \\\"$DEPLOY_ID\\\") { status } }\"}")
+            STATUS=$(echo "$RESP" | jq -r '.data.deployment.status' 2>/dev/null || echo "UNKNOWN")
+            echo "attempt $attempt: status=$STATUS"
+            case "$STATUS" in
+              SUCCESS) exit 0 ;;
+              CRASHED|FAILED|REMOVED)
+                echo "Rollback deployment $DEPLOY_ID ended with status $STATUS"
+                exit 1
+                ;;
+              SKIPPED)
+                echo "Railway skipped (newer deploy took over). Aborting rollback."
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+          echo "Timed out waiting for rollback deployment $DEPLOY_ID"
+          exit 1
+
+      - name: Smoke test live endpoints
+        env:
+          BASE_URL: https://tucop-backend-production.up.railway.app
+        run: |
+          set -euo pipefail
+          for path in /health /ready; do
+            for attempt in $(seq 1 10); do
+              code=$(curl -sS -o /tmp/body -w '%{http_code}' -m 5 "$BASE_URL$path" || echo "000")
+              if [ "$code" = "200" ]; then
+                echo "$path -> 200 OK"
+                cat /tmp/body
+                echo
+                break
+              fi
+              echo "attempt $attempt: $path -> $code"
+              if [ "$attempt" = "10" ]; then
+                echo "Rollback smoke failed: $path returned $code"
+                exit 1
+              fi
+              sleep 5
+            done
+          done
+          echo "Rollback smoke passed. Prod is now serving ${{ steps.resolve.outputs.full_sha }}."
