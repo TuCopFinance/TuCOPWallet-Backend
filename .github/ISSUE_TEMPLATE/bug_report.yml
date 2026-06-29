@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a defect in TuCopWallet-Backend
+title: "bug: <short description>"
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+
+        **For security issues, do not open a public issue.** See `SECURITY.md` for the private disclosure channel.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear and concise description of the bug.
+      placeholder: Calling `/api/swap/quote` with X returns 502 instead of the expected route.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How to reproduce
+      description: Step-by-step. Include the exact request (method, path, query, body) and the observed response.
+      render: bash
+      placeholder: |
+        curl -X POST https://tucop-backend-production.up.railway.app/api/wri/delegate-relay \
+          -H 'content-type: application/json' \
+          -d '{"userAddress":"0x...","signedAuthorization":{...}}'
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Production (`tucop-backend-production.up.railway.app`)
+        - Local dev
+        - Other (please describe in additional context)
+    validations:
+      required: true
+
+  - type: input
+    id: commit-sha
+    attributes:
+      label: Commit SHA (if known)
+      description: From `/health` response or git log.
+      placeholder: abc1234
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / error output
+      description: Server-side logs if you have access. Redact secrets.
+      render: text
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that might help. Screenshots, related issues, suspected root cause.

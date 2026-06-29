@@ -1,0 +1,25 @@
+# CODEOWNERS for TuCopWallet-Backend
+# Every PR is auto-assigned to the listed owners for review.
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-security/customizing-your-repository/about-code-owners
+
+# Default owner for everything not matched by a more specific rule below.
+*                               @TuCopFinance/backend
+
+# WRI relay surface holds a hot wallet private key; require backend leads review.
+/src/routes/wri.ts              @TuCopFinance/backend
+/src/lib/wriRelay.ts            @TuCopFinance/backend
+/src/lib/wriRateLimit.ts        @TuCopFinance/backend
+
+# Indexer workers persist state; schema changes need owner review.
+/src/neeru-indexer/              @TuCopFinance/backend
+/src/transactions-indexer/       @TuCopFinance/backend
+/src/db/                         @TuCopFinance/backend
+
+# Hooks-api builds calldata signed by user wallets; partner-contract logic
+# changes need an owner who knows the cero-exposicion bar for Neeru.
+/src/hooks-api/                  @TuCopFinance/backend
+
+# Security policy, CI, deploy, branch protection adjacent files.
+/SECURITY.md                     @TuCopFinance/backend
+/.github/                        @TuCopFinance/backend
+/.env.example                    @TuCopFinance/backend
