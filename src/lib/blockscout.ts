@@ -19,7 +19,16 @@ export async function blockscoutGet({ path, query = {} }: BlockscoutGetInput): P
   const url = qs ? `${base}${path}?${qs}` : `${base}${path}`
 
   const res = await fetchWithTimeout(url, { headers: { accept: 'application/json' } })
-  if (!res.ok) throw new Error(`Blockscout error: ${res.status}`)
+  if (!res.ok) {
+    let bodyHint = ''
+    try {
+      const text = await res.text()
+      bodyHint = text.length > 200 ? `${text.slice(0, 200)}...` : text
+    } catch {
+      // body unreadable; status alone is enough
+    }
+    throw new Error(`Blockscout error: ${res.status} ${bodyHint}`.trim())
+  }
 
   return (await res.json()) as unknown
 }

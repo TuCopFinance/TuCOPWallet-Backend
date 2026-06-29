@@ -6,8 +6,13 @@ export class SquidUpstreamError extends Error {
   constructor(
     public readonly status: number,
     public readonly retryAfter?: string,
+    public readonly bodyHint?: string,
   ) {
-    super(`Squid upstream ${status}`)
+    super(
+      bodyHint
+        ? `Squid upstream ${status}: ${bodyHint}`
+        : `Squid upstream ${status}`,
+    )
     this.name = 'SquidUpstreamError'
   }
 }
@@ -71,7 +76,14 @@ export async function squidRoute(
   })
   if (!res.ok) {
     const retryAfter = res.headers.get('retry-after') ?? undefined
-    throw new SquidUpstreamError(res.status, retryAfter)
+    let bodyHint: string | undefined
+    try {
+      const text = await res.text()
+      bodyHint = text.length > 200 ? `${text.slice(0, 200)}...` : text
+    } catch {
+      // body unreadable; status alone is enough
+    }
+    throw new SquidUpstreamError(res.status, retryAfter, bodyHint)
   }
   return (await res.json()) as SquidRouteResponse
 }
