@@ -456,7 +456,7 @@ curl 'http://localhost:8080/events?address=0x947c6db1569edc9fd37b017b791ca0f008a
 
 ## Deploy
 
-Hosted on Railway in the TuCop Wallet project, environment `production`. Auto-deploys on every push to `main`.
+Hosted on Railway in the TuCop Wallet project, environment `production`. Auto-deploys on every push to `main` via the `.github/workflows/deploy-railway.yml` GitHub Action, which fires after the `CI` workflow succeeds and calls Railway's `serviceInstanceDeployV2` GraphQL mutation with the head SHA. Requires `RAILWAY_API_TOKEN`, `RAILWAY_SERVICE_ID`, `RAILWAY_ENVIRONMENT_ID` in the repo's GitHub Actions secrets. The Railway-managed GitHub integration is no longer relied on for deploy triggering.
 
 Required Railway env vars:
 
