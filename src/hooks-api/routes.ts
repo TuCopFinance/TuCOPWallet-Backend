@@ -96,8 +96,10 @@ router.get('/hooks-api/getPositions', async (req: Request, res: Response) => {
   // pattern (transactions feed) that 503s when DB is not configured AND
   // the route's primary source depends on it. Here we soft-fail Neeru
   // and still try Allbridge so the wallet keeps working in dev without
-  // a Postgres.
+  // a Postgres. Partial failures are flagged in `meta.partialFailure` so
+  // the wallet can distinguish "no positions" from "indexer/api down".
   const out: Position[] = []
+  const partialFailure: { allbridge?: boolean; neeru?: boolean } = {}
 
   if (networkIds.includes('celo-mainnet')) {
     try {
@@ -110,6 +112,7 @@ router.get('/hooks-api/getPositions', async (req: Request, res: Response) => {
       log.warn(
         `allbridge getPositions failed: ${err instanceof Error ? err.message : String(err)}`,
       )
+      partialFailure.allbridge = true
     }
   }
 
@@ -125,10 +128,17 @@ router.get('/hooks-api/getPositions', async (req: Request, res: Response) => {
       log.warn(
         `neeru getHeldPositions failed: ${err instanceof Error ? err.message : String(err)}`,
       )
+      partialFailure.neeru = true
     }
   }
 
-  res.json({ data: out })
+  const body: { data: Position[]; meta?: { partialFailure: typeof partialFailure } } = {
+    data: out,
+  }
+  if (partialFailure.allbridge || partialFailure.neeru) {
+    body.meta = { partialFailure }
+  }
+  res.json(body)
 })
 
 router.get(
@@ -164,6 +174,7 @@ router.get(
     const includeCelo = !networkIds || networkIds.includes('celo-mainnet')
 
     const out: EarnPosition[] = []
+    const partialFailure: { allbridge?: boolean; neeru?: boolean } = {}
 
     if (wantAllbridge && includeCelo) {
       try {
@@ -180,6 +191,7 @@ router.get(
         log.warn(
           `allbridge getPositions (earn) failed: ${err instanceof Error ? err.message : String(err)}`,
         )
+        partialFailure.allbridge = true
       }
     }
 
@@ -189,6 +201,7 @@ router.get(
         log.warn(
           'neeru getEarnPositions skipped: DATABASE_URL not configured',
         )
+        partialFailure.neeru = true
       } else {
         try {
           const neeru = await getNeeruEarnPositions({
@@ -201,6 +214,7 @@ router.get(
           log.warn(
             `neeru getEarnPositions failed: ${err instanceof Error ? err.message : String(err)}`,
           )
+          partialFailure.neeru = true
         }
       }
     }
@@ -210,7 +224,14 @@ router.get(
         ? out
         : out.filter((p) => supportedPools.includes(p.positionId))
 
-    res.json({ data: filtered })
+    const body: {
+      data: EarnPosition[]
+      meta?: { partialFailure: typeof partialFailure }
+    } = { data: filtered }
+    if (partialFailure.allbridge || partialFailure.neeru) {
+      body.meta = { partialFailure }
+    }
+    res.json(body)
   },
 )
 
