@@ -262,7 +262,13 @@ router.post('/api/wri/delegate-relay', async (req: Request, res: Response) => {
       timeout: RECEIPT_TIMEOUT_MS,
     })
     if (receipt.status !== 'success') {
-      log.error(`relay tx reverted: hash=${txHash} receipt=${JSON.stringify(receipt)}`)
+      // Log only the receipt fields useful for diagnosis. JSON.stringify on the
+      // full receipt also serialises receipt.logs which may include event data
+      // from attacker-influenced contracts; trimming caps log volume and avoids
+      // log-injection / log-shipping leakage on a hot relay-revert path.
+      log.error(
+        `relay tx reverted: hash=${txHash} status=${receipt.status} blockNumber=${receipt.blockNumber?.toString() ?? 'unknown'} gasUsed=${receipt.gasUsed?.toString() ?? 'unknown'}`,
+      )
       return res.status(502).json({ error: 'relay tx reverted' })
     }
   } catch (err) {

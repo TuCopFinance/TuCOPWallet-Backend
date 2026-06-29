@@ -48,9 +48,14 @@ interface ValidatedInput {
 }
 
 function validate(req: Request): { ok: true; input: ValidatedInput } | { ok: false; error: string } {
+  // Reject unknown params with a canonical error message; do not echo the
+  // param name in the response. The HTTP 400 + canonical message is enough
+  // for the wallet client, and not reflecting attacker input avoids any
+  // future XSS / log-injection risk if the error string ever gets rendered
+  // somewhere other than a JSON body.
   for (const key of Object.keys(req.query)) {
     if (!ALLOWED_PARAMS.has(key)) {
-      return { ok: false, error: `unknown param: ${key}` }
+      return { ok: false, error: 'unknown param' }
     }
   }
 
@@ -96,8 +101,11 @@ function validate(req: Request): { ok: true; input: ValidatedInput } | { ok: fal
 
   const fromChainId = networkIdToChainId(sellNetworkId)
   const toChainId = networkIdToChainId(buyNetworkId)
-  if (fromChainId === undefined) return { ok: false, error: `unsupported sellNetworkId: ${sellNetworkId}` }
-  if (toChainId === undefined) return { ok: false, error: `unsupported buyNetworkId: ${buyNetworkId}` }
+  // Same rationale as unknown-param: don't echo the slug back in the error
+  // string. The wallet has the slug it sent and the HTTP status; the
+  // canonical message is sufficient.
+  if (fromChainId === undefined) return { ok: false, error: 'unsupported sellNetworkId' }
+  if (toChainId === undefined) return { ok: false, error: 'unsupported buyNetworkId' }
 
   return {
     ok: true,
