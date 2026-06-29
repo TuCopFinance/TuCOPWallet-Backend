@@ -28,6 +28,9 @@ const ALLOWED_PARAMS = new Set([
 const NETWORK_ID_RE = /^[a-z0-9-]+$/
 const DECIMAL_RE = /^\d+(\.\d+)?$/
 const INT_DECIMAL_RE = /^\d+$/
+// uint256 max is 78 decimal digits. Anything beyond that is invalid for the
+// upstream payload AND wastes cache-key space; reject early at the boundary.
+const MAX_SELL_AMOUNT_DIGITS = 78
 
 interface ValidatedInput {
   buyToken: string
@@ -77,7 +80,7 @@ function validate(req: Request): { ok: true; input: ValidatedInput } | { ok: fal
     return { ok: false, error: 'invalid sellIsNative' }
   if (!sellNetworkId || !NETWORK_ID_RE.test(sellNetworkId))
     return { ok: false, error: 'invalid sellNetworkId' }
-  if (!sellAmount || !INT_DECIMAL_RE.test(sellAmount))
+  if (!sellAmount || sellAmount.length > MAX_SELL_AMOUNT_DIGITS || !INT_DECIMAL_RE.test(sellAmount))
     return { ok: false, error: 'invalid sellAmount' }
   if (!userAddress || !HEX_ADDRESS_LOWER_RE.test(userAddress))
     return { ok: false, error: 'invalid userAddress' }
@@ -115,6 +118,32 @@ function validate(req: Request): { ok: true; input: ValidatedInput } | { ok: fal
   }
 }
 
+const PRICE_SCALE = 1_000_000_000_000_000_000n // 1e18
+
+function safeBigInt(value: string | undefined): bigint | null {
+  if (!value) return null
+  try {
+    const v = BigInt(value)
+    return v >= 0n ? v : null
+  } catch {
+    return null
+  }
+}
+
+function computeGuaranteedPrice(
+  toAmountMin: string | undefined,
+  fromAmount: string,
+  fallback: string,
+): string {
+  const min = safeBigInt(toAmountMin)
+  const from = safeBigInt(fromAmount)
+  if (min === null || from === null || from === 0n) return fallback
+  const scaled = (min * PRICE_SCALE) / from
+  const whole = scaled / PRICE_SCALE
+  const frac = (scaled % PRICE_SCALE).toString().padStart(18, '0').replace(/0+$/, '')
+  return frac.length === 0 ? whole.toString() : `${whole.toString()}.${frac}`
+}
+
 function shapeResponse(upstream: SquidRouteResponse, input: ValidatedInput): unknown {
   const swapType: 'same-chain' | 'cross-chain' =
     input.sellNetworkId === input.buyNetworkId ? 'same-chain' : 'cross-chain'
@@ -127,10 +156,9 @@ function shapeResponse(upstream: SquidRouteResponse, input: ValidatedInput): unk
   const toAmountMin = est.toAmountMin
 
   const price = est.exchangeRate ?? '0'
-  const guaranteedPrice =
-    toAmountMin && Number(fromAmount) > 0
-      ? (Number(toAmountMin) / Number(fromAmount)).toString()
-      : price
+  // Use bigint fixed-point (1e18 scale) to keep precision on token amounts
+  // above 2^53 wei. `Number(...) / Number(...)` lost precision above ~9 USDT.
+  const guaranteedPrice = computeGuaranteedPrice(toAmountMin, fromAmount, price)
 
   const swapTx: Record<string, unknown> = {
     swapType,
