@@ -1,5 +1,8 @@
 # TuCOPWallet Backend
 
+[![CI](https://github.com/TuCopFinance/TuCOPWallet-Backend/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/TuCopFinance/TuCOPWallet-Backend/actions/workflows/ci.yml)
+[![Deploy to Railway](https://github.com/TuCopFinance/TuCOPWallet-Backend/actions/workflows/deploy-railway.yml/badge.svg?branch=main)](https://github.com/TuCopFinance/TuCOPWallet-Backend/actions/workflows/deploy-railway.yml)
+
 Backend services for TuCopWallet. Hosts proxy endpoints used by the mobile app so third-party API keys (Etherscan, CoinMarketCap, Blockscout) never ship in app bundles.
 
 ## Cross-cutting behaviour
