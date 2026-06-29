@@ -66,11 +66,44 @@ Both workers use Postgres advisory locks for multi-replica safety and back off o
 
 ### `GET /health`
 
-Returns service status.
+Liveness probe. Returns 200 with static service info as long as the process is responsive. Does NOT check dependencies; use `/ready` for that.
 
 ```json
 { "ok": true, "service": "tucopwallet-backend", "version": "0.1.0" }
 ```
+
+### `GET /ready`
+
+Readiness probe. Checks Postgres, Redis, and Celo RPC each with a 1s timeout. Returns 200 when all healthy or when the optional deps (DB, Redis) are unconfigured; returns 503 with a per-dependency status when any required check fails.
+
+```json
+{ "ok": true, "checks": { "db": "ok", "redis": "ok", "rpc": "ok" } }
+```
+
+```json
+{ "ok": false, "checks": { "db": "fail: connection refused", "redis": "ok", "rpc": "ok" } }
+```
+
+Operator alerts should page on `/ready` 503s, not `/health`.
+
+### `GET /health/relay`
+
+Relay hot-wallet health surface. Returns the relay address and current CELO balance (private key never exposed). Lets external monitors alert on low balance without an Sentry / Grafana integration.
+
+```json
+{
+  "ok": true,
+  "address": "0x...",
+  "balanceWei": "10000000000000000000",
+  "balanceCelo": "10"
+}
+```
+
+Returns `503 { "ok": false, "error": "relay not configured" }` when `WRI_RELAY_PK` is missing or invalid, or `502 { "ok": false, "error": "rpc unavailable", "address": "0x..." }` on RPC failure.
+
+### `GET /metrics`
+
+Prometheus scrape endpoint (text format). Includes default Node/process metrics, an `http_request_duration_seconds` histogram labeled by method/route/status, custom `wri_relay_*` counters/gauges, `pg_pool_*` gauges, and Neeru indexer gauges. Scrape interval recommendation: 30s.
 
 ### `GET /api/prices/xaut`
 

@@ -4,8 +4,10 @@ import express from 'express'
 import rateLimit from 'express-rate-limit'
 import { hooksApiRouter } from './hooks-api/routes'
 import { createLogger } from './lib/logger'
+import { httpRequestDurationSeconds } from './lib/metrics'
 import blockscoutRouter from './routes/blockscout'
 import eventsRouter from './routes/events'
+import healthRouter from './routes/health'
 import pricesRouter from './routes/prices'
 import swapRouter from './routes/swap'
 import wriRouter from './routes/wri'
@@ -50,8 +52,25 @@ app.use((req, _res, next) => {
   next()
 })
 
-app.get('/health', (_req, res) => {
-  res.json({ ok: true, service: 'tucopwallet-backend', version: '0.1.0' })
+// HTTP duration histogram observed per request. The `route` label uses the
+// Express route template (e.g. `/api/v2/transactions/:hash`) rather than the
+// raw URL so high-cardinality IDs don't blow up the Prometheus series count.
+// Routes that did not match (404) get `route='unmatched'`.
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint()
+  res.on('finish', () => {
+    const elapsedNs = process.hrtime.bigint() - start
+    const seconds = Number(elapsedNs) / 1e9
+    const route = req.route?.path ?? (req.baseUrl ? `${req.baseUrl}*` : 'unmatched')
+    httpRequestDurationSeconds
+      .labels({
+        method: req.method,
+        route,
+        status: String(res.statusCode),
+      })
+      .observe(seconds)
+  })
+  next()
 })
 
 app.use(
@@ -63,6 +82,9 @@ app.use(
   }),
 )
 
+// Health + metrics router replaces the inline /health handler. It defines
+// /health (liveness), /ready (deps probe), /health/relay, and /metrics.
+app.use(healthRouter)
 app.use(eventsRouter)
 app.use(pricesRouter)
 app.use(blockscoutRouter)
