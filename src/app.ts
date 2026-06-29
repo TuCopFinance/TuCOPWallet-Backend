@@ -1,3 +1,4 @@
+import path from 'path'
 import express from 'express'
 import rateLimit from 'express-rate-limit'
 import { hooksApiRouter } from './hooks-api/routes'
@@ -45,6 +46,15 @@ app.use((req, _res, next) => {
 app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'tucopwallet-backend', version: '0.1.0' })
 })
+
+app.use(
+  '/assets',
+  express.static(path.join(__dirname, 'public', 'assets'), {
+    maxAge: '7d',
+    immutable: true,
+    fallthrough: true,
+  }),
+)
 
 app.use(eventsRouter)
 app.use(pricesRouter)

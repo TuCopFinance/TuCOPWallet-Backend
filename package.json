@@ -9,7 +9,7 @@
   },
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc && node -e \"require('fs').cpSync('src/db/migrations','dist/db/migrations',{recursive:true})\"",
+    "build": "tsc && node -e \"const f=require('fs'); f.cpSync('src/db/migrations','dist/db/migrations',{recursive:true}); f.cpSync('public','dist/public',{recursive:true})\"",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "typecheck": "tsc --noEmit",
