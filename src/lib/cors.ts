@@ -6,6 +6,7 @@ import cors from 'cors'
 // no sibling sub-paths so prefix-match is effectively exact-match.
 export const WRITE_PATHS: readonly string[] = [
   '/api/wri/delegate-relay',
+  '/api/wri/fee-adapter-bootstrap',
   '/api/transactions/watch',
   '/hooks-api/triggerShortcut',
 ]
