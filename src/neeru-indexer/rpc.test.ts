@@ -1,12 +1,11 @@
 import type { PublicClient } from 'viem'
 import {
-  ANKR_URL,
-  createNeeruRpc,
-  DRPC_URL,
-  FORNO_URL,
-  PRIMARY_SKIP_DURATION_MS,
-  PRIMARY_URL,
-} from './rpc'
+  getAnkrRpcUrl,
+  getDrpcRpcUrl,
+  getFornoUrl,
+  getPrimaryRpcUrl,
+} from '../lib/celoClient'
+import { createNeeruRpc, PRIMARY_SKIP_DURATION_MS } from './rpc'
 
 type Call = 'primary' | 'forno' | 'ankr' | 'drpc'
 
@@ -145,10 +144,10 @@ describe('createNeeruRpc', () => {
       /all Neeru RPC endpoints failed/,
     )
     const err = await rpc.getBlockNumber().catch((e: Error) => e)
-    expect(String(err)).toContain(PRIMARY_URL)
-    expect(String(err)).toContain(FORNO_URL)
-    expect(String(err)).toContain(ANKR_URL)
-    expect(String(err)).toContain(DRPC_URL)
+    expect(String(err)).toContain(getPrimaryRpcUrl())
+    expect(String(err)).toContain(getFornoUrl())
+    expect(String(err)).toContain(getAnkrRpcUrl())
+    expect(String(err)).toContain(getDrpcRpcUrl())
   })
 
   it('multicall passes through to the primary with its full return shape', async () => {
