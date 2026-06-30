@@ -12,6 +12,7 @@ import healthRouter from './routes/health'
 import pricesRouter from './routes/prices'
 import swapRouter from './routes/swap'
 import wriRouter from './routes/wri'
+import wriFeeBootstrapRouter from './routes/wri-fee-bootstrap'
 import transactionsRouter from './transactions-indexer/routes'
 
 const reqLog = createLogger('app:req')
@@ -104,6 +105,7 @@ app.use(pricesRouter)
 app.use(blockscoutRouter)
 app.use(swapRouter)
 app.use(wriRouter)
+app.use(wriFeeBootstrapRouter)
 app.use(transactionsRouter)
 app.use(hooksApiRouter)
 
