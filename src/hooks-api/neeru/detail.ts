@@ -14,11 +14,11 @@ import {
   TRANCHES_FN_ABI,
 } from '../neeru-abi'
 import { NEERU_DEPOSIT_TOKEN_ADDRESS } from '../config'
+import { monthlyYieldPercent } from './positions'
 
 const log = createLogger('hooks-api:neeru:detail')
 
 const SECONDS_PER_DAY = 86_400
-const RAY_NUMBER = 1e27
 const CACHE_TTL_MS = 30_000
 const BPS_DENOM = 10_000n
 
@@ -105,11 +105,6 @@ function trancheLabel(secs: bigint): string {
   if (secs === 0n) return 'Flexible'
   const days = Number(secs) / SECONDS_PER_DAY
   return `${days} dias`
-}
-
-function monthlyRatePercentage(rateRaw: bigint): number {
-  const daily = Number(rateRaw) / RAY_NUMBER
-  return (daily ** 30 - 1) * 100
 }
 
 export interface GetNeeruPositionDetailArgs {
@@ -359,7 +354,7 @@ export async function getNeeruPositionDetail(
       trancheLabel: trancheLabel(secs),
       principal: principalStr,
       accruedInterest: accruedStr,
-      monthlyRatePercentage: monthlyRatePercentage(rateRaw),
+      monthlyRatePercentage: monthlyYieldPercent(rateRaw),
       startTs: Number(row.start_ts),
       endTs,
       depositBlock: Number(row.deposit_block),

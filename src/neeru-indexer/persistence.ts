@@ -16,6 +16,15 @@ import type {
 
 const log = createLogger('neeru-indexer:persistence')
 
+// Per-tranche lock seconds are immutable for the lifetime of a contract
+// impl, so cache them once across ticks. A tick that contains kind=d
+// renewals can read from cache instead of re-fetching tranches(cat).
+const lockSecondsCache: Map<NeeruCategory, bigint> = new Map()
+
+export function _resetLockSecondsCacheForTests(): void {
+  lockSecondsCache.clear()
+}
+
 export async function buildOnchainContext(
   rpc: NeeruIndexerRpcClient,
   events: ReadonlyArray<NeeruEventWithoutTimestamp>,
@@ -23,6 +32,7 @@ export async function buildOnchainContext(
   const ctx: NeeruOnchainBatchContext = {
     positionCategory: new Map(),
     blockTimestamps: new Map(),
+    lockSecondsByCategory: new Map(),
   }
 
   if (events.length === 0) return ctx
@@ -61,6 +71,52 @@ export async function buildOnchainContext(
       const raw = results[cursor++] as readonly unknown[]
       const cat = Number(raw[1])
       ctx.positionCategory.set(id.toString(), cat)
+    }
+
+    const uniqueCats = new Set<NeeruCategory>()
+    for (const cat of ctx.positionCategory.values()) {
+      if (isNeeruCategory(cat)) uniqueCats.add(cat)
+    }
+
+    const cachedCats: NeeruCategory[] = []
+    const uncachedCats: NeeruCategory[] = []
+    for (const cat of uniqueCats) {
+      if (lockSecondsCache.has(cat)) {
+        cachedCats.push(cat)
+      } else {
+        uncachedCats.push(cat)
+      }
+    }
+    for (const cat of cachedCats) {
+      ctx.lockSecondsByCategory.set(cat, lockSecondsCache.get(cat)!)
+    }
+
+    if (uncachedCats.length > 0) {
+      type TrancheCall = {
+        address: `0x${string}`
+        abi: typeof READ_ABI
+        functionName: 'tranches'
+        args: readonly [NeeruCategory]
+      }
+      const trancheCalls: TrancheCall[] = uncachedCats.map((cat) => ({
+        address: CONTRACT_ADDRESS,
+        abi: READ_ABI,
+        functionName: 'tranches',
+        args: [cat] as const,
+      }))
+      const trancheResults = await rpc.multicall({
+        contracts: trancheCalls as unknown as Parameters<
+          NeeruIndexerRpcClient['multicall']
+        >[0]['contracts'],
+        allowFailure: false,
+      })
+      for (let i = 0; i < uncachedCats.length; i++) {
+        const cat = uncachedCats[i]!
+        const raw = trancheResults[i] as readonly unknown[]
+        const lockSecs = BigInt(raw[1] as bigint | number | string)
+        lockSecondsCache.set(cat, lockSecs)
+        ctx.lockSecondsByCategory.set(cat, lockSecs)
+      }
     }
   }
 
@@ -243,6 +299,16 @@ export async function handleKindD(
     )
   }
 
+  // For locked tranches the new row's start is the old row's end (the
+  // event carries that end). For non-locked categories or any case where
+  // the per-tranche lock window is not available, fall back to the block
+  // timestamp so the row still inserts cleanly.
+  const lockSecs = ctx.lockSecondsByCategory.get(cat)
+  const startTs =
+    lockSecs != null && lockSecs > 0n && args.endTs >= lockSecs
+      ? args.endTs - lockSecs
+      : args.blockTimestamp
+
   await insertRow(
     client,
     {
@@ -250,7 +316,7 @@ export async function handleKindD(
       user: args.user,
       category: cat,
       amount: args.newAmount,
-      startTs: args.blockTimestamp,
+      startTs,
       endTs: args.endTs,
       blockNumber: args.blockNumber,
       txHash: args.txHash,
