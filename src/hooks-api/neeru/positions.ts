@@ -80,13 +80,12 @@ function trancheTitle(secs: bigint): string {
 }
 
 function rpow(base: bigint, exp: number, scale: bigint): bigint {
-  const half = scale / 2n
   let result = scale
   let b = base
   let e = exp
   while (e > 0) {
-    if (e & 1) result = (result * b + half) / scale
-    b = (b * b + half) / scale
+    if (e & 1) result = (result * b) / scale
+    b = (b * b) / scale
     e >>= 1
   }
   return result
