@@ -234,6 +234,41 @@ describe('getNeeruEarnPositions', () => {
     expect(dataProps1.yieldRates[0]?.label).toBe('Tasa mensual')
   })
 
+  it('emits exactly zero yields when on-chain rate equals RAY (no-yield case)', async () => {
+    const RAY_LITERAL = 10n ** 27n
+    const noYield = catReadTuple({ r0: RAY_LITERAL, r1: 0n, r2: 0n })
+    const { rpc } = buildFakeRpc({
+      catReadReturns: [noYield, noYield, noYield, noYield],
+    })
+    const { db } = buildFakeDb([])
+
+    const positions = await getNeeruEarnPositions({ db: db as never, rpc })
+
+    for (const p of positions) {
+      expect(p.dataProps!.dailyYieldRatePercentage).toBe(0)
+      expect(p.dataProps!.yieldRates[0]?.percentage).toBe(0)
+    }
+  })
+
+  it('returns byte-identical yields across repeated calls (no IEEE 754 drift)', async () => {
+    const { rpc: rpc1 } = buildFakeRpc({ catReadReturns })
+    const { db: db1 } = buildFakeDb([])
+    const positions1 = await getNeeruEarnPositions({ db: db1 as never, rpc: rpc1 })
+
+    _resetHooksApiNeeruCacheForTests()
+
+    const { rpc: rpc2 } = buildFakeRpc({ catReadReturns })
+    const { db: db2 } = buildFakeDb([])
+    const positions2 = await getNeeruEarnPositions({ db: db2 as never, rpc: rpc2 })
+
+    for (let i = 0; i < 4; i++) {
+      const a = positions1[i]!.dataProps!
+      const b = positions2[i]!.dataProps!
+      expect(b.dailyYieldRatePercentage).toBe(a.dailyYieldRatePercentage)
+      expect(b.yieldRates[0]?.percentage).toBe(a.yieldRates[0]?.percentage)
+    }
+  })
+
   it('emits TVL as decimal string scaled by token decimals', async () => {
     const { rpc } = buildFakeRpc({ catReadReturns })
     const { db } = buildFakeDb([])
