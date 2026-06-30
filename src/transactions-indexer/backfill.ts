@@ -79,8 +79,90 @@ export interface BackfillRpcClient {
   }>
 }
 
+// Minimal subset of viem's PublicClient we touch when wrapping it as a
+// BackfillRpcClient. Defined locally so tests can build a stand-in without
+// dragging viem into the test fixture.
+export interface BackfillViemLike {
+  getBlockNumber(): Promise<bigint>
+  getBlock(args: { blockNumber: bigint }): Promise<{ timestamp: bigint }>
+  getTransaction(args: { hash: `0x${string}` }): Promise<{
+    hash: `0x${string}`
+    from: string
+    to: string | null
+    transactionIndex: number | null
+    value: bigint
+    input: string
+    blockNumber?: bigint
+  }>
+  getTransactionReceipt(args: { hash: `0x${string}` }): Promise<{
+    status: 'success' | 'reverted'
+    transactionIndex: number
+    gasUsed: bigint
+    effectiveGasPrice?: bigint
+    logs: ReadonlyArray<{
+      logIndex: number | null
+      address: string
+      topics: ReadonlyArray<string>
+      data: string
+    }>
+  }>
+  request(args: { method: string; params: unknown }): Promise<unknown>
+}
+
+// Wraps a viem PublicClient as a BackfillRpcClient. The reason this exists
+// rather than a direct cast: viem's typed `getLogs(...)` does NOT accept the
+// `topics: [...]` shape we need for an unindexed-event-style ERC20 Transfer
+// query; the typed method silently drops the filter, so Forno gets
+// `topics: []` (match-everything) and times out at 30s on every 5000-block
+// chunk. We translate to JSON-RPC `eth_getLogs` via `client.request` and
+// keep the BackfillRpcClient surface stable. Same pattern that
+// `src/neeru-indexer/rpc.ts` ships in production.
+export function wrapPublicClientAsBackfillRpc(
+  client: BackfillViemLike,
+): BackfillRpcClient {
+  return {
+    getBlockNumber: () => client.getBlockNumber(),
+    getLogs: async (args) => {
+      const result = (await client.request({
+        method: 'eth_getLogs',
+        params: [
+          {
+            topics: args.topics as `0x${string}`[],
+            fromBlock: `0x${args.fromBlock.toString(16)}` as `0x${string}`,
+            toBlock: `0x${args.toBlock.toString(16)}` as `0x${string}`,
+          },
+        ],
+      })) as Array<{ transactionHash: string; blockNumber: string | null }>
+      return result.map((r) => ({
+        transactionHash: r.transactionHash,
+        blockNumber: r.blockNumber ? BigInt(r.blockNumber) : 0n,
+      }))
+    },
+    getBlock: (args) =>
+      client
+        .getBlock({ blockNumber: args.blockNumber })
+        .then((b) => ({ timestamp: b.timestamp })),
+    getTransaction: (args) => client.getTransaction({ hash: args.hash }),
+    getTransactionReceipt: (args) =>
+      client.getTransactionReceipt({ hash: args.hash }).then((r) => ({
+        status: r.status,
+        transactionIndex: r.transactionIndex,
+        gasUsed: r.gasUsed,
+        effectiveGasPrice: r.effectiveGasPrice,
+        logs: r.logs.map((lg) => ({
+          logIndex: lg.logIndex,
+          address: lg.address,
+          topics: lg.topics,
+          data: lg.data,
+        })),
+      })),
+  }
+}
+
 function buildDefaultClient(): BackfillRpcClient {
-  return createCeloPublicClient({ url: getFornoUrl() }) as unknown as BackfillRpcClient
+  return wrapPublicClientAsBackfillRpc(
+    createCeloPublicClient({ url: getFornoUrl() }) as unknown as BackfillViemLike,
+  )
 }
 
 function paddedAddressTopic(address: string): string {
