@@ -1,12 +1,10 @@
 import { http, fallback, createPublicClient, type PublicClient } from 'viem'
 import { celo } from 'viem/chains'
+import { CELO_RPC_FALLBACK_URLS } from '../../lib/celoClient'
 
-export const RPC_URLS = [
-  'https://rpc.celocolombia.org',
-  'https://forno.celo.org',
-  'https://rpc.ankr.com/celo',
-  'https://celo.drpc.org',
-] as const
+// Re-export for tests/callers that already imported from this module. The
+// canonical definition lives in lib/celoClient.
+export const RPC_URLS = CELO_RPC_FALLBACK_URLS
 
 let cached: PublicClient | null = null
 
