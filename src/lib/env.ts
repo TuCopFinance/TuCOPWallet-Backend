@@ -110,12 +110,13 @@ const envSchema = z.object({
 
   // Celo RPC fallback chain. Order is primary -> forno -> ankr -> drpc; the
   // Neeru indexer supervisor and Allbridge's viem fallback transport both
-  // consume `getCeloRpcFallbackUrls()` from lib/celoClient. Override any of
-  // these four to point at a different endpoint without a redeploy.
-  PRIMARY_RPC_URL: zHttpsUrl.optional().default('https://rpc.celocolombia.org'),
-  FORNO_URL: zHttpsUrl.optional().default('https://forno.celo.org'),
-  ANKR_RPC_URL: zHttpsUrl.optional().default('https://rpc.ankr.com/celo'),
-  DRPC_RPC_URL: zHttpsUrl.optional().default('https://celo.drpc.org'),
+  // consume `getCeloRpcFallbackUrls()` from lib/celoClient. All four are
+  // required: the URLs are deployment-controlled configuration, not in-source
+  // constants, so a deploy can rotate any endpoint without a code change.
+  PRIMARY_RPC_URL: zHttpsUrl,
+  FORNO_URL: zHttpsUrl,
+  ANKR_RPC_URL: zHttpsUrl,
+  DRPC_RPC_URL: zHttpsUrl,
 
   // Upstream providers (optional; routes 503 when their feature is hit
   // without the corresponding key)
