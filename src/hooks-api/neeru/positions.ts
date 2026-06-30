@@ -97,7 +97,7 @@ function dailyYieldPercent(rateRaw: bigint): number {
   return Number(scaled) / 1_000_000
 }
 
-function monthlyYieldPercent(rateRaw: bigint): number {
+export function monthlyYieldPercent(rateRaw: bigint): number {
   const compounded = rpow(rateRaw, 30, RAY)
   const half = RAY / 2n
   const scaled = ((compounded - RAY) * 100n * 1_000_000n + half) / RAY
