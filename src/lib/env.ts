@@ -1,7 +1,23 @@
+// Typed env module. Validates every env var the process consumes at boot via
+// zod. A misconfigured deploy (missing required var, malformed hex, etc.)
+// fails immediately with a clear error instead of returning 503 at the first
+// request that depends on it.
+//
+// The pre-existing helpers (readEnvAddress, readEnvTopic0, parseEnvBigInt,
+// ZERO_ADDRESS, ZERO_TOPIC) are kept for backwards compatibility while
+// consumers migrate to `env.X` access. New code should always read from the
+// `env` export below, not `process.env.X`.
+
+import { z } from 'zod'
 import { HEX_ADDRESS_RE, HEX_BYTES32_RE } from './hex'
 import { createLogger } from './logger'
 
 const log = createLogger('lib:env')
+
+// ---------------------------------------------------------------------------
+// Legacy helpers (kept for backwards compatibility; existing consumers in
+// neeru-indexer/abi, hooks-api/config, routes/wri still use these).
+// ---------------------------------------------------------------------------
 
 const ZERO_HEX_40 = '0x0000000000000000000000000000000000000000' as const
 const ZERO_HEX_64 =
@@ -55,3 +71,167 @@ export function parseEnvBigInt(name: string, fallback: bigint): bigint {
     return fallback
   }
 }
+
+// ---------------------------------------------------------------------------
+// Schema-driven env (new code should use this)
+// ---------------------------------------------------------------------------
+
+// zod helpers used across multiple env fields.
+const zHexAddress = z
+  .string()
+  .regex(HEX_ADDRESS_RE, '0x + 40 hex address')
+const zHexBytes32 = z
+  .string()
+  .regex(HEX_BYTES32_RE, '0x + 64 hex bytes32')
+const zHttpsUrl = z
+  .string()
+  .url()
+  .startsWith('https://', { message: 'must start with https://' })
+
+// Coerce-and-default helpers for vars that can be empty/missing.
+const zPositiveInt = z.coerce.number().int().nonnegative()
+
+const envSchema = z.object({
+  // Required (boot fails if missing)
+  ETHERSCAN_API_KEY: z.string().min(1, 'required'),
+
+  // Network / port
+  PORT: zPositiveInt.optional().default(8080),
+  NODE_ENV: z.string().optional().default('development'),
+
+  // DB pool (optional with defaults; production reads these)
+  DATABASE_URL: z.string().optional(),
+  PG_POOL_MAX: zPositiveInt.optional().default(20),
+  PG_POOL_CONNECTION_TIMEOUT_MS: zPositiveInt.optional().default(5_000),
+  PG_POOL_IDLE_TIMEOUT_MS: zPositiveInt.optional().default(30_000),
+
+  // Redis (sentinel "disabled" disables caching)
+  REDIS_URL: z.string().optional(),
+
+  // Celo RPC
+  FORNO_URL: zHttpsUrl.optional().default('https://forno.celo.org'),
+
+  // Upstream providers (optional; routes 503 when their feature is hit
+  // without the corresponding key)
+  COINMARKETCAP_API_KEY: z.string().optional(),
+  BLOCKSCOUT_API_KEY: z.string().optional(),
+  BLOCKSCOUT_BASE_URL: zHttpsUrl.optional(),
+  BLOCKSCOUT_ALLOWED_HOSTS: z.string().optional().default(''),
+  SQUID_INTEGRATOR_ID: z.string().optional(),
+
+  // WRI relay
+  WRI_RELAY_PK: zHexBytes32.optional(),
+  WRI_RELAY_MIN_CELO_BALANCE: z.coerce.bigint().optional(),
+  WRI_RELAY_MAX_GAS: z.coerce.bigint().optional(),
+  WRI_RELAY_PER_IP_LIMIT: zPositiveInt.optional().default(20),
+  WRI_RELAY_GLOBAL_LIMIT: zPositiveInt.optional().default(60),
+
+  // CORS
+  CORS_WRITE_ALLOWED_ORIGINS: z.string().optional().default(''),
+
+  // Observability
+  SENTRY_DSN: z.string().url().optional(),
+  SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).optional(),
+
+  // Indexer enable flags
+  INDEXER_ENABLED: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => v === 'true'),
+  NEERU_INDEXER_ENABLED: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => v === 'true'),
+  NEERU_INDEXER_INTERVAL_MS: zPositiveInt.optional().default(30_000),
+  NEERU_INDEXER_ERROR_BACKOFF_MS: zPositiveInt
+    .optional()
+    .default(5 * 60 * 1000),
+  NEERU_INDEXER_MAX_BLOCKS_PER_BATCH: z.coerce
+    .bigint()
+    .optional()
+    .default(5_000n),
+
+  // Transactions indexer (cross-wallet tx feed) - tunables for the
+  // tip-following loop. Same units as the neeru indexer counterparts:
+  // POLL_INTERVAL_MS = sleep between ticks, MAX_BLOCKS_PER_TICK = upper
+  // bound on the cursor advance per iteration.
+  INDEXER_POLL_INTERVAL_MS: zPositiveInt.optional().default(5_000),
+  INDEXER_MAX_BLOCKS_PER_TICK: zPositiveInt.optional().default(200),
+
+  // Neeru contract (REQUIRED if NEERU_INDEXER_ENABLED=true; refined below)
+  NEERU_INDEXER_GENESIS_BLOCK: z.coerce.bigint().optional(),
+  NEERU_CONTRACT_ADDRESS: zHexAddress.optional(),
+  NEERU_EVENT_A_TOPIC0: zHexBytes32.optional(),
+  NEERU_EVENT_B_TOPIC0: zHexBytes32.optional(),
+  NEERU_EVENT_C_TOPIC0: zHexBytes32.optional(),
+  NEERU_EVENT_D_TOPIC0: zHexBytes32.optional(),
+
+  // Neeru hooks-api / wallet surfaces (optional)
+  NEERU_DEPOSIT_TOKEN_ADDRESS: zHexAddress.optional(),
+  NEERU_CATEGORY_IMAGE_URL_TEMPLATE: z.string().optional().default(''),
+  NEERU_MANAGE_URL: z.string().optional().default(''),
+  NEERU_TERMS_URL: z.string().optional().default(''),
+  NEERU_CONTRACT_CREATED_AT_ISO: z.string().datetime().optional(),
+})
+
+export type Env = z.infer<typeof envSchema>
+
+let cachedEnv: Env | null = null
+
+// Parse + validate process.env once. Returns the cached value on subsequent
+// calls. Throws z.ZodError with a multi-issue message if validation fails -
+// the caller (server.ts) is expected to catch it, log, and exit non-zero.
+export function parseEnv(): Env {
+  if (cachedEnv) return cachedEnv
+  const result = envSchema.safeParse(process.env)
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((i) => `${i.path.join('.')}: ${i.message}`)
+      .join('\n  ')
+    throw new Error(`env validation failed:\n  ${issues}`)
+  }
+  // Cross-field invariants. Indexers need DB + Neeru-specific vars when on.
+  const e = result.data
+  if (e.NEERU_INDEXER_ENABLED) {
+    const missing: string[] = []
+    if (!e.DATABASE_URL || e.DATABASE_URL === 'disabled') missing.push('DATABASE_URL')
+    if (e.NEERU_INDEXER_GENESIS_BLOCK == null) missing.push('NEERU_INDEXER_GENESIS_BLOCK')
+    if (!e.NEERU_CONTRACT_ADDRESS) missing.push('NEERU_CONTRACT_ADDRESS')
+    for (const t of [
+      'NEERU_EVENT_A_TOPIC0',
+      'NEERU_EVENT_B_TOPIC0',
+      'NEERU_EVENT_C_TOPIC0',
+      'NEERU_EVENT_D_TOPIC0',
+    ] as const) {
+      if (!e[t]) missing.push(t)
+    }
+    if (missing.length > 0) {
+      throw new Error(
+        `NEERU_INDEXER_ENABLED=true but these required vars are missing: ${missing.join(', ')}`,
+      )
+    }
+  }
+  if (e.INDEXER_ENABLED) {
+    if (!e.DATABASE_URL || e.DATABASE_URL === 'disabled') {
+      throw new Error('INDEXER_ENABLED=true but DATABASE_URL is missing or set to "disabled"')
+    }
+  }
+  cachedEnv = e
+  return e
+}
+
+// Test-only escape hatch.
+export function _resetParsedEnvForTests(): void {
+  cachedEnv = null
+}
+
+// Lazy proxy: `env.X` reads invoke parseEnv() on first access. Consumers
+// don't have to call parseEnv() explicitly; server.ts does that at boot to
+// surface errors early.
+export const env: Env = new Proxy({} as Env, {
+  get(_target, prop: string) {
+    return (parseEnv() as unknown as Record<string, unknown>)[prop]
+  },
+})

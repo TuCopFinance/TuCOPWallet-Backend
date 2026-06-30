@@ -3,20 +3,30 @@
 import { initSentry } from './lib/sentry'
 initSentry()
 
+// Typed env validation runs BEFORE any other import that reads env at module
+// load time. parseEnv() throws a multi-issue error if any required var is
+// missing or any var is malformed; we exit non-zero so a misconfigured
+// deploy fails immediately instead of returning 503 at the first request
+// that touches the missing config.
+import { parseEnv } from './lib/env'
+import { createLogger } from './lib/logger'
+
+const log = createLogger('server')
+
+try {
+  parseEnv()
+} catch (err) {
+  log.error(`FATAL: ${err instanceof Error ? err.message : String(err)}`)
+  process.exit(1)
+}
+
 import { app } from './app'
 import { runMigrations } from './db/migrate'
 import { getDb } from './lib/db'
-import { createLogger } from './lib/logger'
 import { startNeeruIndexer } from './neeru-indexer/worker'
 import { startIndexer } from './transactions-indexer/worker'
 
-const log = createLogger('server')
 const PORT = Number(process.env.PORT) || 8080
-
-if (!process.env.ETHERSCAN_API_KEY) {
-  log.error('FATAL: ETHERSCAN_API_KEY env var is required')
-  process.exit(1)
-}
 
 // Blockscout proxy host allowlist. The previous check only enforced https://
 // which left BLOCKSCOUT_BASE_URL trusted beyond the protocol; a misconfigured

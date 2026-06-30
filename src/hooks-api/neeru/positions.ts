@@ -1,6 +1,7 @@
 import type { Pool } from 'pg'
 import { CONTRACT_ADDRESS } from '../../neeru-indexer/abi'
 import type { NeeruIndexerRpcClient } from '../../neeru-indexer/rpc'
+import { decimalString } from '../../lib/decimal'
 import { createLogger } from '../../lib/logger'
 import {
   ERC20_READ_ABI,
@@ -16,11 +17,7 @@ import {
   categoryImageUrl,
 } from '../config'
 import { NEERU_APP_ID } from './shortcuts'
-import type {
-  EarnPosition,
-  NetworkId,
-  SerializedDecimalNumber,
-} from './types'
+import type { EarnPosition, NetworkId } from './types'
 
 const log = createLogger('hooks-api:neeru:positions')
 
@@ -63,16 +60,10 @@ export function _resetHooksApiNeeruCacheForTests(): void {
   catalogueCache = null
 }
 
-function decimalString(value: bigint, decimals: number): SerializedDecimalNumber {
-  if (decimals === 0) return value.toString()
-  const negative = value < 0n
-  const abs = negative ? -value : value
-  const asStr = abs.toString().padStart(decimals + 1, '0')
-  const whole = asStr.slice(0, asStr.length - decimals)
-  const frac = asStr.slice(asStr.length - decimals).replace(/0+$/, '')
-  const out = frac.length === 0 ? whole : `${whole}.${frac}`
-  return negative ? `-${out}` : out
-}
+// decimalString moved to src/lib/decimal.ts (Fase 4 PR 28). The local
+// SerializedDecimalNumber type is a string alias; the imported helper
+// returns a plain string so call sites still flow through the type
+// system via the existing function signatures that wrap it.
 
 function positionIdFor(category: Category): string {
   return `${NETWORK_ID}:${CONTRACT_ADDRESS.toLowerCase()}:category-${category}`

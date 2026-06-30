@@ -5,6 +5,7 @@ import {
 } from '../../neeru-indexer/abi'
 import type { NeeruIndexerRpcClient } from '../../neeru-indexer/rpc'
 import { getIndexerState } from '../../neeru-indexer/state'
+import { decimalString } from '../../lib/decimal'
 import { createLogger } from '../../lib/logger'
 import {
   EARLY_CLAIM_PENALTY_BPS_FN_ABI,
@@ -98,16 +99,7 @@ export function _resetHooksApiNeeruDetailCacheForTests(): void {
   decimalsCache = null
 }
 
-function decimalString(value: bigint, decimals: number): string {
-  if (decimals === 0) return value.toString()
-  const negative = value < 0n
-  const abs = negative ? -value : value
-  const asStr = abs.toString().padStart(decimals + 1, '0')
-  const whole = asStr.slice(0, asStr.length - decimals)
-  const frac = asStr.slice(asStr.length - decimals).replace(/0+$/, '')
-  const out = frac.length === 0 ? whole : `${whole}.${frac}`
-  return negative ? `-${out}` : out
-}
+// decimalString moved to src/lib/decimal.ts (Fase 4 PR 28).
 
 function categoryLabelFor(secs: bigint): string {
   if (secs === 0n) return 'Flexible'
