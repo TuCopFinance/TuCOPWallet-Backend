@@ -1,5 +1,6 @@
 import { createPublicClient, http, type PublicClient, type Transport } from 'viem'
 import { celo } from 'viem/chains'
+import { env } from './env'
 
 // Single source of truth for Celo public-client construction. Wrappers that
 // need a wallet/auth client (e.g. WRI relay) keep their own builder; this one
@@ -16,25 +17,40 @@ export function createCeloPublicClient(
   return createPublicClient({ chain: celo, transport }) as unknown as PublicClient
 }
 
-export const FORNO_URL = 'https://forno.celo.org'
-export const PRIMARY_RPC_URL = 'https://rpc.celocolombia.org'
-export const ANKR_RPC_URL = 'https://rpc.ankr.com/celo'
-export const DRPC_RPC_URL = 'https://celo.drpc.org'
+// Env-aware getters. Every consumer reads through these so that setting the
+// env var on the deployment (Railway) propagates everywhere, including the
+// fallback chain used by Neeru indexer and Allbridge. Defaults live in
+// lib/env.ts so the zod schema is the single source for both validation and
+// default values.
+
+export function getPrimaryRpcUrl(): string {
+  return env.PRIMARY_RPC_URL
+}
+
+export function getFornoUrl(): string {
+  return env.FORNO_URL
+}
+
+export function getAnkrRpcUrl(): string {
+  return env.ANKR_RPC_URL
+}
+
+export function getDrpcRpcUrl(): string {
+  return env.DRPC_RPC_URL
+}
 
 // Canonical fallback chain for Celo public-client reads. Order matters:
 // primary first (lowest-latency for us), then the public providers in
 // decreasing preference. Both the Neeru indexer (custom skip-after-failure
 // supervisor) and the Allbridge route (viem's fallback transport) consume
 // this list. Single source of truth - do NOT redefine in other modules.
-export const CELO_RPC_FALLBACK_URLS = [
-  PRIMARY_RPC_URL,
-  FORNO_URL,
-  ANKR_RPC_URL,
-  DRPC_RPC_URL,
-] as const
-
-export function getFornoUrl(): string {
-  return process.env.FORNO_URL || FORNO_URL
+export function getCeloRpcFallbackUrls(): readonly string[] {
+  return [
+    getPrimaryRpcUrl(),
+    getFornoUrl(),
+    getAnkrRpcUrl(),
+    getDrpcRpcUrl(),
+  ]
 }
 
 // Cached singleton client for shared read-only probes (health checks,
