@@ -1,5 +1,11 @@
 import type { Pool } from 'pg'
-import { backfillAddress, _testHelpers, triggerBackfill } from './backfill'
+import {
+  backfillAddress,
+  _testHelpers,
+  triggerBackfill,
+  wrapPublicClientAsBackfillRpc,
+  type BackfillViemLike,
+} from './backfill'
 
 const ADDR = '0x1111111111111111111111111111111111111111'
 
@@ -211,6 +217,54 @@ describe('backfillAddress', () => {
     await expect(
       backfillAddress(db, ADDR, { rpc, depthBlocks: 50 }),
     ).resolves.toEqual({ blocksScanned: 51, txsFound: 0 })
+  })
+})
+
+describe('wrapPublicClientAsBackfillRpc', () => {
+  // Regression for the silent-drop bug we hit in prod: the previous
+  // implementation cast viem's PublicClient directly as BackfillRpcClient
+  // and called the typed `getLogs({topics})`, which silently dropped the
+  // topics filter so Forno received `topics: []` and timed out at 30 s.
+  // The fix routes through `request({ method: 'eth_getLogs', params })`;
+  // these assertions pin the payload shape so a future refactor cannot
+  // regress to the typed-method form unnoticed.
+  it('passes topics through to eth_getLogs as a JSON-RPC request', async () => {
+    const requestMock = jest.fn(async () => [
+      { transactionHash: '0xabc', blockNumber: '0x64' },
+    ])
+    const viem: BackfillViemLike = {
+      getBlockNumber: jest.fn(),
+      getBlock: jest.fn(),
+      getTransaction: jest.fn(),
+      getTransactionReceipt: jest.fn(),
+      request: requestMock,
+    }
+    const rpc = wrapPublicClientAsBackfillRpc(viem)
+    const topics: ReadonlyArray<string | string[] | null> = [
+      '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
+      '0x000000000000000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      null,
+    ]
+
+    const result = await rpc.getLogs({
+      topics,
+      fromBlock: 100n,
+      toBlock: 200n,
+    })
+
+    expect(requestMock).toHaveBeenCalledTimes(1)
+    const calls = requestMock.mock.calls as unknown as Array<
+      Array<{
+        method: string
+        params: Array<{ topics: unknown; fromBlock: string; toBlock: string }>
+      }>
+    >
+    const args = calls[0]?.[0]
+    expect(args?.method).toBe('eth_getLogs')
+    expect(args?.params[0]?.topics).toEqual(topics)
+    expect(args?.params[0]?.fromBlock).toBe('0x64')
+    expect(args?.params[0]?.toBlock).toBe('0xc8')
+    expect(result).toEqual([{ transactionHash: '0xabc', blockNumber: 100n }])
   })
 })
 
