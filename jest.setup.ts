@@ -3,6 +3,17 @@
 // Tests that exercise parseEnv error paths reset process.env locally.
 process.env.ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY ?? 'test'
 
+// Celo RPC fallback chain - required env vars in lib/env (no in-source
+// defaults). Tests mock the actual RPC clients, so the URL strings here only
+// satisfy zHttpsUrl validation; production URLs are kept verbatim so that an
+// accidental hit to one in test output is recognisable.
+process.env.PRIMARY_RPC_URL =
+  process.env.PRIMARY_RPC_URL ?? 'https://rpc.celocolombia.org'
+process.env.FORNO_URL = process.env.FORNO_URL ?? 'https://forno.celo.org'
+process.env.ANKR_RPC_URL =
+  process.env.ANKR_RPC_URL ?? 'https://rpc.ankr.com/celo'
+process.env.DRPC_RPC_URL = process.env.DRPC_RPC_URL ?? 'https://celo.drpc.org'
+
 process.env.NEERU_CONTRACT_ADDRESS =
   process.env.NEERU_CONTRACT_ADDRESS ??
   '0x000000000000000000000000000000000000beef'
