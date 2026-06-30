@@ -9,23 +9,19 @@ import {
   type ContractFunctionArgs,
 } from 'viem'
 import {
-  ANKR_RPC_URL,
   createCeloPublicClient,
-  DRPC_RPC_URL,
-  FORNO_URL as FORNO_DEFAULT_URL,
-  PRIMARY_RPC_URL,
+  getAnkrRpcUrl,
+  getDrpcRpcUrl,
+  getFornoUrl,
+  getPrimaryRpcUrl,
 } from '../lib/celoClient'
 import { createLogger } from '../lib/logger'
 
 const log = createLogger('neeru-indexer:rpc')
 
-// Re-export the canonical URLs from lib/celoClient so existing callers /
-// tests that import from this module keep working. Indexer falls back
-// through primary -> Forno -> Ankr -> dRPC if the primary is down.
-export const PRIMARY_URL = PRIMARY_RPC_URL
-export const FORNO_URL = FORNO_DEFAULT_URL
-export const ANKR_URL = ANKR_RPC_URL
-export const DRPC_URL = DRPC_RPC_URL
+// Fallback chain order: primary -> Forno -> Ankr -> dRPC. URLs resolve
+// through lib/celoClient getters, which read from env, so a Railway env
+// override propagates here without a redeploy.
 
 export const PRIMARY_SKIP_AFTER_FAILURES = 3
 export const PRIMARY_SKIP_DURATION_MS = 5 * 60 * 1000
@@ -105,26 +101,31 @@ export function createNeeruRpc(
 ): NeeruIndexerRpcClient {
   const now = options.now ?? (() => Date.now())
 
+  const primaryUrl = getPrimaryRpcUrl()
+  const fornoUrl = getFornoUrl()
+  const ankrUrl = getAnkrRpcUrl()
+  const drpcUrl = getDrpcRpcUrl()
+
   const endpoints: Endpoint[] = [
     {
       name: 'primary',
-      url: PRIMARY_URL,
-      client: options.endpoints?.primary ?? makeClient(PRIMARY_URL),
+      url: primaryUrl,
+      client: options.endpoints?.primary ?? makeClient(primaryUrl),
     },
     {
       name: 'forno',
-      url: FORNO_URL,
-      client: options.endpoints?.forno ?? makeClient(FORNO_URL),
+      url: fornoUrl,
+      client: options.endpoints?.forno ?? makeClient(fornoUrl),
     },
     {
       name: 'ankr',
-      url: ANKR_URL,
-      client: options.endpoints?.ankr ?? makeClient(ANKR_URL),
+      url: ankrUrl,
+      client: options.endpoints?.ankr ?? makeClient(ankrUrl),
     },
     {
       name: 'drpc',
-      url: DRPC_URL,
-      client: options.endpoints?.drpc ?? makeClient(DRPC_URL),
+      url: drpcUrl,
+      client: options.endpoints?.drpc ?? makeClient(drpcUrl),
     },
   ]
 
@@ -148,7 +149,7 @@ export function createNeeruRpc(
     if (primaryState.consecutiveFailures >= PRIMARY_SKIP_AFTER_FAILURES) {
       primaryState.skipUntilMs = now() + PRIMARY_SKIP_DURATION_MS
       log.warn(
-        `Primary RPC (${PRIMARY_URL}) skipped for ${PRIMARY_SKIP_DURATION_MS}ms after ${primaryState.consecutiveFailures} consecutive failures`,
+        `Primary RPC (${primaryUrl}) skipped for ${PRIMARY_SKIP_DURATION_MS}ms after ${primaryState.consecutiveFailures} consecutive failures`,
       )
     }
   }
