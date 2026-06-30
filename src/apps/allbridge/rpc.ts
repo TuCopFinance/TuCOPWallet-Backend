@@ -1,17 +1,13 @@
 import { http, fallback, createPublicClient, type PublicClient } from 'viem'
 import { celo } from 'viem/chains'
-import { CELO_RPC_FALLBACK_URLS } from '../../lib/celoClient'
-
-// Re-export for tests/callers that already imported from this module. The
-// canonical definition lives in lib/celoClient.
-export const RPC_URLS = CELO_RPC_FALLBACK_URLS
+import { getCeloRpcFallbackUrls } from '../../lib/celoClient'
 
 let cached: PublicClient | null = null
 
 export function getCeloPublicClient(): PublicClient {
   if (cached) return cached
   const transport = fallback(
-    RPC_URLS.map((url) =>
+    getCeloRpcFallbackUrls().map((url) =>
       http(url, {
         // viem default is 3; one retry per fallback URL is enough since
         // the fallback layer also retries downstream.
