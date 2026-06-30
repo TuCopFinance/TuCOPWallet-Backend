@@ -79,12 +79,16 @@ function trancheTitle(secs: bigint): string {
   return `${days} dias`
 }
 
+function round6(n: number): number {
+  return Math.round(n * 1_000_000) / 1_000_000
+}
+
 function dailyYieldPercent(rateRaw: bigint): number {
-  return (Number(rateRaw) / RAY - 1) * 100
+  return round6((Number(rateRaw) / RAY - 1) * 100)
 }
 
 function monthlyYieldPercent(dailyPercent: number): number {
-  return ((dailyPercent / 100 + 1) ** 30 - 1) * 100
+  return round6(((dailyPercent / 100 + 1) ** 30 - 1) * 100)
 }
 
 interface FetchCatalogueDeps {
