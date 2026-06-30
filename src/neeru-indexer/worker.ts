@@ -1,5 +1,6 @@
 import type { Pool } from 'pg'
 import { getDb } from '../lib/db'
+import { env } from '../lib/env'
 import { createLogger } from '../lib/logger'
 import {
   assertIndexerConfig,
@@ -48,9 +49,7 @@ const log = createLogger('neeru-indexer:worker')
 
 const DEFAULT_TICK_INTERVAL_MS = 30_000
 const DEFAULT_REORG_CHECK_INTERVAL_MS = 60_000
-const ERROR_BACKOFF_MS = 5 * 60 * 1000
 const REORG_BUFFER_BLOCKS = 5n
-const MAX_BLOCKS_PER_BATCH = 5_000n
 const REORG_RUN_UTC_HOUR = 3
 // After this many consecutive tick failures, escalate the log line from warn
 // to error so operator monitoring (Sentry/log-based alerts) can page on the
@@ -82,12 +81,13 @@ export interface TickOptions {
 export function chunkBlockRange(
   from: bigint,
   to: bigint,
+  batchSize: bigint = env.NEERU_INDEXER_MAX_BLOCKS_PER_BATCH,
 ): Array<{ fromBlock: bigint; toBlock: bigint }> {
   if (from > to) return []
   const out: Array<{ fromBlock: bigint; toBlock: bigint }> = []
   let cursor = from
   while (cursor <= to) {
-    const end = cursor + MAX_BLOCKS_PER_BATCH - 1n
+    const end = cursor + batchSize - 1n
     const batchEnd = end < to ? end : to
     out.push({ fromBlock: cursor, toBlock: batchEnd })
     cursor = batchEnd + 1n
@@ -165,10 +165,9 @@ export interface StartNeeruIndexerOptions {
   intervalMs?: number
   iterations?: number
   enableReorgJob?: boolean
-  // Override the 5-minute ERROR_BACKOFF_MS sleep between failing ticks.
-  // Used by tests so an iterations:N run doesn't actually sleep 5min between
-  // every failure. Not exposed via env; production should always use the
-  // module-level default.
+  // Override the default error-backoff sleep between failing ticks (env
+  // var NEERU_INDEXER_ERROR_BACKOFF_MS, default 5min). Used by tests so an
+  // iterations:N run doesn't actually sleep 5min between every failure.
   errorBackoffMs?: number
 }
 
@@ -227,7 +226,8 @@ export async function startNeeruIndexer(
   const intervalMs = options.intervalMs ?? parseIntervalMs()
   const maxIterations = options.iterations
   const enableReorgJob = options.enableReorgJob ?? true
-  const errorBackoffMs = options.errorBackoffMs ?? ERROR_BACKOFF_MS
+  const errorBackoffMs =
+    options.errorBackoffMs ?? env.NEERU_INDEXER_ERROR_BACKOFF_MS
 
   log.info(`starting neeru indexer (intervalMs=${intervalMs})`)
 
