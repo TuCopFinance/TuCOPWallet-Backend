@@ -41,7 +41,20 @@ export const POSITIONS_FN_ABI = {
   ],
 } as const satisfies AbiFunction
 
-export const READ_ABI = [POSITIONS_FN_ABI] as const
+export const TRANCHES_FN_ABI = {
+  type: 'function',
+  name: 'tranches',
+  stateMutability: 'view',
+  inputs: [{ name: '', type: 'uint8' }],
+  outputs: [
+    { name: 'r0', type: 'uint256' },
+    { name: 'r1', type: 'uint256' },
+    { name: 'r2', type: 'uint256' },
+    { name: 'r3', type: 'uint256' },
+  ],
+} as const satisfies AbiFunction
+
+export const READ_ABI = [POSITIONS_FN_ABI, TRANCHES_FN_ABI] as const
 
 export function assertIndexerConfig(): void {
   if (CONTRACT_ADDRESS === ZERO_ADDRESS) {
