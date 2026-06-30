@@ -594,6 +594,10 @@ describe('handleKindD', () => {
   const newAmount = 12_345n * 10n ** 18n
   const endTs = 1_705_000_000n
   const blockTimestamp = 1_702_592_000n
+  // 30 days of seconds; cat=1 in the default ctx below stands in for the
+  // first locked tranche. The reconstructed startTs is endTs - 30 days.
+  const lockSecsCat1 = 30n * 86_400n
+  const reconstructedStartTs = endTs - lockSecsCat1
 
   function makeArgs(): KindDArgs {
     return {
@@ -614,10 +618,11 @@ describe('handleKindD', () => {
     return {
       positionCategory: new Map([[newId.toString(), 1]]),
       blockTimestamps: new Map([['1350000', blockTimestamp]]),
+      lockSecondsByCategory: new Map([[1, lockSecsCat1]]),
     }
   }
 
-  it('marks the old row closed and inserts a new row', async () => {
+  it('marks the old row closed and inserts a new row with reconstructed startTs', async () => {
     const { client, queries } = stubClient()
     await handleKindD(client as never, makeArgs(), makeCtx())
 
@@ -636,11 +641,36 @@ describe('handleKindD', () => {
       ADDR_USER,
       1,
       newAmount.toString(),
-      blockTimestamp.toString(),
+      reconstructedStartTs.toString(),
       endTs.toString(),
       '1350000',
       txHash,
     ])
+  })
+
+  it('falls back to blockTimestamp when lockSeconds is missing for the category', async () => {
+    const { client, queries } = stubClient()
+    const ctxWithoutLock: NeeruOnchainBatchContext = {
+      positionCategory: new Map([[newId.toString(), 1]]),
+      blockTimestamps: new Map([['1350000', blockTimestamp]]),
+      lockSecondsByCategory: new Map(),
+    }
+    await handleKindD(client as never, makeArgs(), ctxWithoutLock)
+
+    expect(queries[1]?.sql).toMatch(/INSERT INTO neeru_positions/i)
+    expect(queries[1]?.params?.[4]).toEqual(blockTimestamp.toString())
+  })
+
+  it('falls back to blockTimestamp when lockSeconds is zero (non-locked tranche)', async () => {
+    const { client, queries } = stubClient()
+    const ctxFlex: NeeruOnchainBatchContext = {
+      positionCategory: new Map([[newId.toString(), 0]]),
+      blockTimestamps: new Map([['1350000', blockTimestamp]]),
+      lockSecondsByCategory: new Map([[0, 0n]]),
+    }
+    await handleKindD(client as never, makeArgs(), ctxFlex)
+
+    expect(queries[1]?.params?.[4]).toEqual(blockTimestamp.toString())
   })
 
   it('throws when the pre-fetched category is missing', async () => {
@@ -648,6 +678,7 @@ describe('handleKindD', () => {
     const emptyCtx: NeeruOnchainBatchContext = {
       positionCategory: new Map(),
       blockTimestamps: new Map([['1350000', blockTimestamp]]),
+      lockSecondsByCategory: new Map(),
     }
     await expect(
       handleKindD(client as never, makeArgs(), emptyCtx),
@@ -706,6 +737,7 @@ describe('dispatchNeeruEvent', () => {
     const ctx: NeeruOnchainBatchContext = {
       positionCategory: new Map(),
       blockTimestamps: new Map(),
+      lockSecondsByCategory: new Map(),
     }
     await dispatchNeeruEvent(
       client as never,
