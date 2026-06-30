@@ -293,23 +293,111 @@ One-time, sponsored EIP-7702 delegation setup for TuCop's Wallet Relay Infrastru
 
 **Out of scope:** this endpoint ONLY handles the one-time delegation setup. The actual `execute(calls)` payload that uses the delegated EOA must be sent by the wallet as a regular CIP-64 transaction; the backend does not relay batch payloads.
 
-### Transaction feed (WRI Track C)
+### `POST /api/wri/fee-adapter-bootstrap`
 
-Backend-owned replacement for Valora's `getWalletTransactions`. Indexes Celo blocks for opted-in addresses and classifies into the same `TokenTransaction` shape the wallet already consumes, with an extension for EIP-7702 atomic batches (which Valora omits).
+One-shot, sponsored `approve(adapter, MAX_UINT256)` on each adapter-only stable the user holds. Solves the WRI Track C chicken-and-egg case: a user whose only dollar balance is in `USDC` or `USDT` (both adapter-only fee currencies on Celo) cannot pay gas on any tx because the adapter contract needs allowance, allowance setting needs an `approve()` tx, and `approve()` needs gas. Without a sponsored bootstrap such a user is stuck. The wallet UI groups `USDC + USDT + USDm` as "Dolares" so users do not see the distinction; reactively calling this endpoint on first action unblocks them transparently.
 
-**Required env to enable on Railway:** `DATABASE_URL` (Postgres; migrations run on boot) and `INDEXER_ENABLED=true`. Without these the routes return `503` and the indexer loop is a no-op.
+**Precondition:** the user EOA must already be delegated to TuCop's BatchExecutor (via `/api/wri/delegate-relay`). The endpoint sends a tx to the user EOA calling `BatchExecutor.execute([(token, 0, approve(adapter, MAX_UINT256))])`, so `msg.sender` inside `approve()` is the user EOA, not the relay. The relay only pays gas. Calls without a prior delegation return `412`.
 
-#### `POST /api/transactions/watch`
-
-Registers an address for indexing. Called by the wallet at boot after `walletAddressInitialized`. Idempotent, safe to retry, the wallet should not block on its result.
+**Request body** (`application/json`):
 
 ```json
 { "address": "0x..." }
 ```
 
-Response `200`: `{ "ok": true, "backfillStartedAt": null }`. The `backfillStartedAt` field will become an ISO8601 string when the backfill job (future PR) is implemented; today the indexer only catches the forward path.
+**Required env:**
+
+- `WRI_FEE_BOOTSTRAP_ENABLED=true` (kill switch; default `false` returns `503`).
+- `WRI_RELAY_PK` (same hot wallet as `/api/wri/delegate-relay`).
+- `WRI_FEE_ADAPTER_USDC` and/or `WRI_FEE_ADAPTER_USDT`: the adapter contract address for each adapter-only token. Tokens whose env var is unset are silently skipped (`status: "skipped_no_adapter"`).
+
+**Idempotency:** for each token, if `allowance(user, adapter) >= 2**200` the endpoint short-circuits with `status: "already_approved"` and submits no tx. Re-calling after a successful bootstrap is therefore a free read-path no-op.
+
+**Success response (`200`):**
+
+```json
+{
+  "ok": true,
+  "relayAddress": "0x...",
+  "results": [
+    {
+      "tokenSymbol": "USDC",
+      "tokenAddress": "0xceba9300f2b948710d2653dd7b07f33a8b32118c",
+      "adapterAddress": "0x...",
+      "status": "approved",
+      "txHash": "0x...",
+      "alreadyApproved": false
+    },
+    {
+      "tokenSymbol": "USDT",
+      "tokenAddress": "0x48065fbBE25f71C9282ddf5e1cD6D6A887483D5e",
+      "adapterAddress": "0x...",
+      "status": "skipped_no_balance",
+      "txHash": null,
+      "alreadyApproved": false
+    }
+  ]
+}
+```
+
+Per-token `status` values: `approved`, `already_approved`, `skipped_no_balance`, `skipped_no_adapter`, `relay_failed`. The endpoint never partial-fails the whole response - a tx failure on one token is reported in that token's row and other tokens still get processed.
+
+**Error responses:**
+
+- `400` `{ "error": "invalid address" }`
+- `412` `{ "error": "precondition failed: user not delegated to BatchExecutor" }`
+- `500` `{ "error": "internal" }`
+- `503` `{ "error": "fee bootstrap disabled" }` (kill switch) / `relay temporarily unavailable` (relay PK missing) / `no adapter tokens configured` (none of the `WRI_FEE_ADAPTER_*` vars are set)
+
+**Out of scope:** this endpoint reuses the global 300 req/min/IP ceiling from `app.ts`. A dedicated three-tier limit matching `/api/wri/delegate-relay` is tracked as a follow-up.
+
+### Transaction feed (WRI Track C)
+
+Backend-owned replacement for Valora's `getWalletTransactions`. Indexes Celo blocks for opted-in addresses and classifies into the same `TokenTransaction` shape the wallet already consumes, with an extension for EIP-7702 atomic batches (which Valora omits).
+
+**Required env to enable on Railway:** `DATABASE_URL` (Postgres; migrations run on boot) and `INDEXER_ENABLED=true`. Without these the routes return `503` and the indexer loop is a no-op. Optional: `TX_INDEXER_BACKFILL_BLOCKS` (default `10000`, ~14 h on Celo's 5 s blocks) caps how far back the backfill job scans on first watch; set to `0` to disable backfill.
+
+#### `POST /api/transactions/watch`
+
+Registers an address for indexing and triggers a one-shot historical backfill in the background. Called by the wallet at boot after `walletAddressInitialized`. Idempotent, safe to retry, the wallet should not block on its result.
+
+```json
+{ "address": "0x..." }
+```
+
+Response `200`:
+
+```json
+{
+  "ok": true,
+  "backfillStartedAt": "2026-06-29T20:00:00.000Z",
+  "backfillCompleted": false
+}
+```
+
+`backfillStartedAt` is the timestamp of the first INSERT for this address (set once, preserved across re-watch calls). `backfillCompleted` flips to `true` after the background job finishes writing historical rows. The HTTP response is sent immediately - the wallet should not await `backfillCompleted` becoming `true`, just poll `/feed` and rows will appear as the backfill makes progress.
+
+The backfill scans the last `TX_INDEXER_BACKFILL_BLOCKS` (default 10 000) for ERC20 Transfer events touching the address as `from` or `to`, fetches tx + receipt + block timestamp via JSON-RPC, and writes through the same persistence layer the live worker uses. Native CELO sends are not discovered by this method (acceptable for an MVP since real users pay gas in stables); the live worker still catches them going forward.
 
 Errors: `400 invalid address`, `503 database not configured`, `500 database error`.
+
+#### `GET /api/transactions/indexer/health`
+
+Operator probe for the indexer worker. Reports the last indexed block, current Celo tip, lag (tip minus last), and how many addresses are being watched.
+
+```json
+{
+  "networkId": "celo-mainnet",
+  "lastIndexedBlock": 70513283,
+  "celoTipBlock": 70513290,
+  "lagBlocks": 7,
+  "watchedAddressCount": 42
+}
+```
+
+`celoTipBlock` and `lagBlocks` are `null` when the RPC tip probe fails (1.5 s timeout) so the route stays responsive during Forno blips. `lastIndexedBlock` is `null` before the worker has written its first cursor. The same numbers are exported as Prometheus gauges `transactions_indexer_lag_blocks` and `transactions_indexer_watched_addresses` (labelled by `network_id`) for Grafana alerts; the worker also refreshes them on every tick so `/metrics` stays current when no one is calling the health route.
+
+Errors: `503 database not configured`, `500 internal` (when the indexer_state query itself fails).
 
 #### `GET /api/transactions/feed`
 
@@ -322,7 +410,7 @@ Byte-compatible replacement for Valora. Same response envelope (`{ transactions,
 | `address` | yes | `0x` + 40 hex (case-insensitive) |
 | `networkIds` | no | csv, defaults to `celo-mainnet` |
 | `includeTypes` | no | csv of `TokenTransaction` types, filter applied post-classification |
-| `localCurrencyCode` | no | reserved for future price conversion; today `localAmount` is always `null` |
+| `localCurrencyCode` | no | ISO 4217 alpha-3 (e.g. `USD`, `COP`). Default `USD`. Populates `localAmount` on each `TokenAmount` whose token has a hard fiat peg matching this code (Mento stables + USDC/USDT). Unknown / volatile tokens (CELO) are left without `localAmount` and the wallet keeps its own renderer |
 | `afterCursor` | no | opaque cursor returned by a previous page |
 | `pageSize` | no | 1 to 100, default 20 |
 

@@ -71,6 +71,26 @@ new Gauge({
   },
 })
 
+// Transactions indexer lag in blocks (celo tip - last indexed block). Updated
+// by the worker on every successful tick AND by the indexer health route.
+// Grafana alerts when this stays > 20 for >2 min (per WRI Track C plan AC #3).
+export const transactionsIndexerLagBlocks = new Gauge({
+  name: 'transactions_indexer_lag_blocks',
+  help: 'Celo tip block minus last indexed block. Stays at 0 when the indexer is caught up.',
+  labelNames: ['network_id'],
+  registers: [metricsRegistry],
+})
+
+// Total addresses the transactions indexer is watching. Quick sanity check
+// that POST /api/transactions/watch is reaching the DB. Updated alongside
+// the lag gauge.
+export const transactionsIndexerWatchedAddresses = new Gauge({
+  name: 'transactions_indexer_watched_addresses',
+  help: 'Number of addresses registered via POST /api/transactions/watch',
+  labelNames: ['network_id'],
+  registers: [metricsRegistry],
+})
+
 // WRI relay balance gauge. Scraped on /metrics request via an RPC call.
 // Async collect is supported via a sync gauge that stores the last-known
 // value; we update it inside an async helper triggered by the /metrics route

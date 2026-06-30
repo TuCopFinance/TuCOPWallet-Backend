@@ -126,6 +126,18 @@ const envSchema = z.object({
   WRI_RELAY_PER_IP_LIMIT: zPositiveInt.optional().default(20),
   WRI_RELAY_GLOBAL_LIMIT: zPositiveInt.optional().default(60),
 
+  // WRI fee-adapter bootstrap (Track C dollarsSpend chicken-and-egg fix).
+  // Kill switch (default off) and per-token adapter contract addresses.
+  // When _ENABLED=true, the endpoint reads adapter addresses for whichever
+  // tokens are configured; missing addresses are silently skipped.
+  WRI_FEE_BOOTSTRAP_ENABLED: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => v === 'true'),
+  WRI_FEE_ADAPTER_USDC: zHexAddress.optional(),
+  WRI_FEE_ADAPTER_USDT: zHexAddress.optional(),
+
   // CORS
   CORS_WRITE_ALLOWED_ORIGINS: z.string().optional().default(''),
 
@@ -159,6 +171,9 @@ const envSchema = z.object({
   // bound on the cursor advance per iteration.
   INDEXER_POLL_INTERVAL_MS: zPositiveInt.optional().default(5_000),
   INDEXER_MAX_BLOCKS_PER_TICK: zPositiveInt.optional().default(200),
+  // Historical backfill depth on first POST /api/transactions/watch. Default
+  // 10_000 blocks (~14 h on Celo's 5 s blocks). Set to 0 to disable backfill.
+  TX_INDEXER_BACKFILL_BLOCKS: zPositiveInt.optional().default(10_000),
 
   // Neeru contract (REQUIRED if NEERU_INDEXER_ENABLED=true; refined below)
   NEERU_INDEXER_GENESIS_BLOCK: z.coerce.bigint().optional(),
