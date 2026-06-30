@@ -82,4 +82,5 @@ export type KindDArgs = NeeruKindDEvent
 export interface NeeruOnchainBatchContext {
   positionCategory: Map<string, number>
   blockTimestamps: Map<string, bigint>
+  secsByCategory: Map<NeeruCategory, bigint>
 }
