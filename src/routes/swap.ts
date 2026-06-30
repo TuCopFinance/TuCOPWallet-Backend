@@ -1,128 +1,46 @@
 import { Router, Request, Response } from 'express'
-import { HEX_ADDRESS_LOWER_RE } from '../lib/hex'
 import { createLogger } from '../lib/logger'
 import { NATIVE_TOKEN_SENTINEL, networkIdToChainId } from '../lib/networks'
 import { buildCacheKey } from '../lib/query'
 import { getRedis } from '../lib/redis'
 import { squidRoute, SquidRouteResponse, SquidUpstreamError } from '../lib/squid'
+import { firstZodIssueAsError } from './schemas/common'
+import { swapQuoteQuerySchema, type SwapQuoteInput } from './schemas/swap'
 
 const router = Router()
 const log = createLogger('routes:swap')
 
 const CACHE_TTL_SECONDS = 30
-const DEFAULT_SLIPPAGE = '0.5'
 
-const ALLOWED_PARAMS = new Set([
-  'buyToken',
-  'buyIsNative',
-  'buyNetworkId',
-  'sellToken',
-  'sellIsNative',
-  'sellNetworkId',
-  'sellAmount',
-  'userAddress',
-  'slippagePercentage',
-  'quoteOnly',
-])
-
-const NETWORK_ID_RE = /^[a-z0-9-]+$/
-const DECIMAL_RE = /^\d+(\.\d+)?$/
-const INT_DECIMAL_RE = /^\d+$/
-// uint256 max is 78 decimal digits. Anything beyond that is invalid for the
-// upstream payload AND wastes cache-key space; reject early at the boundary.
-const MAX_SELL_AMOUNT_DIGITS = 78
-
-interface ValidatedInput {
-  buyToken: string
-  buyIsNative: boolean
-  buyNetworkId: string
-  sellToken: string
-  sellIsNative: boolean
-  sellNetworkId: string
-  sellAmount: string
-  userAddress: string
-  slippage: number
-  quoteOnly: boolean
+// Internal validated input. Same as zod-inferred type plus the resolved
+// fromChainId / toChainId derived after the schema parse.
+interface ValidatedInput extends SwapQuoteInput {
   fromChainId: number
   toChainId: number
 }
 
 function validate(req: Request): { ok: true; input: ValidatedInput } | { ok: false; error: string } {
-  // Reject unknown params with a canonical error message; do not echo the
-  // param name in the response. The HTTP 400 + canonical message is enough
-  // for the wallet client, and not reflecting attacker input avoids any
-  // future XSS / log-injection risk if the error string ever gets rendered
-  // somewhere other than a JSON body.
-  for (const key of Object.keys(req.query)) {
-    if (!ALLOWED_PARAMS.has(key)) {
+  // zod strict() rejects unknown query params. Convert "Unrecognized key"
+  // issues to the canonical "unknown param" message so the response shape
+  // matches the pre-zod behaviour (no echo of param name).
+  const parsed = swapQuoteQuerySchema.safeParse(req.query)
+  if (!parsed.success) {
+    const firstIssue = parsed.error.issues[0]
+    if (firstIssue?.code === 'unrecognized_keys') {
       return { ok: false, error: 'unknown param' }
     }
+    return { ok: false, error: firstZodIssueAsError(parsed.error) }
   }
 
-  const get = (k: string): string | undefined => {
-    const v = req.query[k]
-    return typeof v === 'string' ? v : undefined
-  }
-
-  const buyToken = get('buyToken')
-  const buyIsNativeRaw = get('buyIsNative')
-  const buyNetworkId = get('buyNetworkId')
-  const sellToken = get('sellToken')
-  const sellIsNativeRaw = get('sellIsNative')
-  const sellNetworkId = get('sellNetworkId')
-  const sellAmount = get('sellAmount')
-  const userAddress = get('userAddress')
-  const slippagePercentage = get('slippagePercentage') ?? DEFAULT_SLIPPAGE
-  const quoteOnlyRaw = get('quoteOnly') ?? 'false'
-
-  if (!buyToken || !HEX_ADDRESS_LOWER_RE.test(buyToken)) return { ok: false, error: 'invalid buyToken' }
-  if (buyIsNativeRaw !== 'true' && buyIsNativeRaw !== 'false')
-    return { ok: false, error: 'invalid buyIsNative' }
-  if (!buyNetworkId || !NETWORK_ID_RE.test(buyNetworkId))
-    return { ok: false, error: 'invalid buyNetworkId' }
-  if (!sellToken || !HEX_ADDRESS_LOWER_RE.test(sellToken)) return { ok: false, error: 'invalid sellToken' }
-  if (sellIsNativeRaw !== 'true' && sellIsNativeRaw !== 'false')
-    return { ok: false, error: 'invalid sellIsNative' }
-  if (!sellNetworkId || !NETWORK_ID_RE.test(sellNetworkId))
-    return { ok: false, error: 'invalid sellNetworkId' }
-  if (!sellAmount || sellAmount.length > MAX_SELL_AMOUNT_DIGITS || !INT_DECIMAL_RE.test(sellAmount))
-    return { ok: false, error: 'invalid sellAmount' }
-  if (!userAddress || !HEX_ADDRESS_LOWER_RE.test(userAddress))
-    return { ok: false, error: 'invalid userAddress' }
-  if (!DECIMAL_RE.test(slippagePercentage))
-    return { ok: false, error: 'invalid slippagePercentage' }
-
-  const slippage = Number(slippagePercentage)
-  if (!Number.isFinite(slippage) || slippage < 0 || slippage > 100)
-    return { ok: false, error: 'invalid slippagePercentage' }
-
-  if (quoteOnlyRaw !== 'true' && quoteOnlyRaw !== 'false')
-    return { ok: false, error: 'invalid quoteOnly' }
-
-  const fromChainId = networkIdToChainId(sellNetworkId)
-  const toChainId = networkIdToChainId(buyNetworkId)
-  // Same rationale as unknown-param: don't echo the slug back in the error
-  // string. The wallet has the slug it sent and the HTTP status; the
-  // canonical message is sufficient.
+  const fromChainId = networkIdToChainId(parsed.data.sellNetworkId)
+  const toChainId = networkIdToChainId(parsed.data.buyNetworkId)
+  // Same rationale as unknown-param: don't echo the slug in the error.
   if (fromChainId === undefined) return { ok: false, error: 'unsupported sellNetworkId' }
   if (toChainId === undefined) return { ok: false, error: 'unsupported buyNetworkId' }
 
   return {
     ok: true,
-    input: {
-      buyToken,
-      buyIsNative: buyIsNativeRaw === 'true',
-      buyNetworkId,
-      sellToken,
-      sellIsNative: sellIsNativeRaw === 'true',
-      sellNetworkId,
-      sellAmount,
-      userAddress,
-      slippage,
-      quoteOnly: quoteOnlyRaw === 'true',
-      fromChainId,
-      toChainId,
-    },
+    input: { ...parsed.data, fromChainId, toChainId },
   }
 }
 
@@ -240,7 +158,7 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
         toChain: String(input.toChainId),
         toToken,
         toAddress: input.userAddress,
-        slippage: input.slippage,
+        slippage: input.slippagePercentage,
         quoteOnly: input.quoteOnly,
       },
       integratorId,
