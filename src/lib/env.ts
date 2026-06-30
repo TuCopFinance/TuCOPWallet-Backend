@@ -145,6 +145,20 @@ const envSchema = z.object({
     .default('false')
     .transform((v) => v === 'true'),
   NEERU_INDEXER_INTERVAL_MS: zPositiveInt.optional().default(30_000),
+  NEERU_INDEXER_ERROR_BACKOFF_MS: zPositiveInt
+    .optional()
+    .default(5 * 60 * 1000),
+  NEERU_INDEXER_MAX_BLOCKS_PER_BATCH: z.coerce
+    .bigint()
+    .optional()
+    .default(5_000n),
+
+  // Transactions indexer (cross-wallet tx feed) - tunables for the
+  // tip-following loop. Same units as the neeru indexer counterparts:
+  // POLL_INTERVAL_MS = sleep between ticks, MAX_BLOCKS_PER_TICK = upper
+  // bound on the cursor advance per iteration.
+  INDEXER_POLL_INTERVAL_MS: zPositiveInt.optional().default(5_000),
+  INDEXER_MAX_BLOCKS_PER_TICK: zPositiveInt.optional().default(200),
 
   // Neeru contract (REQUIRED if NEERU_INDEXER_ENABLED=true; refined below)
   NEERU_INDEXER_GENESIS_BLOCK: z.coerce.bigint().optional(),
