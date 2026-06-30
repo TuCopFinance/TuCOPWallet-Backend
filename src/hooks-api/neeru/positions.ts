@@ -24,7 +24,7 @@ const log = createLogger('hooks-api:neeru:positions')
 const NETWORK_ID: NetworkId = 'celo-mainnet'
 const APP_NAME = 'Neeru Vaults'
 const SECONDS_PER_DAY = 86_400
-const RAY = 1e27
+const RAY = 10n ** 27n
 const CATEGORIES = [0, 1, 2, 3] as const
 type Category = (typeof CATEGORIES)[number]
 
@@ -79,16 +79,27 @@ function categoryTitle(secs: bigint): string {
   return `${days} dias`
 }
 
-function round6(n: number): number {
-  return Math.round(n * 1_000_000) / 1_000_000
+function rpow(base: bigint, exp: number, scale: bigint): bigint {
+  let result = scale
+  let b = base
+  let e = exp
+  while (e > 0) {
+    if (e & 1) result = (result * b) / scale
+    b = (b * b) / scale
+    e >>= 1
+  }
+  return result
 }
 
 function dailyYieldPercent(rateRaw: bigint): number {
-  return round6((Number(rateRaw) / RAY - 1) * 100)
+  const scaled = ((rateRaw - RAY) * 100n * 1_000_000n) / RAY
+  return Number(scaled) / 1_000_000
 }
 
-function monthlyYieldPercent(dailyPercent: number): number {
-  return round6(((dailyPercent / 100 + 1) ** 30 - 1) * 100)
+function monthlyYieldPercent(rateRaw: bigint): number {
+  const compounded = rpow(rateRaw, 30, RAY)
+  const scaled = ((compounded - RAY) * 100n * 1_000_000n) / RAY
+  return Number(scaled) / 1_000_000
 }
 
 interface FetchCatalogueDeps {
@@ -263,7 +274,7 @@ function buildEarnPosition(args: BuildArgs): EarnPosition {
 
   const title = categoryTitle(category.r1)
   const dailyPct = dailyYieldPercent(category.r0)
-  const monthlyPct = monthlyYieldPercent(dailyPct)
+  const monthlyPct = monthlyYieldPercent(category.r0)
   const balance = decimalString(args.balanceWei, decimals)
   const tvl = decimalString(category.r2, decimals)
   const tokenId = depositTokenId()
