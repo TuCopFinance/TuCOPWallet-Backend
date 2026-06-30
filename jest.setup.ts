@@ -1,3 +1,8 @@
+// ETHERSCAN_API_KEY is required by lib/env's zod schema; any consumer that
+// touches the `env` proxy triggers parseEnv() and would throw without this.
+// Tests that exercise parseEnv error paths reset process.env locally.
+process.env.ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY ?? 'test'
+
 process.env.NEERU_CONTRACT_ADDRESS =
   process.env.NEERU_CONTRACT_ADDRESS ??
   '0x000000000000000000000000000000000000beef'

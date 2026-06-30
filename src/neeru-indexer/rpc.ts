@@ -9,20 +9,23 @@ import {
   type ContractFunctionArgs,
 } from 'viem'
 import {
+  ANKR_RPC_URL,
   createCeloPublicClient,
+  DRPC_RPC_URL,
   FORNO_URL as FORNO_DEFAULT_URL,
+  PRIMARY_RPC_URL,
 } from '../lib/celoClient'
 import { createLogger } from '../lib/logger'
 
 const log = createLogger('neeru-indexer:rpc')
 
-export const PRIMARY_URL = 'https://rpc.celocolombia.org'
-// Indexer falls back through Forno -> Ankr -> dRPC if the primary is down.
-// FORNO_URL is exported so callers can keep importing it; the actual URL used
-// is `process.env.FORNO_URL || default` via the helper.
+// Re-export the canonical URLs from lib/celoClient so existing callers /
+// tests that import from this module keep working. Indexer falls back
+// through primary -> Forno -> Ankr -> dRPC if the primary is down.
+export const PRIMARY_URL = PRIMARY_RPC_URL
 export const FORNO_URL = FORNO_DEFAULT_URL
-export const ANKR_URL = 'https://rpc.ankr.com/celo'
-export const DRPC_URL = 'https://celo.drpc.org'
+export const ANKR_URL = ANKR_RPC_URL
+export const DRPC_URL = DRPC_RPC_URL
 
 export const PRIMARY_SKIP_AFTER_FAILURES = 3
 export const PRIMARY_SKIP_DURATION_MS = 5 * 60 * 1000
