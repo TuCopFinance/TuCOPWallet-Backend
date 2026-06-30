@@ -80,25 +80,28 @@ function categoryTitle(secs: bigint): string {
 }
 
 function rpow(base: bigint, exp: number, scale: bigint): bigint {
+  const half = scale / 2n
   let result = scale
   let b = base
   let e = exp
   while (e > 0) {
-    if (e & 1) result = (result * b) / scale
-    b = (b * b) / scale
+    if (e & 1) result = (result * b + half) / scale
+    b = (b * b + half) / scale
     e >>= 1
   }
   return result
 }
 
 function dailyYieldPercent(rateRaw: bigint): number {
-  const scaled = ((rateRaw - RAY) * 100n * 1_000_000n) / RAY
+  const half = RAY / 2n
+  const scaled = ((rateRaw - RAY) * 100n * 1_000_000n + half) / RAY
   return Number(scaled) / 1_000_000
 }
 
 function monthlyYieldPercent(rateRaw: bigint): number {
   const compounded = rpow(rateRaw, 30, RAY)
-  const scaled = ((compounded - RAY) * 100n * 1_000_000n) / RAY
+  const half = RAY / 2n
+  const scaled = ((compounded - RAY) * 100n * 1_000_000n + half) / RAY
   return Number(scaled) / 1_000_000
 }
 
