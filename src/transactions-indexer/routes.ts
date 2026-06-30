@@ -1,8 +1,15 @@
 import { Router, Request, Response } from 'express'
+import { getCeloPublicClient } from '../lib/celoClient'
 import { getDb } from '../lib/db'
 import { HEX_ADDRESS_RE } from '../lib/hex'
 import { createLogger } from '../lib/logger'
+import {
+  transactionsIndexerLagBlocks,
+  transactionsIndexerWatchedAddresses,
+} from '../lib/metrics'
+import { triggerBackfill } from './backfill'
 import { classify } from './classifier'
+import { enrichTransactionWithLocalAmount } from './priceOracle'
 import type {
   ClassifierLog,
   ClassifierTx,
@@ -25,6 +32,14 @@ const SUPPORTED_NETWORKS: ReadonlySet<NetworkId> = new Set<NetworkId>([
 ])
 const DEFAULT_PAGE_SIZE = 20
 const MAX_PAGE_SIZE = 100
+const DEFAULT_LOCAL_CURRENCY = 'USD'
+// ISO 4217 alpha-3 - 3 uppercase letters. Reject anything else at the
+// boundary so the priceOracle never sees malformed input.
+const CURRENCY_CODE_RE = /^[A-Za-z]{3}$/
+// Per-call timeout on the RPC tip probe in the indexer health route. Kept
+// short so operators get a fast degraded response (celoTipBlock=null) rather
+// than a hung request when Forno is slow.
+const HEALTH_RPC_TIMEOUT_MS = 1_500
 // Cache payloads are versioned so a TokenTransaction shape migration does not
 // silently return stale rows. Bump this when any TokenTransaction field is
 // added/removed/retyped.
@@ -106,20 +121,40 @@ router.post('/api/transactions/watch', async (req: Request, res: Response) => {
     return res.status(503).json({ error: 'database not configured' })
   }
 
+  let row:
+    | { backfill_started_at: Date | null; backfill_completed_at: Date | null }
+    | undefined
   try {
-    await db.query(
-      `INSERT INTO watched_address (address) VALUES ($1)
-       ON CONFLICT (address) DO NOTHING`,
+    // Upsert. backfill_started_at is set on first-insert via COALESCE so a
+    // repeat /watch call after the backfill completed does not overwrite it.
+    const result = await db.query<{
+      backfill_started_at: Date | null
+      backfill_completed_at: Date | null
+    }>(
+      `INSERT INTO watched_address (address, backfill_started_at)
+         VALUES ($1, now())
+       ON CONFLICT (address) DO UPDATE
+         SET backfill_started_at = COALESCE(watched_address.backfill_started_at, EXCLUDED.backfill_started_at)
+       RETURNING backfill_started_at, backfill_completed_at`,
       [address],
     )
+    row = result.rows[0]
   } catch (err) {
     log.error('watch insert failed:', err instanceof Error ? err.message : err)
     return res.status(500).json({ error: 'database error' })
   }
 
-  // Task 5 (backfill) will populate backfillStartedAt asynchronously; for now
-  // we return null so the client knows backfill is not yet in progress.
-  return res.json({ ok: true, backfillStartedAt: null })
+  const backfillStartedAt = row?.backfill_started_at?.toISOString() ?? null
+  const backfillCompleted = row?.backfill_completed_at != null
+
+  // Fire-and-forget backfill only when the row is fresh (no completed
+  // timestamp yet). backfill.ts dedupes in-process so a burst of /watch
+  // calls collapses to one job.
+  if (!backfillCompleted) {
+    triggerBackfill(db, address)
+  }
+
+  return res.json({ ok: true, backfillStartedAt, backfillCompleted })
 })
 
 router.get('/api/transactions/feed', async (req: Request, res: Response) => {
@@ -145,6 +180,12 @@ router.get('/api/transactions/feed', async (req: Request, res: Response) => {
   }
 
   const includeTypes = parseIncludeTypes(req.query.includeTypes)
+  const localCurrencyRaw =
+    typeof req.query.localCurrencyCode === 'string' ? req.query.localCurrencyCode : ''
+  if (localCurrencyRaw && !CURRENCY_CODE_RE.test(localCurrencyRaw)) {
+    return res.status(400).json({ error: 'invalid localCurrencyCode' })
+  }
+  const localCurrencyCode = (localCurrencyRaw || DEFAULT_LOCAL_CURRENCY).toUpperCase()
   const afterCursorRaw =
     typeof req.query.afterCursor === 'string' && req.query.afterCursor.length > 0
       ? req.query.afterCursor
@@ -231,7 +272,10 @@ router.get('/api/transactions/feed', async (req: Request, res: Response) => {
 
     for (const t of classified) {
       if (includeTypes && !includeTypes.has(t.type)) continue
-      transactions.push(t)
+      // Enrichment is post-cache (the classified payload in the cache is
+      // currency-agnostic, so cache hits don't bloat with one row per
+      // currency code).
+      transactions.push(enrichTransactionWithLocalAmount(t, localCurrencyCode))
     }
   }
 
@@ -248,6 +292,86 @@ router.get('/api/transactions/feed', async (req: Request, res: Response) => {
   return res.json({
     transactions,
     pageInfo: { hasNextPage, endCursor },
+  })
+})
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label}: timeout ${ms}ms`)), ms),
+    ),
+  ])
+}
+
+router.get('/api/transactions/indexer/health', async (_req: Request, res: Response) => {
+  const db = getDb()
+  if (!db) {
+    return res.status(503).json({ error: 'database not configured' })
+  }
+
+  let lastIndexedBlock: number | null
+  let watchedAddressCount: number
+  try {
+    const [stateRes, watchedRes] = await Promise.all([
+      db.query<{ last_block: string }>(
+        'SELECT last_block FROM indexer_state WHERE network_id = $1',
+        [DEFAULT_NETWORK_ID],
+      ),
+      db.query<{ count: string }>(
+        'SELECT COUNT(*)::text AS count FROM watched_address',
+      ),
+    ])
+    lastIndexedBlock = stateRes.rows[0]
+      ? Number(stateRes.rows[0].last_block)
+      : null
+    watchedAddressCount = Number(watchedRes.rows[0]?.count ?? '0')
+  } catch (err) {
+    log.error(
+      'indexer health db query failed:',
+      err instanceof Error ? err.message : err,
+    )
+    return res.status(500).json({ error: 'internal' })
+  }
+
+  let celoTipBlock: number | null = null
+  let lagBlocks: number | null = null
+  try {
+    const tip = await withTimeout(
+      getCeloPublicClient().getBlockNumber(),
+      HEALTH_RPC_TIMEOUT_MS,
+      'rpc',
+    )
+    celoTipBlock = Number(tip)
+    if (lastIndexedBlock !== null) {
+      // Clamp to zero: indexer briefly ahead of probe-tip during a reorg
+      // window is healthy state, not negative lag.
+      lagBlocks = Math.max(0, celoTipBlock - lastIndexedBlock)
+    }
+  } catch (err) {
+    log.warn(
+      'indexer health: rpc tip probe failed:',
+      err instanceof Error ? err.message : err,
+    )
+  }
+
+  // Refresh gauges from the latest snapshot so /metrics scrapes are current
+  // when the worker is idle. The worker also updates them per tick.
+  if (lagBlocks !== null) {
+    transactionsIndexerLagBlocks
+      .labels({ network_id: DEFAULT_NETWORK_ID })
+      .set(lagBlocks)
+  }
+  transactionsIndexerWatchedAddresses
+    .labels({ network_id: DEFAULT_NETWORK_ID })
+    .set(watchedAddressCount)
+
+  return res.json({
+    networkId: DEFAULT_NETWORK_ID,
+    lastIndexedBlock,
+    celoTipBlock,
+    lagBlocks,
+    watchedAddressCount,
   })
 })
 

@@ -1,13 +1,16 @@
-import type { Pool, PoolClient } from 'pg'
+import type { Pool } from 'pg'
 import type { Hash } from 'viem'
 import { createCeloPublicClient, getFornoUrl } from '../lib/celoClient'
 import { getDb } from '../lib/db'
 import { env } from '../lib/env'
 import { createLogger } from '../lib/logger'
+import {
+  transactionsIndexerLagBlocks,
+  transactionsIndexerWatchedAddresses,
+} from '../lib/metrics'
+import { NETWORK_ID, persistTx } from './persist'
 
 const log = createLogger('indexer:worker')
-
-const NETWORK_ID = 'celo-mainnet'
 
 const ERC20_TRANSFER_TOPIC0 =
   '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
@@ -106,97 +109,6 @@ async function getLastBlock(db: Pool, currentTip: bigint): Promise<bigint> {
     return seed
   }
   return BigInt(rows[0].last_block)
-}
-
-function inferTxType(input: string, valueWei: bigint, to: string | null): string {
-  if (!to) return 'CONTRACT_CREATE'
-  if (input === '0x' || input === '') return valueWei > 0n ? 'NATIVE_SEND' : 'NATIVE_NOOP'
-  return 'CONTRACT_CALL'
-}
-
-interface PersistInput {
-  tx: {
-    hash: Hash
-    from: string
-    to: string | null
-    transactionIndex: number | null
-    value: bigint
-    input: string
-  }
-  blockNumber: bigint
-  blockTimestampMs: number
-  receipt: {
-    status: 'success' | 'reverted'
-    transactionIndex: number
-    gasUsed: bigint
-    effectiveGasPrice: bigint | undefined
-    logs: ReadonlyArray<{
-      logIndex: number | null
-      address: string
-      topics: ReadonlyArray<string>
-      data: string
-    }>
-  }
-}
-
-async function persistTx(client: PoolClient, p: PersistInput): Promise<void> {
-  const txIndex = p.tx.transactionIndex ?? p.receipt.transactionIndex
-  const insertTx = await client.query<{ id: string }>(
-    `INSERT INTO tx (
-       network_id, tx_hash, block_number, block_timestamp, tx_index,
-       from_address, to_address, value_wei, tx_type, status,
-       gas_used, effective_gas_price, fee_currency, raw_input
-     )
-     VALUES ($1,$2,$3, to_timestamp($4), $5, $6,$7,$8,$9,$10, $11,$12,$13,$14)
-     ON CONFLICT (network_id, tx_hash) DO NOTHING
-     RETURNING id`,
-    [
-      NETWORK_ID,
-      p.tx.hash.toLowerCase(),
-      p.blockNumber.toString(),
-      Math.floor(p.blockTimestampMs / 1000),
-      txIndex,
-      p.tx.from.toLowerCase(),
-      p.tx.to ? p.tx.to.toLowerCase() : null,
-      p.tx.value.toString(),
-      inferTxType(p.tx.input, p.tx.value, p.tx.to),
-      p.receipt.status,
-      p.receipt.gasUsed.toString(),
-      p.receipt.effectiveGasPrice ? p.receipt.effectiveGasPrice.toString() : null,
-      null,
-      p.tx.input,
-    ],
-  )
-
-  let txId: string | null = insertTx.rows[0]?.id ?? null
-  if (!txId) {
-    // already-inserted by a previous tick; load id so we can ensure logs exist.
-    const sel = await client.query<{ id: string }>(
-      'SELECT id FROM tx WHERE network_id = $1 AND tx_hash = $2',
-      [NETWORK_ID, p.tx.hash.toLowerCase()],
-    )
-    txId = sel.rows[0]?.id ?? null
-    if (!txId) return
-  }
-
-  for (const lg of p.receipt.logs) {
-    if (lg.logIndex == null) continue
-    await client.query(
-      `INSERT INTO tx_log (tx_id, log_index, contract, topic0, topic1, topic2, topic3, data)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-       ON CONFLICT (tx_id, log_index) DO NOTHING`,
-      [
-        txId,
-        lg.logIndex,
-        lg.address.toLowerCase(),
-        lg.topics[0]?.toLowerCase() ?? '',
-        lg.topics[1] ? lg.topics[1].toLowerCase() : null,
-        lg.topics[2] ? lg.topics[2].toLowerCase() : null,
-        lg.topics[3] ? lg.topics[3].toLowerCase() : null,
-        lg.data,
-      ],
-    )
-  }
 }
 
 export interface IngestOptions {
@@ -397,6 +309,15 @@ export async function startIndexer(
 
         const tip = await rpc.getBlockNumber()
         const last = await getLastBlock(db, tip)
+        // Refresh observability gauges on every tick whether or not we end up
+        // doing work; /metrics scrapes between health route calls read these.
+        // Cheap in-process gauge sets, no I/O.
+        transactionsIndexerWatchedAddresses
+          .labels({ network_id: NETWORK_ID })
+          .set(watched.size)
+        transactionsIndexerLagBlocks
+          .labels({ network_id: NETWORK_ID })
+          .set(tip > last ? Number(tip - last) : 0)
         if (tip <= last) {
           consecutiveErrors = 0
           continue
