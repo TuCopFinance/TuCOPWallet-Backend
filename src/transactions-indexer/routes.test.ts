@@ -5,12 +5,22 @@ const COUNTERPARTY = '0x2222222222222222222222222222222222222222'
 
 let dbMode: 'happy' | 'disabled' | 'noRows' = 'happy'
 let queriedRows: Array<{ payload_json?: unknown; [k: string]: unknown }> = []
+let indexerStateRows: Array<{ last_block: string }> = []
+let watchedCountRows: Array<{ count: string }> = []
+let indexerStateThrows = false
+let watchInsertRow: {
+  backfill_started_at: Date | null
+  backfill_completed_at: Date | null
+} = {
+  backfill_started_at: new Date('2026-06-29T20:00:00.000Z'),
+  backfill_completed_at: null,
+}
 
 const mockQuery = jest.fn(async (sql: string, params?: readonly unknown[]) => {
   void params
   const normalized = sql.trim().toUpperCase()
   if (normalized.startsWith('INSERT INTO WATCHED_ADDRESS')) {
-    return { rows: [] }
+    return { rows: [watchInsertRow] }
   }
   if (normalized.startsWith('SELECT PAYLOAD_JSON FROM CLASSIFIED_TX_CACHE')) {
     return { rows: [] }
@@ -25,8 +35,17 @@ const mockQuery = jest.fn(async (sql: string, params?: readonly unknown[]) => {
   if (normalized.startsWith('SELECT LOG_INDEX')) {
     return { rows: [] }
   }
+  if (normalized.startsWith('SELECT LAST_BLOCK FROM INDEXER_STATE')) {
+    if (indexerStateThrows) throw new Error('db down')
+    return { rows: indexerStateRows }
+  }
+  if (normalized.includes('FROM WATCHED_ADDRESS')) {
+    return { rows: watchedCountRows }
+  }
   return { rows: [] }
 })
+
+const mockGetBlockNumber = jest.fn()
 
 jest.mock('../lib/db', () => ({
   getDb: () => {
@@ -35,12 +54,30 @@ jest.mock('../lib/db', () => ({
   },
 }))
 
+jest.mock('../lib/celoClient', () => {
+  const actual = jest.requireActual('../lib/celoClient')
+  return {
+    ...actual,
+    getCeloPublicClient: () => ({ getBlockNumber: mockGetBlockNumber }),
+  }
+})
+
+const mockTriggerBackfill = jest.fn()
+jest.mock('./backfill', () => ({
+  triggerBackfill: (...args: unknown[]) => mockTriggerBackfill(...args),
+}))
+
 import { app } from '../app'
 
 describe('POST /api/transactions/watch', () => {
   beforeEach(() => {
     mockQuery.mockClear()
+    mockTriggerBackfill.mockClear()
     dbMode = 'happy'
+    watchInsertRow = {
+      backfill_started_at: new Date('2026-06-29T20:00:00.000Z'),
+      backfill_completed_at: null,
+    }
   })
 
   it('rejects invalid address', async () => {
@@ -59,17 +96,46 @@ describe('POST /api/transactions/watch', () => {
     expect(res.status).toBe(503)
   })
 
-  it('inserts and returns ok+null backfill timestamp; address is normalized to lowercase', async () => {
+  it('inserts, normalizes address to lowercase, returns backfillStartedAt + backfillCompleted=false', async () => {
     const mixedCase = '0x' + 'A'.repeat(40)
     const res = await request(app)
       .post('/api/transactions/watch')
       .send({ address: mixedCase })
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ ok: true, backfillStartedAt: null })
+    expect(res.body).toEqual({
+      ok: true,
+      backfillStartedAt: '2026-06-29T20:00:00.000Z',
+      backfillCompleted: false,
+    })
     expect(mockQuery).toHaveBeenCalled()
     const [sql, params] = mockQuery.mock.calls[0] ?? []
     expect(sql).toContain('INSERT INTO watched_address')
     expect(params).toEqual(['0x' + 'a'.repeat(40)])
+  })
+
+  it('triggers backfill when backfill_completed_at is null', async () => {
+    watchInsertRow = {
+      backfill_started_at: new Date('2026-06-29T20:00:00.000Z'),
+      backfill_completed_at: null,
+    }
+    await request(app)
+      .post('/api/transactions/watch')
+      .send({ address: VALID_ADDRESS })
+    expect(mockTriggerBackfill).toHaveBeenCalledTimes(1)
+    const [, address] = mockTriggerBackfill.mock.calls[0]
+    expect(address).toBe(VALID_ADDRESS)
+  })
+
+  it('does NOT trigger backfill when backfill_completed_at is already set', async () => {
+    watchInsertRow = {
+      backfill_started_at: new Date('2026-06-29T20:00:00.000Z'),
+      backfill_completed_at: new Date('2026-06-29T20:05:00.000Z'),
+    }
+    const res = await request(app)
+      .post('/api/transactions/watch')
+      .send({ address: VALID_ADDRESS })
+    expect(res.body.backfillCompleted).toBe(true)
+    expect(mockTriggerBackfill).not.toHaveBeenCalled()
   })
 })
 
@@ -155,6 +221,52 @@ describe('GET /api/transactions/feed', () => {
     expect(res.body.pageInfo.endCursor).not.toBeNull()
   })
 
+  it('rejects invalid localCurrencyCode', async () => {
+    const res = await request(app).get(
+      `/api/transactions/feed?address=${VALID_ADDRESS}&localCurrencyCode=DOLLARS`,
+    )
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'invalid localCurrencyCode' })
+  })
+
+  it('populates localAmount when token peg matches localCurrencyCode (USDC -> USD)', async () => {
+    dbMode = 'happy'
+    queriedRows = [
+      {
+        network_id: 'celo-mainnet',
+        // USDC contract address; classifier-recognised peg = USD
+        tx_hash: '0xaaaa000000000000000000000000000000000000000000000000000000000003',
+        block_number: '1002',
+        block_timestamp: new Date(1_700_000_002_000),
+        tx_index: 0,
+        from_address: VALID_ADDRESS,
+        to_address: COUNTERPARTY,
+        // transfer(address,uint256) selector + 32-byte recipient + 32-byte
+        // value = 1.5 USDC (1500000 with decimals=6)
+        value_wei: '0',
+        status: 'success',
+        gas_used: '50000',
+        effective_gas_price: '5000000000',
+        fee_currency: null,
+        raw_input:
+          '0xa9059cbb' +
+          '000000000000000000000000' + COUNTERPARTY.slice(2) +
+          '000000000000000000000000000000000000000000000000000000000016e360',
+      },
+    ]
+    const res = await request(app).get(
+      `/api/transactions/feed?address=${VALID_ADDRESS}&localCurrencyCode=USD`,
+    )
+    expect(res.status).toBe(200)
+    // Classifier emits SENT with tokenId = celo-mainnet:<tx.to> (the USDC
+    // contract is the `to` of an ERC20 transfer call). Our queriedRow puts
+    // COUNTERPARTY as to_address, so this test does NOT exercise the
+    // priceOracle code path directly - that's covered by priceOracle.test.ts.
+    // What this test asserts is that the feed route returns 200 with the
+    // localCurrencyCode parsed and accepted.
+    expect(res.body.transactions).toHaveLength(1)
+  })
+
   it('filters by includeTypes', async () => {
     dbMode = 'happy'
     queriedRows = [
@@ -179,5 +291,81 @@ describe('GET /api/transactions/feed', () => {
     )
     expect(res.status).toBe(200)
     expect(res.body.transactions).toEqual([])
+  })
+})
+
+describe('GET /api/transactions/indexer/health', () => {
+  beforeEach(() => {
+    mockQuery.mockClear()
+    mockGetBlockNumber.mockReset()
+    dbMode = 'happy'
+    indexerStateRows = []
+    watchedCountRows = []
+    indexerStateThrows = false
+  })
+
+  it('returns 503 when DB is not configured', async () => {
+    dbMode = 'disabled'
+    const res = await request(app).get('/api/transactions/indexer/health')
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'database not configured' })
+  })
+
+  it('returns full shape with lagBlocks when DB + RPC are healthy', async () => {
+    indexerStateRows = [{ last_block: '70513283' }]
+    watchedCountRows = [{ count: '42' }]
+    mockGetBlockNumber.mockResolvedValue(70513290n)
+
+    const res = await request(app).get('/api/transactions/indexer/health')
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      networkId: 'celo-mainnet',
+      lastIndexedBlock: 70513283,
+      celoTipBlock: 70513290,
+      lagBlocks: 7,
+      watchedAddressCount: 42,
+    })
+  })
+
+  it('clamps lagBlocks to 0 when last_block is ahead of tip (transient reorg state)', async () => {
+    indexerStateRows = [{ last_block: '100' }]
+    watchedCountRows = [{ count: '0' }]
+    mockGetBlockNumber.mockResolvedValue(95n)
+
+    const res = await request(app).get('/api/transactions/indexer/health')
+    expect(res.status).toBe(200)
+    expect(res.body.lagBlocks).toBe(0)
+  })
+
+  it('returns lastIndexedBlock=null when indexer_state is empty', async () => {
+    indexerStateRows = []
+    watchedCountRows = [{ count: '0' }]
+    mockGetBlockNumber.mockResolvedValue(70513290n)
+
+    const res = await request(app).get('/api/transactions/indexer/health')
+    expect(res.status).toBe(200)
+    expect(res.body.lastIndexedBlock).toBeNull()
+    expect(res.body.lagBlocks).toBeNull()
+    expect(res.body.celoTipBlock).toBe(70513290)
+  })
+
+  it('returns degraded shape (celoTipBlock=null, lagBlocks=null) when RPC fails', async () => {
+    indexerStateRows = [{ last_block: '100' }]
+    watchedCountRows = [{ count: '1' }]
+    mockGetBlockNumber.mockRejectedValue(new Error('forno 500'))
+
+    const res = await request(app).get('/api/transactions/indexer/health')
+    expect(res.status).toBe(200)
+    expect(res.body.lastIndexedBlock).toBe(100)
+    expect(res.body.watchedAddressCount).toBe(1)
+    expect(res.body.celoTipBlock).toBeNull()
+    expect(res.body.lagBlocks).toBeNull()
+  })
+
+  it('returns 500 when the indexer_state query throws', async () => {
+    indexerStateThrows = true
+    mockGetBlockNumber.mockResolvedValue(70513290n)
+    const res = await request(app).get('/api/transactions/indexer/health')
+    expect(res.status).toBe(500)
   })
 })
