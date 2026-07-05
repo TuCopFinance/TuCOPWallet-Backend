@@ -207,8 +207,8 @@ function classifyAggregatorSwap(
   const outboundSum = aggregateByToken(outbound)
   const inboundSum = aggregateByToken(inbound)
 
-  // Require the in and out tokens to be different — else this is just a self
-  // round-trip and not a swap.
+  // Require the in and out tokens to be different; otherwise this is just a
+  // self round-trip and not a swap.
   const outTokens = [...outboundSum.keys()]
   const inTokens = [...inboundSum.keys()]
   if (outTokens.length === 1 && inTokens.length === 1 && outTokens[0] === inTokens[0]) {
