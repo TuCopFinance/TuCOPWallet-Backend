@@ -24,6 +24,7 @@ import { app } from './app'
 import { runMigrations } from './db/migrate'
 import { getDb } from './lib/db'
 import { startNeeruIndexer } from './neeru-indexer/worker'
+import { startTimelockIndexer } from './neeru-timelock/worker'
 import { startIndexer } from './transactions-indexer/worker'
 
 const PORT = Number(process.env.PORT) || 8080
@@ -113,6 +114,12 @@ async function boot(): Promise<void> {
   if (process.env.NEERU_INDEXER_ENABLED === 'true') {
     startNeeruIndexer({ db: getDb()! }).catch((err) => {
       log.error(`neeru indexer crashed: ${err instanceof Error ? err.message : String(err)}`)
+    })
+  }
+
+  if (process.env.NEERU_TIMELOCK_ENABLED === 'true') {
+    startTimelockIndexer({ db: getDb()! }).catch((err) => {
+      log.error(`neeru timelock indexer crashed: ${err instanceof Error ? err.message : String(err)}`)
     })
   }
 }

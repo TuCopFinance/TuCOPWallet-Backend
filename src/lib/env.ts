@@ -196,6 +196,25 @@ const envSchema = z.object({
   NEERU_MANAGE_URL: z.string().optional().default(''),
   NEERU_TERMS_URL: z.string().optional().default(''),
   NEERU_CONTRACT_CREATED_AT_ISO: z.string().datetime().optional(),
+
+  // Timelock monitor. Watches the admin Timelock that guards the Neeru fund
+  // proxy for schedule / execute / cancel events targeting the proxy address.
+  // Disabled by default; when NEERU_TIMELOCK_ENABLED=true the same required
+  // set as the Neeru indexer applies (DATABASE_URL etc) plus the Timelock
+  // config below.
+  NEERU_TIMELOCK_ENABLED: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => v === 'true'),
+  NEERU_TIMELOCK_ADDRESS: zHexAddress.optional(),
+  NEERU_TIMELOCK_GENESIS_BLOCK: z.coerce.bigint().optional(),
+  NEERU_TIMELOCK_INTERVAL_MS: zPositiveInt.optional().default(30_000),
+  NEERU_TIMELOCK_ERROR_BACKOFF_MS: zPositiveInt.optional().default(5 * 60 * 1000),
+  NEERU_TIMELOCK_MAX_BLOCKS_PER_BATCH: z.coerce.bigint().optional().default(5_000n),
+  NEERU_TIMELOCK_EVENT_SCHEDULED_TOPIC0: zHexBytes32.optional(),
+  NEERU_TIMELOCK_EVENT_EXECUTED_TOPIC0: zHexBytes32.optional(),
+  NEERU_TIMELOCK_EVENT_CANCELLED_TOPIC0: zHexBytes32.optional(),
 })
 
 export type Env = z.infer<typeof envSchema>
@@ -238,6 +257,25 @@ export function parseEnv(): Env {
   if (e.INDEXER_ENABLED) {
     if (!e.DATABASE_URL || e.DATABASE_URL === 'disabled') {
       throw new Error('INDEXER_ENABLED=true but DATABASE_URL is missing or set to "disabled"')
+    }
+  }
+  if (e.NEERU_TIMELOCK_ENABLED) {
+    const missing: string[] = []
+    if (!e.DATABASE_URL || e.DATABASE_URL === 'disabled') missing.push('DATABASE_URL')
+    if (!e.NEERU_TIMELOCK_ADDRESS) missing.push('NEERU_TIMELOCK_ADDRESS')
+    if (e.NEERU_TIMELOCK_GENESIS_BLOCK == null) missing.push('NEERU_TIMELOCK_GENESIS_BLOCK')
+    if (!e.NEERU_CONTRACT_ADDRESS) missing.push('NEERU_CONTRACT_ADDRESS')
+    for (const t of [
+      'NEERU_TIMELOCK_EVENT_SCHEDULED_TOPIC0',
+      'NEERU_TIMELOCK_EVENT_EXECUTED_TOPIC0',
+      'NEERU_TIMELOCK_EVENT_CANCELLED_TOPIC0',
+    ] as const) {
+      if (!e[t]) missing.push(t)
+    }
+    if (missing.length > 0) {
+      throw new Error(
+        `NEERU_TIMELOCK_ENABLED=true but these required vars are missing: ${missing.join(', ')}`,
+      )
     }
   }
   cachedEnv = e
