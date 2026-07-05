@@ -1,3 +1,4 @@
+import { decimalizeValueForClassifier, decimalsForTokenId } from './priceOracle'
 import type {
   ApprovalTransaction,
   ClassifierLog,
@@ -7,6 +8,7 @@ import type {
   TokenAmount,
   TokenTransaction,
   TransferTransaction,
+  TxTerminalStatus,
 } from './types'
 
 // ERC20 event topic0s (keccak256 of event signature).
@@ -32,6 +34,22 @@ const NATIVE_TOKEN_ID = 'celo-mainnet:0x471ece3750da237f93b8e339c536989b8978a438
 
 function tokenIdForContract(networkId: NetworkId, contract: string): string {
   return `${networkId}:${contract.toLowerCase()}`
+}
+
+// Build a TokenAmount with `value` already decimalised via the canonical
+// registry. Unknown tokens surface `decimals: null` + the raw wei value so
+// the wallet can still render "unknown token" without silently displaying
+// a mis-scaled number. See src/transactions-indexer/priceOracle.ts.
+function makeAmount(tokenId: string, rawWei: bigint): TokenAmount {
+  return {
+    tokenId,
+    value: decimalizeValueForClassifier(rawWei, tokenId),
+    decimals: decimalsForTokenId(tokenId),
+  }
+}
+
+function deriveStatus(tx: ClassifierTx): TxTerminalStatus {
+  return tx.status === 'success' ? 'Complete' : 'Failed'
 }
 
 function topicToAddress(topic: string | null): string | null {
@@ -70,11 +88,11 @@ function calldataWords(input: string): string[] {
 
 function buildFee(tx: ClassifierTx, networkId: NetworkId): TokenAmount[] {
   if (tx.gasUsed == null || tx.effectiveGasPrice == null) return []
-  const feeValue = (tx.gasUsed * tx.effectiveGasPrice).toString()
+  const feeRawWei = tx.gasUsed * tx.effectiveGasPrice
   const tokenId = tx.feeCurrency
     ? tokenIdForContract(networkId, tx.feeCurrency)
     : NATIVE_TOKEN_ID
-  return [{ tokenId, value: feeValue }]
+  return [makeAmount(tokenId, feeRawWei)]
 }
 
 function baseFields(tx: ClassifierTx, userAddress: string) {
@@ -84,6 +102,7 @@ function baseFields(tx: ClassifierTx, userAddress: string) {
     timestamp: tx.blockTimestampMs,
     block: tx.blockNumber.toString(),
     address: userAddress.toLowerCase(),
+    status: deriveStatus(tx),
     fees: buildFee(tx, tx.networkId).map((amount) => ({
       type: 'SECURITY_FEE' as const,
       amount,
@@ -134,6 +153,35 @@ function pickHighest(amounts: Map<string, bigint>): { contract: string; value: b
   return best
 }
 
+// Bug fix 2026-07-05 (see JOURNAL): pickHighest compares raw bigint, so a
+// USDm -> COPm swap where the Mento fee adapter pre-charges + refunds a
+// COPm amount larger (in raw wei) than the swapped USDm confuses the raw
+// pick and both `inAmount` and `outAmount` come out as COPm.
+//
+// This helper strips tokens that appear on BOTH sides (round-trip / fees /
+// mirror mint+burn patterns) from each aggregate before pickHighest runs.
+// If a side ends up empty after the strip, we fall back to its full set so
+// pathological round-trips are still classified rather than dropped.
+function stripRoundTripTokens(
+  soldByToken: Map<string, bigint>,
+  receivedByToken: Map<string, bigint>,
+): { sold: Map<string, bigint>; received: Map<string, bigint> } {
+  const sold = new Map(soldByToken)
+  const received = new Map(receivedByToken)
+  const shared: string[] = []
+  for (const token of soldByToken.keys()) {
+    if (receivedByToken.has(token)) shared.push(token)
+  }
+  for (const token of shared) {
+    sold.delete(token)
+    received.delete(token)
+  }
+  return {
+    sold: sold.size > 0 ? sold : soldByToken,
+    received: received.size > 0 ? received : receivedByToken,
+  }
+}
+
 function classify7702Atomic(
   tx: ClassifierTx,
   logs: ClassifierLog[],
@@ -154,29 +202,33 @@ function classify7702Atomic(
   const soldByToken = aggregateByToken(sold)
   const receivedByToken = aggregateByToken(received)
 
+  // `fromTokenAmounts` still lists EVERY sold token so a multi-leg 7702
+  // batch renders faithfully. Only the pickHighest picks are filtered to
+  // exclude round-trip tokens.
   const fromTokenAmounts: TokenAmount[] = []
   for (const [contract, value] of soldByToken) {
-    fromTokenAmounts.push({
-      tokenId: tokenIdForContract(tx.networkId, contract),
-      value: value.toString(),
-    })
+    fromTokenAmounts.push(makeAmount(tokenIdForContract(tx.networkId, contract), value))
   }
 
-  const highestSold = pickHighest(soldByToken)
-  const highestReceived = pickHighest(receivedByToken)
+  const { sold: soldPrimary, received: receivedPrimary } = stripRoundTripTokens(
+    soldByToken,
+    receivedByToken,
+  )
+  const highestSold = pickHighest(soldPrimary)
+  const highestReceived = pickHighest(receivedPrimary)
   if (!highestSold || !highestReceived) return null
 
   return {
     ...baseFields(tx, userAddress),
     type: 'SWAP_TRANSACTION',
-    inAmount: {
-      tokenId: tokenIdForContract(tx.networkId, highestReceived.contract),
-      value: highestReceived.value.toString(),
-    },
-    outAmount: {
-      tokenId: tokenIdForContract(tx.networkId, highestSold.contract),
-      value: highestSold.value.toString(),
-    },
+    inAmount: makeAmount(
+      tokenIdForContract(tx.networkId, highestReceived.contract),
+      highestReceived.value,
+    ),
+    outAmount: makeAmount(
+      tokenIdForContract(tx.networkId, highestSold.contract),
+      highestSold.value,
+    ),
     fromTokenAmounts: fromTokenAmounts.length > 1 ? fromTokenAmounts : undefined,
   }
 }
@@ -215,21 +267,19 @@ function classifyAggregatorSwap(
     return null
   }
 
-  const highestOut = pickHighest(outboundSum)
-  const highestIn = pickHighest(inboundSum)
+  const { sold: outboundPrimary, received: inboundPrimary } = stripRoundTripTokens(
+    outboundSum,
+    inboundSum,
+  )
+  const highestOut = pickHighest(outboundPrimary)
+  const highestIn = pickHighest(inboundPrimary)
   if (!highestOut || !highestIn) return null
 
   return {
     ...baseFields(tx, userAddress),
     type: 'SWAP_TRANSACTION',
-    inAmount: {
-      tokenId: tokenIdForContract(tx.networkId, highestIn.contract),
-      value: highestIn.value.toString(),
-    },
-    outAmount: {
-      tokenId: tokenIdForContract(tx.networkId, highestOut.contract),
-      value: highestOut.value.toString(),
-    },
+    inAmount: makeAmount(tokenIdForContract(tx.networkId, highestIn.contract), highestIn.value),
+    outAmount: makeAmount(tokenIdForContract(tx.networkId, highestOut.contract), highestOut.value),
   }
 }
 
@@ -262,13 +312,11 @@ function classifyErc20Transfer(
   if (sel === SELECTOR_TRANSFER) {
     const [toWord, valueWord] = words
     if (!toWord || !valueWord) return null
+    const tokenId = tx.to ? tokenIdForContract(tx.networkId, tx.to) : NATIVE_TOKEN_ID
     return {
       ...baseFields(tx, userAddress),
       type: 'SENT',
-      amount: {
-        tokenId: tx.to ? tokenIdForContract(tx.networkId, tx.to) : NATIVE_TOKEN_ID,
-        value: decodeUint256(valueWord).toString(),
-      },
+      amount: makeAmount(tokenId, decodeUint256(valueWord)),
       address: decodeAddress(toWord),
     }
   }
@@ -279,13 +327,11 @@ function classifyErc20Transfer(
     const to = decodeAddress(toWord)
     const value = decodeUint256(valueWord)
     const isSent = from === userLower
+    const tokenId = tx.to ? tokenIdForContract(tx.networkId, tx.to) : NATIVE_TOKEN_ID
     return {
       ...baseFields(tx, userAddress),
       type: isSent ? 'SENT' : 'RECEIVED',
-      amount: {
-        tokenId: tx.to ? tokenIdForContract(tx.networkId, tx.to) : NATIVE_TOKEN_ID,
-        value: value.toString(),
-      },
+      amount: makeAmount(tokenId, value),
       address: isSent ? to : from,
     }
   }
@@ -303,10 +349,7 @@ function classifyNativeSend(
   return {
     ...baseFields(tx, userAddress),
     type: 'SENT',
-    amount: {
-      tokenId: NATIVE_TOKEN_ID,
-      value: tx.valueWei.toString(),
-    },
+    amount: makeAmount(NATIVE_TOKEN_ID, tx.valueWei),
     address: tx.to.toLowerCase(),
   }
 }
@@ -336,10 +379,7 @@ function classifyReceiveFromLog(
   return {
     ...baseFields(tx, userAddress),
     type: 'RECEIVED',
-    amount: {
-      tokenId: tokenIdForContract(tx.networkId, top.contract),
-      value: top.value.toString(),
-    },
+    amount: makeAmount(tokenIdForContract(tx.networkId, top.contract), top.value),
     address: firstSender,
   }
 }
@@ -349,7 +389,10 @@ export function classify(
   logs: ClassifierLog[],
   userAddress: string,
 ): TokenTransaction[] {
-  if (tx.status !== 'success') return []
+  // Reverted txs are still emitted (status: "Failed") so the wallet timeline
+  // shows the attempt. Pre-2026-07-05 they were silently dropped, which hid
+  // failed swaps from the user. Consumers should key badge colour / retry
+  // logic off `status` at the top level.
 
   // Rules are applied in plan order; the first matching rule wins.
   const r1 = classify7702Atomic(tx, logs, userAddress)
