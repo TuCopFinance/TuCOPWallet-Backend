@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { getCeloPublicClient } from '../lib/celoClient'
 import { getDb } from '../lib/db'
+import { env } from '../lib/env'
 import { HEX_ADDRESS_RE } from '../lib/hex'
 import { createLogger } from '../lib/logger'
 import {
@@ -43,7 +44,13 @@ const HEALTH_RPC_TIMEOUT_MS = 1_500
 // Cache payloads are versioned so a TokenTransaction shape migration does not
 // silently return stale rows. Bump this when any TokenTransaction field is
 // added/removed/retyped.
-const CACHE_SCHEMA_VERSION = 1
+//
+// v2 (2026-07-05): emergency shape fix. TokenAmount.value is now the
+// decimalised human-readable string (was raw wei), TokenAmount.decimals /
+// timestamp / localAmount:null were added, BaseTransaction gained the
+// `status` field, and the swap classifier uses the outbound-minus-inbound
+// heuristic to pick primary legs. All v1 cache rows must be invalidated.
+const CACHE_SCHEMA_VERSION = 2
 
 interface CachedPayload {
   schemaVersion: number
@@ -110,6 +117,9 @@ function rowToClassifierLog(row: RawLogRow): ClassifierLog {
 }
 
 router.post('/api/transactions/watch', async (req: Request, res: Response) => {
+  if (!env.TX_WATCH_ENABLED) {
+    return res.status(503).json({ error: 'watch disabled' })
+  }
   const body = (req.body ?? {}) as { address?: unknown }
   if (typeof body.address !== 'string' || !HEX_ADDRESS_RE.test(body.address)) {
     return res.status(400).json({ error: 'invalid address' })
@@ -158,6 +168,9 @@ router.post('/api/transactions/watch', async (req: Request, res: Response) => {
 })
 
 router.get('/api/transactions/feed', async (req: Request, res: Response) => {
+  if (!env.TX_FEED_ENABLED) {
+    return res.status(503).json({ error: 'feed disabled' })
+  }
   const addressRaw = typeof req.query.address === 'string' ? req.query.address : ''
   if (!HEX_ADDRESS_RE.test(addressRaw)) {
     return res.status(400).json({ error: 'invalid address' })

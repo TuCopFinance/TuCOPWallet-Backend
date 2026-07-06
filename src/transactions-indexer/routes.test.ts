@@ -1,4 +1,5 @@
 import request from 'supertest'
+import { _resetParsedEnvForTests } from '../lib/env'
 
 const VALID_ADDRESS = '0x1111111111111111111111111111111111111111'
 const COUNTERPARTY = '0x2222222222222222222222222222222222222222'
@@ -216,7 +217,7 @@ describe('GET /api/transactions/feed', () => {
     expect(res.body.transactions[0].amount.tokenId).toBe(
       'celo-mainnet:0x471ece3750da237f93b8e339c536989b8978a438',
     )
-    expect(res.body.transactions[0].amount.value).toBe('5000000000000000000')
+    expect(res.body.transactions[0].amount.value).toBe('5.000000000000000000')
     expect(res.body.pageInfo.hasNextPage).toBe(false)
     expect(res.body.pageInfo.endCursor).not.toBeNull()
   })
@@ -367,5 +368,49 @@ describe('GET /api/transactions/indexer/health', () => {
     mockGetBlockNumber.mockResolvedValue(70513290n)
     const res = await request(app).get('/api/transactions/indexer/health')
     expect(res.status).toBe(500)
+  })
+})
+
+// Kill switch coverage. env.TX_FEED_ENABLED / TX_WATCH_ENABLED are parsed on
+// first access via the zod proxy; we flip the process env + reset the parsed
+// env cache to exercise both `true` and `false` states.
+describe('kill switches: TX_FEED_ENABLED / TX_WATCH_ENABLED', () => {
+  const originalFeed = process.env.TX_FEED_ENABLED
+  const originalWatch = process.env.TX_WATCH_ENABLED
+
+  afterEach(() => {
+    process.env.TX_FEED_ENABLED = originalFeed
+    process.env.TX_WATCH_ENABLED = originalWatch
+    _resetParsedEnvForTests()
+  })
+
+  it('GET /api/transactions/feed returns 503 "feed disabled" when TX_FEED_ENABLED=false', async () => {
+    process.env.TX_FEED_ENABLED = 'false'
+    _resetParsedEnvForTests()
+    const res = await request(app).get(
+      `/api/transactions/feed?address=${VALID_ADDRESS}`,
+    )
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'feed disabled' })
+  })
+
+  it('POST /api/transactions/watch returns 503 "watch disabled" when TX_WATCH_ENABLED=false', async () => {
+    process.env.TX_WATCH_ENABLED = 'false'
+    _resetParsedEnvForTests()
+    const res = await request(app)
+      .post('/api/transactions/watch')
+      .send({ address: VALID_ADDRESS })
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'watch disabled' })
+  })
+
+  it('feed still serves when TX_FEED_ENABLED is unset (default true)', async () => {
+    delete process.env.TX_FEED_ENABLED
+    _resetParsedEnvForTests()
+    dbMode = 'noRows'
+    const res = await request(app).get(
+      `/api/transactions/feed?address=${VALID_ADDRESS}`,
+    )
+    expect(res.status).toBe(200)
   })
 })
