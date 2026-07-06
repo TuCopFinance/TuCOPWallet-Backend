@@ -380,7 +380,7 @@ describe('classify - Earn / Neeru event classification', () => {
     unsetNeeruEnv()
   })
 
-  it('kind A (deposit) emits DEPOSIT with appId + positionId + amount from user->contract Transfer', () => {
+  it('kind A (deposit) emits DEPOSIT with Valora shape (appName + inAmount + outAmount) plus appId + positionId + amount extras', () => {
     setNeeruEnv()
     const tx = baseTx({ from: USER, to: NEERU_CONTRACT })
     const logs: ClassifierLog[] = [
@@ -397,15 +397,20 @@ describe('classify - Earn / Neeru event classification', () => {
     expect(out).toHaveLength(1)
     const earn = out[0] as EarnTransaction
     expect(earn.type).toBe('DEPOSIT')
+    // Valora-compat wire-shape (what the wallet renderer reads):
+    expect(earn.appName).toBe('Neeru Vaults')
+    expect(earn.outAmount.tokenId).toBe(`celo-mainnet:${TOKEN_COPM}`)
+    expect(earn.outAmount.value).toBe('100.000000000000000000')
+    expect(earn.outAmount.decimals).toBe(18)
+    expect(earn.inAmount.value).toBe('100.000000000000000000')
+    // TuCop extras (kept for future deep-link, ignored by current renderer):
     expect(earn.appId).toBe('neeru-vaults')
     expect(earn.positionId).toBe('42')
-    expect(earn.amount.tokenId).toBe(`celo-mainnet:${TOKEN_COPM}`)
     expect(earn.amount.value).toBe('100.000000000000000000')
-    expect(earn.amount.decimals).toBe(18)
     expect(earn.status).toBe('Complete')
   })
 
-  it('kind B (withdraw) emits WITHDRAW with amount from contract->user Transfer', () => {
+  it('kind B (withdraw) emits WITHDRAW with inAmount + outAmount + appName from contract->user Transfer', () => {
     setNeeruEnv()
     const tx = baseTx({ from: USER, to: NEERU_CONTRACT })
     const logs: ClassifierLog[] = [
@@ -422,7 +427,10 @@ describe('classify - Earn / Neeru event classification', () => {
     expect(out).toHaveLength(1)
     const earn = out[0] as EarnTransaction
     expect(earn.type).toBe('WITHDRAW')
+    expect(earn.appName).toBe('Neeru Vaults')
     expect(earn.positionId).toBe('7')
+    expect(earn.inAmount.value).toBe('50.000000000000000000')
+    expect(earn.outAmount.value).toBe('50.000000000000000000')
     expect(earn.amount.value).toBe('50.000000000000000000')
   })
 
@@ -443,7 +451,28 @@ describe('classify - Earn / Neeru event classification', () => {
     expect(out).toHaveLength(1)
     const earn = out[0] as EarnTransaction
     expect(earn.type).toBe('CLAIM_REWARD')
+    expect(earn.appName).toBe('Neeru Vaults')
     expect(earn.positionId).toBe('99')
+    expect(earn.inAmount.value).toBe('5.000000000000000000')
+    expect(earn.outAmount.value).toBe('5.000000000000000000')
+  })
+
+  it('inAmount and outAmount share the same object reference (single decimalise, cheap dup)', () => {
+    setNeeruEnv()
+    const tx = baseTx({ from: USER, to: NEERU_CONTRACT })
+    const logs: ClassifierLog[] = [
+      transferLog({
+        logIndex: 0,
+        contract: TOKEN_COPM,
+        from: USER,
+        to: NEERU_CONTRACT,
+        value: 100n,
+      }),
+      neeruEventLog({ logIndex: 1, topic0: NEERU_EVENT_A, user: USER, positionId: 1n }),
+    ]
+    const earn = classify(tx, logs, USER)[0] as EarnTransaction
+    expect(earn.inAmount).toBe(earn.outAmount)
+    expect(earn.inAmount).toBe(earn.amount)
   })
 
   it('takes precedence over the swap rule when both patterns would match', () => {

@@ -60,7 +60,11 @@ const HEALTH_RPC_TIMEOUT_MS = 1_500
 // via the Neeru event registry. Any tx that previously classified as a
 // swap or transfer but now matches a Neeru event should be re-emitted
 // under the new type; v3 payloads for those txs would be stale.
-const CACHE_SCHEMA_VERSION = 4
+// v5 (2026-07-06): Earn wire-shape aligned with the Valora renderer the
+// wallet already ships in production (v1.118.5). EarnTransaction gained
+// appName + inAmount + outAmount (mirrored TokenAmount). v4 payloads are
+// missing these fields and would render as `undefined` in the wallet UI.
+const CACHE_SCHEMA_VERSION = 5
 
 interface CachedPayload {
   schemaVersion: number
