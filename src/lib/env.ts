@@ -182,6 +182,23 @@ const envSchema = z.object({
   // 10_000 blocks (~14 h on Celo's 5 s blocks). Set to 0 to disable backfill.
   TX_INDEXER_BACKFILL_BLOCKS: zPositiveInt.optional().default(10_000),
 
+  // Adaptive pacing for the backfill scan. `CHUNK_DELAY_MS` is the baseline
+  // sleep between eth_getLogs chunks; on a 429/1015 (or any transient RPC
+  // error the fallback executor bubbles up), the current delay doubles up
+  // to `MAX_DELAY_MS` and decays back down on success. Defaults tuned for
+  // Forno's Cloudflare bucket (~200 req/min sustained per source IP).
+  TX_INDEXER_BACKFILL_CHUNK_DELAY_MS: zPositiveInt.optional().default(150),
+  TX_INDEXER_BACKFILL_MAX_DELAY_MS: zPositiveInt.optional().default(5_000),
+  // Kill switch for the backfill loop specifically. When false, /watch
+  // still registers the address (the forward-tracking worker will pick
+  // it up) but no historical backfill runs. Set to disable during
+  // maintenance without affecting the live feed.
+  TX_INDEXER_BACKFILL_ENABLED: z
+    .string()
+    .optional()
+    .default('true')
+    .transform((v) => v !== 'false'),
+
   // Kill switches for /api/transactions/feed and /watch. Evaluated per-request
   // (not at boot) so the flip takes effect on the next request without a
   // Railway restart. Default true. Set to the literal string "false" to gate

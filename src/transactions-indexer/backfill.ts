@@ -1,334 +1,524 @@
-import type { Pool } from 'pg'
+import type { Pool, PoolClient } from 'pg'
 import type { Hash } from 'viem'
-import { createCeloPublicClient, getFornoUrl } from '../lib/celoClient'
+import {
+  createCeloFallbackExecutor,
+  type FallbackExecutor,
+} from '../lib/celoRpcFallback'
 import { env } from '../lib/env'
 import { createLogger } from '../lib/logger'
+import {
+  transactionsIndexerBackfillActiveJobs,
+  transactionsIndexerBackfillBlocksRemaining,
+  transactionsIndexerBackfillChunksTotal,
+} from '../lib/metrics'
 import { persistTx } from './persist'
 
-// Historical backfill for an address registered via POST /api/transactions/watch.
+// Robust historical backfill for the transactions indexer.
 //
-// Strategy: walk back env.TX_INDEXER_BACKFILL_BLOCKS (default 10_000,
-// ~14 h on Celo's 5 s blocks) and ask the RPC for ERC20 Transfer logs that
-// touch the address as either `from` (topic1) or `to` (topic2). For each
-// matching log we re-fetch the tx + receipt and write through persist.ts,
-// so the row shape is identical to what the live worker produces.
+// Design (2026-07-06 rewrite - see JOURNAL for the rationale):
 //
-// Native CELO sends (input == "0x", value > 0) are NOT discovered by this
-// method - acceptable for an MVP since real TuCop users pay gas in stables
-// and native sends are vanishingly rare. The live worker still catches them
-// going forward.
+//   1. RPC fallback chain via `createCeloFallbackExecutor`. Circuit breaker
+//      per endpoint (3 fails -> skip 5 min), rotation on any transient
+//      error. Backfill never dies because Forno rate limited us; it
+//      transparently switches to Ankr / dRPC.
+//   2. Per-chunk progress checkpoint. `watched_address.backfill_cursor_block`
+//      is advanced inside the same transaction that inserts the chunk's tx
+//      rows. Container crash / restart / redeploy resumes from that block,
+//      not from tip - depth.
+//   3. Interleaved persist. Each chunk: get logs -> fetch tx+receipt+block
+//      per hash -> single BEGIN/COMMIT with all inserts + cursor update.
+//      No two-phase all-or-nothing.
+//   4. Adaptive backoff. Baseline delay between chunks is
+//      env.TX_INDEXER_BACKFILL_CHUNK_DELAY_MS; on RPC failure it doubles up
+//      to MAX_DELAY_MS and decays back down on success. Combines with the
+//      fallback executor's circuit breaker.
+//   5. Boot-time resume. `resumePendingBackfills(db)` is called from
+//      server.ts and re-launches every row where backfill_completed_at IS
+//      NULL AND backfill_cursor_block IS NOT NULL. Multi-hour backfills
+//      survive normal Railway redeploys.
+//   6. Prometheus metrics. Chunks-processed counter labeled by outcome,
+//      active-jobs gauge, blocks-remaining gauge for Grafana ETA charts.
 //
-// Runs fire-and-forget: the HTTP route returns immediately with
-// `backfillStartedAt` and a background task does the work. Errors are
-// logged but do not propagate; the worst case is `backfill_completed_at`
-// stays NULL and an operator can DELETE + re-watch to retry.
+// Deferred (follow-up if we ever run > 20 concurrent backfills or scale to
+// multi-instance): a proper `backfill_job` queue table + advisory lock for
+// multi-instance safety + round-robin scheduler across addresses to
+// enforce a global RPC budget. For a single Railway replica with tens of
+// wallets, the per-address loop is enough.
 
 const log = createLogger('indexer:backfill')
 
 const ERC20_TRANSFER_TOPIC0 =
   '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
 
-// Celo public RPCs cap eth_getLogs at 5000 blocks per request. Same constant
-// the Neeru indexer pinned in #19 after the first live deploy failed silently
-// behind the 3-RPC fallback chain.
+// Celo public RPCs cap eth_getLogs at 5000 blocks per request. Confirmed in
+// #19 when the first live deploy failed silently behind the 3-RPC fallback.
 const LOG_BATCH_BLOCKS = 5_000
 
-// In-process dedupe: a second /watch hit on the same address while a
-// backfill is still running should not spawn a second job. The Set is
-// process-local; multi-instance deploys race the SQL update (idempotent) and
-// at most do duplicate work, no corruption.
+// In-process dedupe: a second /watch hit for the same address while a
+// backfill loop is running should not spawn a second concurrent loop.
+// Cleared automatically when the loop exits (success or error).
 const inProgress = new Set<string>()
 
-// Minimal RPC surface we use. Defined as an interface so unit tests can
-// inject a mocked client without dragging in viem's chain plumbing.
-export interface BackfillRpcClient {
-  getBlockNumber(): Promise<bigint>
-  getLogs(args: {
-    fromBlock: bigint
-    toBlock: bigint
-    topics: ReadonlyArray<string | string[] | null>
-  }): Promise<
-    ReadonlyArray<{
-      // Plain string (not viem's `0x${string}` template) so test mocks can
-      // synthesize hashes without ceremony. We lowercase and dedupe on the
-      // next line anyway.
-      transactionHash: string
-      blockNumber: bigint
-    }>
-  >
-  getBlock(args: { blockNumber: bigint }): Promise<{ timestamp: bigint }>
-  getTransaction(args: { hash: Hash }): Promise<{
-    hash: Hash
-    from: string
-    to: string | null
-    transactionIndex: number | null
-    value: bigint
-    input: string
-    // See worker.ts IndexerRpcClient for the semantics: CIP-64 fee-token
-    // address, absent for native-CELO-fee txs.
-    feeCurrency?: string | null
-  }>
-  getTransactionReceipt(args: { hash: Hash }): Promise<{
-    status: 'success' | 'reverted'
-    transactionIndex: number
-    gasUsed: bigint
-    effectiveGasPrice: bigint | undefined
-    logs: ReadonlyArray<{
-      logIndex: number | null
-      address: string
-      topics: ReadonlyArray<string>
-      data: string
-    }>
-  }>
-}
-
-// Minimal subset of viem's PublicClient we touch when wrapping it as a
-// BackfillRpcClient. Defined locally so tests can build a stand-in without
-// dragging viem into the test fixture.
-export interface BackfillViemLike {
-  getBlockNumber(): Promise<bigint>
-  getBlock(args: { blockNumber: bigint }): Promise<{ timestamp: bigint }>
-  getTransaction(args: { hash: `0x${string}` }): Promise<{
-    hash: `0x${string}`
-    from: string
-    to: string | null
-    transactionIndex: number | null
-    value: bigint
-    input: string
-    blockNumber?: bigint
-    feeCurrency?: string | null
-  }>
-  getTransactionReceipt(args: { hash: `0x${string}` }): Promise<{
-    status: 'success' | 'reverted'
-    transactionIndex: number
-    gasUsed: bigint
-    effectiveGasPrice?: bigint
-    logs: ReadonlyArray<{
-      logIndex: number | null
-      address: string
-      topics: ReadonlyArray<string>
-      data: string
-    }>
-  }>
-  request(args: { method: string; params: unknown }): Promise<unknown>
-}
-
-// Wraps a viem PublicClient as a BackfillRpcClient. The reason this exists
-// rather than a direct cast: viem's typed `getLogs(...)` does NOT accept the
-// `topics: [...]` shape we need for an unindexed-event-style ERC20 Transfer
-// query; the typed method silently drops the filter, so Forno gets
-// `topics: []` (match-everything) and times out at 30s on every 5000-block
-// chunk. We translate to JSON-RPC `eth_getLogs` via `client.request` and
-// keep the BackfillRpcClient surface stable. Same pattern that
-// `src/neeru-indexer/rpc.ts` ships in production.
-export function wrapPublicClientAsBackfillRpc(
-  client: BackfillViemLike,
-): BackfillRpcClient {
-  return {
-    getBlockNumber: () => client.getBlockNumber(),
-    getLogs: async (args) => {
-      const result = (await client.request({
-        method: 'eth_getLogs',
-        params: [
-          {
-            topics: args.topics as `0x${string}`[],
-            fromBlock: `0x${args.fromBlock.toString(16)}` as `0x${string}`,
-            toBlock: `0x${args.toBlock.toString(16)}` as `0x${string}`,
-          },
-        ],
-      })) as Array<{ transactionHash: string; blockNumber: string | null }>
-      return result.map((r) => ({
-        transactionHash: r.transactionHash,
-        blockNumber: r.blockNumber ? BigInt(r.blockNumber) : 0n,
-      }))
-    },
-    getBlock: (args) =>
-      client
-        .getBlock({ blockNumber: args.blockNumber })
-        .then((b) => ({ timestamp: b.timestamp })),
-    getTransaction: (args) => client.getTransaction({ hash: args.hash }),
-    getTransactionReceipt: (args) =>
-      client.getTransactionReceipt({ hash: args.hash }).then((r) => ({
-        status: r.status,
-        transactionIndex: r.transactionIndex,
-        gasUsed: r.gasUsed,
-        effectiveGasPrice: r.effectiveGasPrice,
-        logs: r.logs.map((lg) => ({
-          logIndex: lg.logIndex,
-          address: lg.address,
-          topics: lg.topics,
-          data: lg.data,
-        })),
-      })),
-  }
-}
-
-function buildDefaultClient(): BackfillRpcClient {
-  return wrapPublicClientAsBackfillRpc(
-    createCeloPublicClient({ url: getFornoUrl() }) as unknown as BackfillViemLike,
-  )
-}
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 function paddedAddressTopic(address: string): string {
-  // ERC20 Transfer topics encode the address as a 32-byte word (12 bytes of
-  // zero padding + 20-byte address). Lowercase to match how the worker
-  // writes topics into Postgres.
   return '0x' + '0'.repeat(24) + address.slice(2).toLowerCase()
 }
 
-export interface BackfillResult {
-  blocksScanned: number
-  txsFound: number
+interface RawLog {
+  transactionHash: string
+  blockNumber: bigint
 }
 
-export interface BackfillOptions {
-  rpc?: BackfillRpcClient
-  depthBlocks?: number
+interface RawTx {
+  hash: `0x${string}`
+  from: string
+  to: string | null
+  transactionIndex: number | null
+  value: bigint
+  input: string
+  blockNumber?: bigint
+  feeCurrency?: string | null
 }
 
-export async function backfillAddress(
+interface RawReceipt {
+  status: 'success' | 'reverted'
+  transactionIndex: number
+  gasUsed: bigint
+  effectiveGasPrice: bigint | undefined
+  logs: ReadonlyArray<{
+    logIndex: number | null
+    address: string
+    topics: ReadonlyArray<string>
+    data: string
+  }>
+}
+
+interface FetchedTx {
+  tx: RawTx
+  receipt: RawReceipt
+  blockNumber: bigint
+  blockTimestampMs: number
+}
+
+// ---------------------------------------------------------------------------
+// RPC helpers (all go through the fallback executor)
+// ---------------------------------------------------------------------------
+
+async function rpcGetLogs(
+  executor: FallbackExecutor,
+  label: string,
+  fromBlock: bigint,
+  toBlock: bigint,
+  topics: ReadonlyArray<string | null>,
+): Promise<RawLog[]> {
+  const result = (await executor.withFallback(label, async (client) => {
+    return await client.request({
+      method: 'eth_getLogs',
+      params: [
+        {
+          topics: topics as `0x${string}`[],
+          fromBlock: `0x${fromBlock.toString(16)}` as `0x${string}`,
+          toBlock: `0x${toBlock.toString(16)}` as `0x${string}`,
+        },
+      ],
+    })
+  })) as Array<{ transactionHash: string; blockNumber: string | null }>
+  return result.map((r) => ({
+    transactionHash: r.transactionHash,
+    blockNumber: r.blockNumber ? BigInt(r.blockNumber) : 0n,
+  }))
+}
+
+async function rpcGetBlockNumber(executor: FallbackExecutor): Promise<bigint> {
+  return executor.withFallback('getBlockNumber', (c) => c.getBlockNumber())
+}
+
+async function rpcFetchTx(
+  executor: FallbackExecutor,
+  hash: string,
+): Promise<FetchedTx | null> {
+  const [tx, receipt] = (await Promise.all([
+    executor.withFallback(`getTransaction ${hash}`, (c) =>
+      c.getTransaction({ hash: hash as Hash }),
+    ),
+    executor.withFallback(`getTransactionReceipt ${hash}`, (c) =>
+      c.getTransactionReceipt({ hash: hash as Hash }),
+    ),
+  ])) as [RawTx & { blockNumber?: bigint }, RawReceipt]
+  const blockNumber = tx.blockNumber ?? null
+  if (blockNumber === null) return null
+  const block = (await executor.withFallback(`getBlock ${blockNumber}`, (c) =>
+    c.getBlock({ blockNumber }),
+  )) as { timestamp: bigint }
+  return {
+    tx,
+    receipt,
+    blockNumber,
+    blockTimestampMs: Number(block.timestamp) * 1000,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DB helpers
+// ---------------------------------------------------------------------------
+
+interface BackfillWindow {
+  cursorBlock: bigint | null
+  endBlock: bigint | null
+  completedAt: Date | null
+}
+
+async function readBackfillWindow(
   db: Pool,
   address: string,
-  options: BackfillOptions = {},
-): Promise<BackfillResult> {
-  const userAddress = address.toLowerCase()
-  const rpc = options.rpc ?? buildDefaultClient()
-  const depth = BigInt(options.depthBlocks ?? env.TX_INDEXER_BACKFILL_BLOCKS)
-
-  const tip = await rpc.getBlockNumber()
-  const fromBlock = tip > depth ? tip - depth : 0n
-  const toBlock = tip
-
-  const topicAddress = paddedAddressTopic(userAddress)
-  // Two separate eth_getLogs calls: one for outbound (topic1 = user) and one
-  // for inbound (topic2 = user). Most RPCs do not support an OR across
-  // different topic slots in a single request, so we union client-side.
-  const seenHashes = new Set<string>()
-
-  for (
-    let chunkStart = fromBlock;
-    chunkStart <= toBlock;
-    chunkStart += BigInt(LOG_BATCH_BLOCKS)
-  ) {
-    const chunkEnd =
-      chunkStart + BigInt(LOG_BATCH_BLOCKS) - 1n > toBlock
-        ? toBlock
-        : chunkStart + BigInt(LOG_BATCH_BLOCKS) - 1n
-
-    const [outboundLogs, inboundLogs] = await Promise.all([
-      rpc.getLogs({
-        fromBlock: chunkStart,
-        toBlock: chunkEnd,
-        topics: [ERC20_TRANSFER_TOPIC0, topicAddress, null],
-      }),
-      rpc.getLogs({
-        fromBlock: chunkStart,
-        toBlock: chunkEnd,
-        topics: [ERC20_TRANSFER_TOPIC0, null, topicAddress],
-      }),
-    ])
-
-    for (const lg of [...outboundLogs, ...inboundLogs]) {
-      seenHashes.add(lg.transactionHash.toLowerCase())
-    }
+): Promise<BackfillWindow | null> {
+  const { rows } = await db.query<{
+    backfill_cursor_block: string | null
+    backfill_end_block: string | null
+    backfill_completed_at: Date | null
+  }>(
+    `SELECT backfill_cursor_block::text AS backfill_cursor_block,
+            backfill_end_block::text AS backfill_end_block,
+            backfill_completed_at
+       FROM watched_address WHERE address = $1`,
+    [address],
+  )
+  if (rows.length === 0 || !rows[0]) return null
+  const row = rows[0]
+  return {
+    cursorBlock: row.backfill_cursor_block ? BigInt(row.backfill_cursor_block) : null,
+    endBlock: row.backfill_end_block ? BigInt(row.backfill_end_block) : null,
+    completedAt: row.backfill_completed_at,
   }
-
-  let txsFound = 0
-  for (const hash of seenHashes) {
-    try {
-      const [tx, receipt] = await Promise.all([
-        rpc.getTransaction({ hash: hash as Hash }),
-        rpc.getTransactionReceipt({ hash: hash as Hash }),
-      ])
-      // viem's getTransaction returns blockNumber on the tx object. We typed
-      // BackfillRpcClient narrowly; widen via a safe cast.
-      const txWithBlock = tx as typeof tx & { blockNumber?: bigint }
-      const blockNumber = txWithBlock.blockNumber ?? null
-      if (blockNumber === null) {
-        log.warn(`backfill: tx ${hash} has no blockNumber; skipping`)
-        continue
-      }
-      const block = await rpc.getBlock({ blockNumber })
-      const blockTimestampMs = Number(block.timestamp) * 1000
-
-      const client = await db.connect()
-      try {
-        await client.query('BEGIN')
-        await persistTx(client, {
-          tx: {
-            hash: tx.hash,
-            from: tx.from,
-            to: tx.to,
-            transactionIndex: tx.transactionIndex,
-            value: tx.value,
-            input: tx.input,
-            feeCurrency: tx.feeCurrency ?? null,
-          },
-          blockNumber,
-          blockTimestampMs,
-          receipt,
-        })
-        await client.query('COMMIT')
-        txsFound += 1
-      } catch (err) {
-        await client.query('ROLLBACK')
-        log.warn(
-          `backfill: persist failed for tx ${hash}: ${err instanceof Error ? err.message : String(err)}`,
-        )
-      } finally {
-        client.release()
-      }
-    } catch (err) {
-      log.warn(
-        `backfill: rpc lookup failed for tx ${hash}: ${err instanceof Error ? err.message : String(err)}`,
-      )
-    }
-  }
-
-  const blocksScanned = Number(toBlock - fromBlock + 1n)
-  return { blocksScanned, txsFound }
 }
 
-/**
- * Fire-and-forget trigger called by the POST /watch route. Does NOT throw.
- *
- * Steps:
- * 1. Dedupe via in-process Set (early return if already running).
- * 2. Run backfillAddress.
- * 3. Mark watched_address.backfill_completed_at on success.
- *
- * Caller does not await this; the HTTP response goes out immediately.
- */
+async function initializeBackfillWindowIfNeeded(
+  db: Pool,
+  address: string,
+  currentTip: bigint,
+  depthBlocks: bigint,
+): Promise<{ cursor: bigint; end: bigint } | null> {
+  const existing = await readBackfillWindow(db, address)
+  if (!existing) return null
+  if (existing.completedAt) return null
+  if (existing.cursorBlock != null && existing.endBlock != null) {
+    return { cursor: existing.cursorBlock, end: existing.endBlock }
+  }
+  const end = currentTip
+  const from = currentTip > depthBlocks ? currentTip - depthBlocks : 0n
+  await db.query(
+    `UPDATE watched_address
+       SET backfill_cursor_block = $1,
+           backfill_end_block = $2
+     WHERE address = $3`,
+    [from.toString(), end.toString(), address],
+  )
+  log.info(
+    `backfill window initialized for ${address}: [${from.toString()}, ${end.toString()}]`,
+  )
+  return { cursor: from, end }
+}
+
+async function markBackfillCompleted(db: Pool, address: string): Promise<void> {
+  await db.query(
+    `UPDATE watched_address SET backfill_completed_at = now() WHERE address = $1`,
+    [address],
+  )
+}
+
+async function persistChunkAtomically(
+  db: Pool,
+  address: string,
+  fetched: FetchedTx[],
+  newCursor: bigint,
+): Promise<{ persisted: number; persistErrors: number }> {
+  let persisted = 0
+  let persistErrors = 0
+  const client = await db.connect()
+  try {
+    await client.query('BEGIN')
+    for (const item of fetched) {
+      try {
+        await persistTx(client, {
+          tx: {
+            hash: item.tx.hash,
+            from: item.tx.from,
+            to: item.tx.to,
+            transactionIndex: item.tx.transactionIndex,
+            value: item.tx.value,
+            input: item.tx.input,
+            feeCurrency: item.tx.feeCurrency ?? null,
+          },
+          blockNumber: item.blockNumber,
+          blockTimestampMs: item.blockTimestampMs,
+          receipt: item.receipt,
+        })
+        persisted += 1
+      } catch (err) {
+        persistErrors += 1
+        log.warn(
+          `persistTx failed for ${item.tx.hash} in chunk of ${address}: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+    await (client as PoolClient).query(
+      `UPDATE watched_address SET backfill_cursor_block = $1 WHERE address = $2`,
+      [newCursor.toString(), address],
+    )
+    await client.query('COMMIT')
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
+  }
+  return { persisted, persistErrors }
+}
+
+async function recordChunkError(
+  db: Pool,
+  address: string,
+  message: string,
+): Promise<void> {
+  await db
+    .query(
+      `UPDATE watched_address
+         SET backfill_last_error = $1,
+             backfill_last_attempt_at = now()
+       WHERE address = $2`,
+      [message.slice(0, 500), address],
+    )
+    .catch((err) => {
+      log.warn(
+        `failed to record chunk error for ${address}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((r) => setTimeout(r, ms))
+}
+
+async function refreshBlocksRemainingGauge(db: Pool): Promise<void> {
+  try {
+    const { rows } = await db.query<{ remaining: string | null }>(
+      `SELECT COALESCE(SUM(backfill_end_block - backfill_cursor_block), 0)::text AS remaining
+         FROM watched_address
+        WHERE backfill_completed_at IS NULL
+          AND backfill_cursor_block IS NOT NULL
+          AND backfill_end_block IS NOT NULL`,
+    )
+    const raw = rows[0]?.remaining ?? '0'
+    transactionsIndexerBackfillBlocksRemaining.set(Number(BigInt(raw)))
+  } catch {
+    // not fatal; gauge stays stale, live worker gauges are independent.
+  }
+}
+
+export interface RunBackfillOptions {
+  executor?: FallbackExecutor
+  depthBlocksOverride?: number
+  chunkDelayMsOverride?: number
+  maxDelayMsOverride?: number
+}
+
+// Runs the backfill loop for a single address until either (a) the cursor
+// reaches the end block (backfill_completed_at is set), or (b) the process
+// stops. Does NOT throw for RPC failures; those are absorbed via the
+// fallback executor + adaptive backoff. Only throws for programmer errors
+// (missing DB row, etc.) and only after cleanup.
+export async function runBackfillLoopForAddress(
+  db: Pool,
+  address: string,
+  options: RunBackfillOptions = {},
+): Promise<void> {
+  const userLower = address.toLowerCase()
+  const executor = options.executor ?? createCeloFallbackExecutor()
+  const baselineDelay = options.chunkDelayMsOverride ?? env.TX_INDEXER_BACKFILL_CHUNK_DELAY_MS
+  const maxDelay = options.maxDelayMsOverride ?? env.TX_INDEXER_BACKFILL_MAX_DELAY_MS
+  const depth = BigInt(options.depthBlocksOverride ?? env.TX_INDEXER_BACKFILL_BLOCKS)
+
+  // Initialize window if this is the first attempt for the address.
+  let tip: bigint
+  try {
+    tip = await rpcGetBlockNumber(executor)
+  } catch (err) {
+    log.error(
+      `failed to get tip for initial backfill of ${userLower}: ${err instanceof Error ? err.message : String(err)}`,
+    )
+    return
+  }
+  const window = await initializeBackfillWindowIfNeeded(db, userLower, tip, depth)
+  if (!window) {
+    log.info(`no active backfill needed for ${userLower} (row missing or completed)`)
+    return
+  }
+
+  transactionsIndexerBackfillActiveJobs.inc()
+  try {
+    const topicAddress = paddedAddressTopic(userLower)
+    let currentDelay = baselineDelay
+
+    for (;;) {
+      // Re-read progress each iteration in case some other actor (a manual
+      // reset SQL, a concurrent /watch, etc.) mutated the row.
+      const state = await readBackfillWindow(db, userLower)
+      if (!state || state.cursorBlock == null || state.endBlock == null) {
+        log.warn(`backfill state missing mid-loop for ${userLower}; stopping`)
+        return
+      }
+      if (state.completedAt) return
+      let cursor = state.cursorBlock
+      const end = state.endBlock
+      if (cursor > end) {
+        await markBackfillCompleted(db, userLower)
+        log.info(`backfill complete for ${userLower} (cursor > end)`)
+        return
+      }
+
+      const chunkStart = cursor
+      const chunkEnd =
+        chunkStart + BigInt(LOG_BATCH_BLOCKS) - 1n > end
+          ? end
+          : chunkStart + BigInt(LOG_BATCH_BLOCKS) - 1n
+
+      try {
+        // 1) Scan logs (2 concurrent slots per chunk).
+        const [outboundLogs, inboundLogs] = await Promise.all([
+          rpcGetLogs(
+            executor,
+            `getLogs outbound ${chunkStart}-${chunkEnd}`,
+            chunkStart,
+            chunkEnd,
+            [ERC20_TRANSFER_TOPIC0, topicAddress, null],
+          ),
+          rpcGetLogs(
+            executor,
+            `getLogs inbound ${chunkStart}-${chunkEnd}`,
+            chunkStart,
+            chunkEnd,
+            [ERC20_TRANSFER_TOPIC0, null, topicAddress],
+          ),
+        ])
+
+        // 2) Fetch tx + receipt + block per unique hash.
+        const seen = new Set<string>()
+        for (const l of [...outboundLogs, ...inboundLogs]) {
+          seen.add(l.transactionHash.toLowerCase())
+        }
+        const fetched: FetchedTx[] = []
+        for (const hash of seen) {
+          try {
+            const item = await rpcFetchTx(executor, hash)
+            if (item) fetched.push(item)
+          } catch (err) {
+            log.warn(
+              `rpc fetch failed for ${hash}: ${err instanceof Error ? err.message : String(err)}`,
+            )
+          }
+        }
+
+        // 3) Single transaction: persist all tx + advance cursor. All-or-nothing
+        //    at the CHUNK level (individual tx persist errors are logged but
+        //    the successful ones still land + cursor still advances).
+        const newCursor = chunkEnd + 1n
+        const { persistErrors } = await persistChunkAtomically(db, userLower, fetched, newCursor)
+
+        if (persistErrors > 0) {
+          transactionsIndexerBackfillChunksTotal.labels({ outcome: 'persist_error' }).inc()
+        } else {
+          transactionsIndexerBackfillChunksTotal.labels({ outcome: 'ok' }).inc()
+        }
+
+        cursor = newCursor
+        // Decay delay on success; never below baseline.
+        currentDelay = Math.max(baselineDelay, Math.floor(currentDelay * 0.8))
+      } catch (err) {
+        // Every fallback endpoint failed for a call in this chunk. Do NOT
+        // advance the cursor; back off + retry next iteration.
+        transactionsIndexerBackfillChunksTotal.labels({ outcome: 'rpc_error' }).inc()
+        const message = err instanceof Error ? err.message : String(err)
+        currentDelay = Math.min(maxDelay, currentDelay === 0 ? baselineDelay : currentDelay * 2)
+        await recordChunkError(db, userLower, message)
+        log.warn(
+          `chunk [${chunkStart.toString()}, ${chunkEnd.toString()}] failed for ${userLower}; backoff to ${currentDelay}ms: ${message}`,
+        )
+      }
+
+      await refreshBlocksRemainingGauge(db)
+      await sleep(currentDelay)
+    }
+  } finally {
+    transactionsIndexerBackfillActiveJobs.dec()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+// Fire-and-forget wrapper called from POST /api/transactions/watch. Dedupes
+// concurrent triggers via inProgress. Never throws.
 export function triggerBackfill(
   db: Pool,
   address: string,
-  options: BackfillOptions = {},
+  options: RunBackfillOptions = {},
 ): void {
-  const userAddress = address.toLowerCase()
-  if (inProgress.has(userAddress)) return
-  inProgress.add(userAddress)
-
+  if (!env.TX_INDEXER_BACKFILL_ENABLED) {
+    log.info(`backfill disabled by env; skipping trigger for ${address}`)
+    return
+  }
+  const userLower = address.toLowerCase()
+  if (inProgress.has(userLower)) return
+  inProgress.add(userLower)
   void (async () => {
     try {
-      log.info(`backfill start for ${userAddress}`)
-      const result = await backfillAddress(db, userAddress, options)
-      await db.query(
-        `UPDATE watched_address
-           SET backfill_completed_at = now()
-         WHERE address = $1`,
-        [userAddress],
-      )
-      log.info(
-        `backfill done for ${userAddress}: blocksScanned=${result.blocksScanned} txsFound=${result.txsFound}`,
-      )
+      await runBackfillLoopForAddress(db, userLower, options)
     } catch (err) {
       log.error(
-        `backfill failed for ${userAddress}: ${err instanceof Error ? err.message : String(err)}`,
+        `backfill loop crashed for ${userLower}: ${err instanceof Error ? err.message : String(err)}`,
       )
     } finally {
-      inProgress.delete(userAddress)
+      inProgress.delete(userLower)
     }
   })()
+}
+
+// Boot-time resume. Called from server.ts after startIndexer(). Picks up
+// every row where backfill_completed_at IS NULL AND backfill_cursor_block IS
+// NOT NULL and re-launches the loop. Guards against redeploys / restarts
+// killing multi-hour backfills.
+export async function resumePendingBackfills(
+  db: Pool,
+  options: RunBackfillOptions = {},
+): Promise<number> {
+  if (!env.TX_INDEXER_BACKFILL_ENABLED) {
+    log.info('backfill disabled by env; skipping resume sweep at boot')
+    return 0
+  }
+  const { rows } = await db.query<{ address: string }>(
+    `SELECT address FROM watched_address
+      WHERE backfill_completed_at IS NULL
+        AND backfill_cursor_block IS NOT NULL
+        AND backfill_end_block IS NOT NULL`,
+  )
+  let started = 0
+  for (const r of rows) {
+    if (inProgress.has(r.address)) continue
+    triggerBackfill(db, r.address, options)
+    started += 1
+  }
+  if (started > 0) {
+    log.info(`resumed ${started} pending backfill jobs at boot`)
+  }
+  return started
 }
 
 export const _testHelpers = {
