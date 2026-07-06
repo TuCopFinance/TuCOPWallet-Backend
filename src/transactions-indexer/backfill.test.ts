@@ -5,6 +5,7 @@ import {
   resumePendingBackfills,
   runBackfillLoopForAddress,
   triggerBackfill,
+  walletCreatedAtToFromBlock,
 } from './backfill'
 
 const ADDR = '0x1111111111111111111111111111111111111111'
@@ -403,5 +404,52 @@ describe('resumePendingBackfills', () => {
     const { executor } = buildFakeExecutor({ tip: 100n })
     const started = await resumePendingBackfills(db, { executor })
     expect(started).toBe(0)
+  })
+})
+
+describe('walletCreatedAtToFromBlock', () => {
+  const CELO_L2_MIGRATION_MS = Date.parse('2025-03-26T00:00:00Z')
+
+  it('returns tip for future dates (silently caps)', () => {
+    const now = Date.parse('2026-07-06T00:00:00Z')
+    const future = '2027-01-01T00:00:00Z'
+    expect(walletCreatedAtToFromBlock(future, 1_000_000n, now)).toBe(1_000_000n)
+  })
+
+  it('returns tip for unparseable strings', () => {
+    const now = Date.parse('2026-07-06T00:00:00Z')
+    expect(walletCreatedAtToFromBlock('not-a-date', 1_000_000n, now)).toBe(1_000_000n)
+  })
+
+  it('uses ~1 s/block for post-L2 wallets', () => {
+    const now = CELO_L2_MIGRATION_MS + 3_600 * 1000 // 1 hour post-L2
+    const created = new Date(CELO_L2_MIGRATION_MS + 1_800 * 1000).toISOString() // 30 min post-L2
+    const tip = 10_000_000n
+    // 30 min of blocks post-L2 at 1s/block = 1800 blocks
+    expect(walletCreatedAtToFromBlock(created, tip, now)).toBe(tip - 1_800n)
+  })
+
+  it('segments across the L2 migration boundary for older wallets', () => {
+    const now = CELO_L2_MIGRATION_MS + 100 * 1000 // 100 s post-L2
+    const created = new Date(CELO_L2_MIGRATION_MS - 500 * 1000).toISOString() // 500 s pre-L2
+    const tip = 10_000_000n
+    // Post-L2 segment: 100 s * 1 = 100 blocks. Pre-L2 segment: 500 s / 5 = 100 blocks.
+    // Total = 200 blocks.
+    expect(walletCreatedAtToFromBlock(created, tip, now)).toBe(tip - 200n)
+  })
+
+  it('caps at SAFETY_MAX_BACKFILL_BLOCKS (5M)', () => {
+    const now = Date.parse('2030-01-01T00:00:00Z')
+    const created = '2020-01-01T00:00:00Z' // ~10 yrs older, way past cap
+    const tip = 100_000_000n
+    // Should cap at 5M blocks, never scan further.
+    expect(walletCreatedAtToFromBlock(created, tip, now)).toBe(tip - 5_000_000n)
+  })
+
+  it('returns 0 when the estimate exceeds the current tip', () => {
+    const now = Date.parse('2026-07-06T00:00:00Z')
+    const created = new Date(CELO_L2_MIGRATION_MS).toISOString()
+    const tip = 100n // tiny tip
+    expect(walletCreatedAtToFromBlock(created, tip, now)).toBe(0n)
   })
 })
