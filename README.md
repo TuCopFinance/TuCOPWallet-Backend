@@ -461,7 +461,27 @@ Byte-compatible replacement for Valora. Same response envelope (`{ transactions,
 
 **Token IDs:** ERC20s are emitted as `celo-mainnet:0x<contract>`. CELO native is emitted as its ERC20 contract id `celo-mainnet:0x471ece3750da237f93b8e339c536989b8978a438`, not a `:native` sentinel, so the wallet's token registry resolves it the same way as any other ERC20.
 
-**Earn extension (`DEPOSIT` / `WITHDRAW` / `CLAIM_REWARD`):** when a tx emits an event from a configured Earn contract (currently Neeru Vaults, via `NEERU_CONTRACT_ADDRESS` + `NEERU_EVENT_A/B/C_TOPIC0`), the classifier emits an `EarnTransaction` instead of folding the deposit token movement into a bogus swap. `EarnTransaction` extends the base shape with `appId` (`"neeru-vaults"` today; other protocols pluggable via the env registry), `positionId` (string or `null`, decoded from the event's indexed `positionId` topic), and `amount` (`TokenAmount` for the ERC20 leg between the user and the earn contract). Kind A = new position -> `DEPOSIT`; Kind B = early withdrawal -> `WITHDRAW`; Kind C = matured claim -> `CLAIM_REWARD`. The Earn rule runs BEFORE the swap rules so a Neeru deposit tx (which moves COPm user -> contract) is never misclassified as a swap.
+**Earn extension (`DEPOSIT` / `WITHDRAW` / `CLAIM_REWARD`):** when a tx emits an event from a configured Earn contract (currently Neeru Vaults, via `NEERU_CONTRACT_ADDRESS` + `NEERU_EVENT_A/B/C_TOPIC0`), the classifier emits an `EarnTransaction` instead of folding the deposit token movement into a bogus swap. The wire-shape aligns with the Valora feed the wallet already renders in production (`DepositOrWithdrawFeedItem.tsx` / `DepositOrWithdrawContent.tsx`):
+
+```json
+{
+  "type": "DEPOSIT",
+  "appName": "Neeru Vaults",
+  "outAmount": { "tokenId": "celo-mainnet:0x8a56...41ea", "value": "100.000000000000000000", "decimals": 18, "localAmount": { ... } },
+  "inAmount":  { "tokenId": "celo-mainnet:0x8a56...41ea", "value": "100.000000000000000000", "decimals": 18, "localAmount": { ... } },
+  "appId": "neeru-vaults",
+  "positionId": "42",
+  "amount": { ... same TokenAmount ... },
+  ... base fields (status, fees, timestamp, block, transactionHash, ...)
+}
+```
+
+Wire-shape notes:
+
+- **`appName`** is the human-readable protocol label the wallet renderer reads directly; missing it falls back to an i18n placeholder ("Depósito" without a protocol name).
+- **`inAmount`** and **`outAmount`** are BOTH populated with the same `TokenAmount` reference (single decimalise, cheap dup). The DEPOSIT renderer reads `outAmount`; the WITHDRAW / CLAIM_REWARD renderer reads `inAmount`. Duplicating both guards against any renderer branch hitting `undefined` and yielding `NaN` in the display.
+- **`appId`**, **`positionId`**, and **`amount`** are TuCop extensions kept as extras. The current Valora renderer ignores unknown fields; the wallet team plans to deep-link to `positionId` in a future release.
+- Kind A = new position -> `DEPOSIT`; Kind B = early withdrawal -> `WITHDRAW`; Kind C = matured claim -> `CLAIM_REWARD`. The Earn rule runs BEFORE the swap rules so a Neeru deposit tx (which moves COPm user -> contract) is never misclassified as a swap.
 
 Errors: `400 invalid address` / `invalid afterCursor`, `503 database not configured`, `500 database error`.
 

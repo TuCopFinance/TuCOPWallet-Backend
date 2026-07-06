@@ -489,6 +489,13 @@ type EarnAction = 'DEPOSIT' | 'WITHDRAW' | 'CLAIM_REWARD'
 
 interface EarnEventBinding {
   appId: string
+  // Human-readable protocol label shown in the wallet timeline (Valora
+  // renderer reads `appName` directly and falls back to i18n placeholder
+  // when undefined). Kept as a small in-source registry: the set of active
+  // Earn protocols grows one at a time, adding a hard-coded label per new
+  // integration is a two-line change and avoids threading yet another env
+  // var per protocol.
+  appName: string
   contract: string
   actionByTopic0: Record<string, EarnAction>
   // Optional deposit token restriction for the amount match. When null the
@@ -507,6 +514,7 @@ function loadEarnRegistry(): EarnEventBinding[] {
     if (Object.keys(map).length > 0) {
       out.push({
         appId: 'neeru-vaults',
+        appName: 'Neeru Vaults',
         contract: neeruContract.toLowerCase(),
         actionByTopic0: map,
         depositToken: env.NEERU_DEPOSIT_TOKEN_ADDRESS
@@ -596,12 +604,22 @@ function classifyEarnFromLogs(
   }
   if (amountRaw === null || tokenContract === null) return null
 
+  const amount = makeAmount(tokenIdForContract(tx.networkId, tokenContract), amountRaw)
+  // Populate both `inAmount` and `outAmount` with the same TokenAmount.
+  // Valora's renderer branches by `type` and reads only one of the two:
+  // DEPOSIT reads `outAmount`, WITHDRAW / CLAIM_REWARD read `inAmount`.
+  // Duplicating both is cheap (one shared reference) and guards against
+  // any renderer branch reading the "wrong" field. See EarnTransaction
+  // interface comment in ./types.ts for the wire-shape rationale.
   return {
     ...baseFields(tx, userAddress),
     type: match.action,
+    appName: match.binding.appName,
+    inAmount: amount,
+    outAmount: amount,
     appId: match.binding.appId,
     positionId: match.positionId,
-    amount: makeAmount(tokenIdForContract(tx.networkId, tokenContract), amountRaw),
+    amount,
   }
 }
 
