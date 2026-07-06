@@ -86,12 +86,29 @@ export interface ApprovalTransaction extends BaseTransaction {
   tokenId: string
 }
 
-// User-held Earn positions (Neeru, Allbridge, ...). `appId` identifies the
-// protocol so the wallet can render a protocol-specific label + icon;
-// `positionId` is the internal id used by the protocol's own indexer /
-// hooks-api so the wallet can deep-link back to the manage screen.
+// User-held Earn positions (Neeru, Allbridge, ...). Shape aligns with the
+// Valora feed the wallet timeline already renders in production (v1.118.5
+// on Play/App Store as of 2026-07-06):
+//
+//   - `appName` is the human-readable protocol label ("Neeru Vaults",
+//     "Allbridge"). The wallet renderer reads this directly; missing it
+//     falls back to the i18n "noTxAppName" placeholder.
+//   - `inAmount` / `outAmount` mirror the Valora convention: DEPOSIT reads
+//     `outAmount` (money leaving the user), WITHDRAW / CLAIM_REWARD read
+//     `inAmount` (money coming in). We populate BOTH with the same
+//     TokenAmount so any future renderer branch does not accidentally hit
+//     `undefined` and yield `NaN` in the display. Cheap, and keeps the
+//     shape robust across wallet versions.
+//
+// The `appId`, `positionId`, and `amount` fields are TuCop extensions kept
+// as extras: the current Valora renderer ignores unknown fields, but the
+// wallet team plans to deep-link to `positionId` in a future release so
+// the data ships now instead of later.
 export interface EarnTransaction extends BaseTransaction {
   type: 'DEPOSIT' | 'WITHDRAW' | 'CLAIM_REWARD'
+  appName: string
+  inAmount: TokenAmount
+  outAmount: TokenAmount
   appId: string
   positionId: string | null
   amount: TokenAmount
