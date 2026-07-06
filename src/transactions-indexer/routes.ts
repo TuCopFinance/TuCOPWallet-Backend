@@ -56,7 +56,11 @@ const HEALTH_RPC_TIMEOUT_MS = 1_500
 // and outAmount / inAmount / fromTokenAmounts[] are swap-leg-only
 // (Valora-compatible "swap intent" convention). Cache invalidated again so
 // the previous v2 payloads (net-actual convention) are replaced.
-const CACHE_SCHEMA_VERSION = 3
+// v4 (2026-07-06): Earn types (DEPOSIT / WITHDRAW / CLAIM_REWARD) shipped
+// via the Neeru event registry. Any tx that previously classified as a
+// swap or transfer but now matches a Neeru event should be re-emitted
+// under the new type; v3 payloads for those txs would be stale.
+const CACHE_SCHEMA_VERSION = 4
 
 interface CachedPayload {
   schemaVersion: number
@@ -126,11 +130,34 @@ router.post('/api/transactions/watch', async (req: Request, res: Response) => {
   if (!env.TX_WATCH_ENABLED) {
     return res.status(503).json({ error: 'watch disabled' })
   }
-  const body = (req.body ?? {}) as { address?: unknown }
+  const body = (req.body ?? {}) as { address?: unknown; walletCreatedAt?: unknown }
   if (typeof body.address !== 'string' || !HEX_ADDRESS_RE.test(body.address)) {
     return res.status(400).json({ error: 'invalid address' })
   }
   const address = body.address.toLowerCase()
+
+  // Optional field: extends the backfill window from (tip - default depth)
+  // to the block that best estimates the wallet's creation time. Validated
+  // at the boundary; malformed input returns 400 rather than getting
+  // silently coerced. When absent, the backfill uses the env-driven depth.
+  let walletCreatedAtIso: string | null = null
+  if (body.walletCreatedAt != null) {
+    if (typeof body.walletCreatedAt !== 'string') {
+      return res.status(400).json({ error: 'invalid walletCreatedAt' })
+    }
+    const parsedMs = Date.parse(body.walletCreatedAt)
+    if (Number.isNaN(parsedMs)) {
+      return res.status(400).json({ error: 'invalid walletCreatedAt' })
+    }
+    if (parsedMs > Date.now()) {
+      return res.status(400).json({ error: 'invalid walletCreatedAt' })
+    }
+    // Floor: Celo mainnet launched Apr 2020. Anything earlier is a bug.
+    if (parsedMs < Date.parse('2020-04-01T00:00:00Z')) {
+      return res.status(400).json({ error: 'invalid walletCreatedAt' })
+    }
+    walletCreatedAtIso = new Date(parsedMs).toISOString()
+  }
 
   const db = getDb()
   if (!db) {
@@ -165,9 +192,11 @@ router.post('/api/transactions/watch', async (req: Request, res: Response) => {
 
   // Fire-and-forget backfill only when the row is fresh (no completed
   // timestamp yet). backfill.ts dedupes in-process so a burst of /watch
-  // calls collapses to one job.
+  // calls collapses to one job. Pass walletCreatedAtIso through so the
+  // backfill window snaps to that block on init (still capped by
+  // SAFETY_MAX_BACKFILL_BLOCKS in backfill.ts).
   if (!backfillCompleted) {
-    triggerBackfill(db, address)
+    triggerBackfill(db, address, walletCreatedAtIso ? { walletCreatedAtIso } : {})
   }
 
   return res.json({ ok: true, backfillStartedAt, backfillCompleted })
