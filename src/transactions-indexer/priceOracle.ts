@@ -36,6 +36,32 @@ const TOKEN_REGISTRY: Record<string, TokenMeta> = {
   '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e': { symbol: 'USDT', decimals: 6, peggedTo: 'USD' },
 }
 
+// Adapter-only fee currencies (CIP-64). When `tx.feeCurrency` is one of these
+// adapter contracts, the classifier surfaces the underlying token on the
+// emit (tokenId + decimals) so the wallet renders "you paid X USDC in gas"
+// rather than the meaningless adapter address. The value the receipt reports
+// is denominated in the adapter's 18-decimal-normalised units - we
+// downshift it to the underlying's native decimals by dividing by
+// 10^(18 - underlyingDecimals).
+interface FeeAdapterMeta {
+  symbol: string
+  underlyingContract: string
+  underlyingDecimals: number
+}
+
+const FEE_ADAPTER_REGISTRY: Record<string, FeeAdapterMeta> = {
+  '0x2f25deb3848c207fc8e0c34035b3ba7fc157602b': {
+    symbol: 'USDC',
+    underlyingContract: '0xceba9300f2b948710d2653dd7b07f33a8b32118c',
+    underlyingDecimals: 6,
+  },
+  '0x0e2a3e05bc9a16f5292a6170456a710cb89c6f72': {
+    symbol: 'USDT',
+    underlyingContract: '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e',
+    underlyingDecimals: 6,
+  },
+}
+
 function contractFromTokenId(tokenId: string): string | null {
   const idx = tokenId.indexOf(':')
   if (idx < 0) return null
@@ -101,6 +127,50 @@ export function decimalizeValueForClassifier(
   const decimals = decimalsForTokenId(tokenId)
   if (decimals === null) return rawWei.toString()
   return weiToDecimal(rawWei.toString(), decimals, { padded: true })
+}
+
+// Resolve a CIP-64 fee currency address to the { tokenId, decimals, rawWei }
+// triple the classifier emits on `fees[].amount`. Handles three cases:
+//
+//  1. `feeCurrency == null` -> native CELO fee. Uses the CELO ERC20 contract
+//     id and the raw wei from the receipt as-is.
+//  2. `feeCurrency` is a Mento native fee token (USDm / COPm / EURm / BRLm)
+//     -> use it directly. Value is already in the token's decimals.
+//  3. `feeCurrency` is an adapter (USDC / USDT) -> surface the underlying
+//     token id + underlying decimals so the wallet renders "you paid X USDC
+//     in gas". The receipt reports fee in 18-decimal-normalised adapter
+//     units; downshift by dividing by 10^(18 - underlyingDecimals) so the
+//     value stays in the underlying's native decimal scale.
+export function resolveFeeCurrency(
+  feeCurrency: string | null,
+  rawFeeWei: bigint,
+  networkPrefix: string,
+): { tokenId: string; decimals: number; rawWei: bigint } {
+  if (!feeCurrency) {
+    return {
+      tokenId: `${networkPrefix}:0x471ece3750da237f93b8e339c536989b8978a438`,
+      decimals: 18,
+      rawWei: rawFeeWei,
+    }
+  }
+  const lower = feeCurrency.toLowerCase()
+  const adapter = FEE_ADAPTER_REGISTRY[lower]
+  if (adapter) {
+    const shift = 18n - BigInt(adapter.underlyingDecimals)
+    const divisor = 10n ** shift
+    const rawInUnderlyingUnits = rawFeeWei / divisor
+    return {
+      tokenId: `${networkPrefix}:${adapter.underlyingContract}`,
+      decimals: adapter.underlyingDecimals,
+      rawWei: rawInUnderlyingUnits,
+    }
+  }
+  const meta = TOKEN_REGISTRY[lower]
+  return {
+    tokenId: `${networkPrefix}:${lower}`,
+    decimals: meta ? meta.decimals : 18,
+    rawWei: rawFeeWei,
+  }
 }
 
 export function buildLocalAmount(

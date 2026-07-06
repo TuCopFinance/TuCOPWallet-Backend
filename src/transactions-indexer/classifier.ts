@@ -1,4 +1,9 @@
-import { decimalizeValueForClassifier, decimalsForTokenId } from './priceOracle'
+import {
+  decimalizeValueForClassifier,
+  decimalsForTokenId,
+  resolveFeeCurrency,
+  weiToDecimal,
+} from './priceOracle'
 import type {
   ApprovalTransaction,
   ClassifierLog,
@@ -89,10 +94,18 @@ function calldataWords(input: string): string[] {
 function buildFee(tx: ClassifierTx, networkId: NetworkId): TokenAmount[] {
   if (tx.gasUsed == null || tx.effectiveGasPrice == null) return []
   const feeRawWei = tx.gasUsed * tx.effectiveGasPrice
-  const tokenId = tx.feeCurrency
-    ? tokenIdForContract(networkId, tx.feeCurrency)
-    : NATIVE_TOKEN_ID
-  return [makeAmount(tokenId, feeRawWei)]
+  // resolveFeeCurrency: handles CIP-64 semantics -> when tx.feeCurrency
+  // points at an adapter (USDC / USDT), returns the underlying token id +
+  // downshifted rawWei so the wallet renders "N USDC" instead of the
+  // adapter address. See priceOracle.ts for the full explanation.
+  const resolved = resolveFeeCurrency(tx.feeCurrency, feeRawWei, networkId)
+  return [
+    {
+      tokenId: resolved.tokenId,
+      value: weiToDecimal(resolved.rawWei.toString(), resolved.decimals, { padded: true }),
+      decimals: resolved.decimals,
+    },
+  ]
 }
 
 function baseFields(tx: ClassifierTx, userAddress: string) {
@@ -182,6 +195,81 @@ function stripRoundTripTokens(
   }
 }
 
+// Bug fix 2026-07-06 (see JOURNAL): the previous classifier summed every
+// Transfer log where the user was `from` into `outAmount` (and every
+// Transfer where the user was `to` into `inAmount`). That "net actual
+// outbound" convention emits the sum of the swap leg + burns + fees +
+// mirror-mint refunds, and diverged from Valora's "swap intent" number by
+// the total of the non-swap movements. Wallet team went with option B
+// (Valora-shape, swap-leg only) so users comparing feed screenshots
+// against their Valora history see the same amounts.
+//
+// A movement is a "swap leg" iff the counterparty (the `to` for outbound,
+// the `from` for inbound) has an opposite-direction movement with the user
+// in a DIFFERENT token contract. That excludes:
+//
+//   - Fee sink outbound: no matching inbound from the fee sink.
+//   - Aggregator fee outbound: no matching inbound.
+//   - Mirror burn+mint refund: outbound to 0x0 pairs with an inbound from
+//     0x0, but they're the SAME token so it's not a swap leg.
+//
+// Falls back to the unfiltered sets when the filter would empty either
+// side, so pathological txs (e.g. transfers detected by aggregator swap's
+// counterparty-intersect heuristic that don't literally have paired
+// swaps) still classify rather than silently drop.
+function filterToSwapLegs(
+  outbound: TransferMovement[],
+  inbound: TransferMovement[],
+): { swapOutbound: TransferMovement[]; swapInbound: TransferMovement[] } {
+  const outboundTokensAtCounterparty = new Map<string, Set<string>>()
+  for (const m of outbound) {
+    let set = outboundTokensAtCounterparty.get(m.to)
+    if (!set) {
+      set = new Set()
+      outboundTokensAtCounterparty.set(m.to, set)
+    }
+    set.add(m.contract)
+  }
+  const inboundTokensAtCounterparty = new Map<string, Set<string>>()
+  for (const m of inbound) {
+    let set = inboundTokensAtCounterparty.get(m.from)
+    if (!set) {
+      set = new Set()
+      inboundTokensAtCounterparty.set(m.from, set)
+    }
+    set.add(m.contract)
+  }
+
+  const swapOutbound: TransferMovement[] = []
+  for (const m of outbound) {
+    const inboundTokens = inboundTokensAtCounterparty.get(m.to)
+    if (!inboundTokens) continue
+    for (const t of inboundTokens) {
+      if (t !== m.contract) {
+        swapOutbound.push(m)
+        break
+      }
+    }
+  }
+
+  const swapInbound: TransferMovement[] = []
+  for (const m of inbound) {
+    const outboundTokens = outboundTokensAtCounterparty.get(m.from)
+    if (!outboundTokens) continue
+    for (const t of outboundTokens) {
+      if (t !== m.contract) {
+        swapInbound.push(m)
+        break
+      }
+    }
+  }
+
+  return {
+    swapOutbound: swapOutbound.length > 0 ? swapOutbound : outbound,
+    swapInbound: swapInbound.length > 0 ? swapInbound : inbound,
+  }
+}
+
 function classify7702Atomic(
   tx: ClassifierTx,
   logs: ClassifierLog[],
@@ -193,18 +281,17 @@ function classify7702Atomic(
   if (!isExecuteSelector(tx.input)) return null
 
   const transfers = decodeTransferLogs(logs)
-  // "Sold" tokens = user is the from of the Transfer.
-  // "Received" tokens = user is the to of the Transfer.
-  const sold = transfers.filter((m) => m.from === userLower)
-  const received = transfers.filter((m) => m.to === userLower)
-  if (sold.length === 0 && received.length === 0) return null
+  const rawSold = transfers.filter((m) => m.from === userLower)
+  const rawReceived = transfers.filter((m) => m.to === userLower)
+  if (rawSold.length === 0 && rawReceived.length === 0) return null
 
-  const soldByToken = aggregateByToken(sold)
-  const receivedByToken = aggregateByToken(received)
+  // Option B (swap-leg-only) per wallet team decision 2026-07-06. Fees,
+  // burns, and mirror mint refunds are excluded from both inAmount /
+  // outAmount and from fromTokenAmounts[].
+  const { swapOutbound, swapInbound } = filterToSwapLegs(rawSold, rawReceived)
+  const soldByToken = aggregateByToken(swapOutbound)
+  const receivedByToken = aggregateByToken(swapInbound)
 
-  // `fromTokenAmounts` still lists EVERY sold token so a multi-leg 7702
-  // batch renders faithfully. Only the pickHighest picks are filtered to
-  // exclude round-trip tokens.
   const fromTokenAmounts: TokenAmount[] = []
   for (const [contract, value] of soldByToken) {
     fromTokenAmounts.push(makeAmount(tokenIdForContract(tx.networkId, contract), value))
@@ -256,8 +343,10 @@ function classifyAggregatorSwap(
   const intersect = [...outboundCounterparties].filter((a) => inboundCounterparties.has(a))
   if (intersect.length === 0) return null
 
-  const outboundSum = aggregateByToken(outbound)
-  const inboundSum = aggregateByToken(inbound)
+  // Option B: swap-leg-only filter (same rationale as classify7702Atomic).
+  const { swapOutbound, swapInbound } = filterToSwapLegs(outbound, inbound)
+  const outboundSum = aggregateByToken(swapOutbound)
+  const inboundSum = aggregateByToken(swapInbound)
 
   // Require the in and out tokens to be different; otherwise this is just a
   // self round-trip and not a swap.

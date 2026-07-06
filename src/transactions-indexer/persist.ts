@@ -16,6 +16,10 @@ export interface PersistTxInput {
     transactionIndex: number | null
     value: bigint
     input: string
+    // CIP-64 fee currency address (may be a Mento stable directly OR an
+    // adapter contract like the USDC / USDT ones). Persisted verbatim; the
+    // classifier does the adapter -> underlying translation on emit.
+    feeCurrency?: string | null
   }
   blockNumber: bigint
   blockTimestampMs: number
@@ -70,7 +74,13 @@ export async function persistTx(
       p.receipt.status,
       p.receipt.gasUsed.toString(),
       p.receipt.effectiveGasPrice ? p.receipt.effectiveGasPrice.toString() : null,
-      null,
+      // fee_currency: for CIP-64 txs viem's Celo formatter fills tx.feeCurrency
+      // with the fee-token / adapter address; for native-CELO-fee txs it's
+      // undefined or the zero address. Normalise both to null so buildFee
+      // falls back to the CELO tokenId without an extra check.
+      p.tx.feeCurrency && p.tx.feeCurrency !== '0x0000000000000000000000000000000000000000'
+        ? p.tx.feeCurrency.toLowerCase()
+        : null,
       p.tx.input,
     ],
   )

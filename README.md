@@ -364,14 +364,15 @@ Backend-owned replacement for Valora's `getWalletTransactions`. Indexes Celo blo
 
 The forward worker is NOT disabled by these switches; it keeps advancing `indexer_state` so a re-flip lands on a fresh cursor. To pause the worker itself, unset `INDEXER_ENABLED` (requires a Railway restart).
 
-**Response shape (`TokenTransaction`) - important post-2026-07-05:**
+**Response shape (`TokenTransaction`) - important post-2026-07-06:**
 
-- `TokenAmount.value` is a **decimalised human-readable string** (e.g. `"3500.000000000000000000"`), NOT raw wei. The wallet consumes it via `new BigNumber(value)` without dividing by `10^decimals`. Pre-fix the classifier emitted raw wei here and the wallet rendered the raw integer as the displayed amount.
+- `TokenAmount.value` is a **decimalised human-readable string** (e.g. `"3500.000000000000000000"`), NOT raw wei. The wallet consumes it via `new BigNumber(value)` without dividing by `10^decimals`.
 - `TokenAmount.decimals` is the number of decimals used to scale `value`. `null` when the token is outside the canonical CIP-64 / Mento registry - in that case `value` is the raw wei fallback so no precision is silently lost.
 - `TokenAmount.timestamp` mirrors the parent tx's top-level timestamp (ms). Populated for every amount to match Valora's shape.
 - `TokenAmount.localAmount` is always populated - either the peg-matched conversion or explicit `null` when the token has no peg or the requested `localCurrencyCode` does not match the peg.
-- `TokenTransaction.status` is `"Complete"` for successful txs and `"Failed"` for reverted txs. Reverted txs used to be omitted entirely; from 2026-07-05 they surface with `status: "Failed"` so the wallet timeline can show attempted actions.
-- Swap classifier uses an **outbound-minus-inbound heuristic** to pick primary legs: tokens that appear on both sides of the tx (round-trip / mirror mint+burn refunds / fees paid in the received token) are stripped from both aggregates before `pickHighest`. This closes the "same tokenId on inAmount and outAmount" bug for Mento fee-adapter tx patterns (e.g. tx `0xb5d1cb4aef7821c7359c16937c290d091f8b5d43760afdf891985137ef418781`).
+- `TokenTransaction.status` is `"Complete"` for successful txs and `"Failed"` for reverted txs. Reverted txs surface with `status: "Failed"` so the wallet timeline can show attempted actions.
+- **Swap classifier: "swap intent" (Valora-compatible) convention.** `inAmount` / `outAmount` / `fromTokenAmounts[]` include only the swap-leg movements (user -> counterparty and counterparty -> user in DIFFERENT tokens). Fee sink outbounds, mirror mint+burn refunds, and aggregator fees are excluded from these fields and appear only in `fees[]`. Aligns byte-exact with the numbers users have seen in Valora historically. See `filterToSwapLegs` in `src/transactions-indexer/classifier.ts` for the exact rule.
+- **`fees[].amount` respects `tx.feeCurrency` (CIP-64).** For Mento native fee currencies (USDm / COPm / EURm / BRLm) the fee row is emitted with the token address directly. For adapter-only fee currencies (USDC / USDT via their Mento adapter contracts) the fee row is surfaced as the underlying token with underlying decimals (6 for USDC / USDT), downshifted from the adapter's 18-decimal-normalised units so `BigNumber(value)` yields the user-visible amount. Native-CELO-fee txs fall back to the CELO ERC20 contract id with 18 decimals.
 
 #### `POST /api/transactions/watch`
 

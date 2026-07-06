@@ -50,7 +50,13 @@ const HEALTH_RPC_TIMEOUT_MS = 1_500
 // timestamp / localAmount:null were added, BaseTransaction gained the
 // `status` field, and the swap classifier uses the outbound-minus-inbound
 // heuristic to pick primary legs. All v1 cache rows must be invalidated.
-const CACHE_SCHEMA_VERSION = 2
+//
+// v3 (2026-07-06): bug 4 + option B. fees[].amount.tokenId is now the real
+// fee currency (CIP-64) with adapter -> underlying mapping for USDC / USDT,
+// and outAmount / inAmount / fromTokenAmounts[] are swap-leg-only
+// (Valora-compatible "swap intent" convention). Cache invalidated again so
+// the previous v2 payloads (net-actual convention) are replaced.
+const CACHE_SCHEMA_VERSION = 3
 
 interface CachedPayload {
   schemaVersion: number

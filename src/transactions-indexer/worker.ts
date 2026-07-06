@@ -41,6 +41,11 @@ export interface IndexerRpcClient {
       transactionIndex: number | null
       value: bigint
       input: string
+      // Populated by viem's Celo chain formatter for CIP-64 txs (type 0x7b);
+      // undefined / '0x' for native-CELO-fee txs. Persisted so the classifier
+      // can emit the correct fees[].amount.tokenId (adapter -> underlying
+      // mapping happens at classify time).
+      feeCurrency?: string | null
     }>
   }>
   getTransactionReceipt(args: { hash: Hash }): Promise<{
