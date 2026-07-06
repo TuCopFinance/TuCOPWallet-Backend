@@ -25,6 +25,7 @@ import { runMigrations } from './db/migrate'
 import { getDb } from './lib/db'
 import { startNeeruIndexer } from './neeru-indexer/worker'
 import { startTimelockIndexer } from './neeru-timelock/worker'
+import { resumePendingBackfills } from './transactions-indexer/backfill'
 import { startIndexer } from './transactions-indexer/worker'
 
 const PORT = Number(process.env.PORT) || 8080
@@ -109,6 +110,18 @@ async function boot(): Promise<void> {
     startIndexer({ signal: indexerAbort.signal }).catch((err) => {
       log.error(`indexer crashed: ${err instanceof Error ? err.message : String(err)}`)
     })
+    // Boot-time resume for backfills that were interrupted by the previous
+    // process (redeploy, crash, OOM, etc.). Idempotent - the resume path
+    // dedupes via the in-process Set and reads current cursor from DB so
+    // work already persisted is not repeated.
+    const db = getDb()
+    if (db) {
+      resumePendingBackfills(db).catch((err) => {
+        log.error(
+          `resumePendingBackfills failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      })
+    }
   }
 
   if (process.env.NEERU_INDEXER_ENABLED === 'true') {

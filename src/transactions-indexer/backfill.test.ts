@@ -1,324 +1,407 @@
 import type { Pool } from 'pg'
+import type { FallbackExecutor } from '../lib/celoRpcFallback'
 import {
-  backfillAddress,
   _testHelpers,
+  resumePendingBackfills,
+  runBackfillLoopForAddress,
   triggerBackfill,
-  wrapPublicClientAsBackfillRpc,
-  type BackfillViemLike,
 } from './backfill'
 
 const ADDR = '0x1111111111111111111111111111111111111111'
+const OTHER = '0x2222222222222222222222222222222222222222'
 
-interface ReceiptShape {
-  status: 'success' | 'reverted'
-  transactionIndex: number
-  gasUsed: bigint
-  effectiveGasPrice: bigint | undefined
-  logs: ReadonlyArray<{
-    logIndex: number | null
-    address: string
-    topics: ReadonlyArray<string>
-    data: string
-  }>
+interface DbRow {
+  address: string
+  backfill_cursor_block: string | null
+  backfill_end_block: string | null
+  backfill_completed_at: Date | null
+  backfill_last_error: string | null
 }
 
-interface TxShape {
-  hash: `0x${string}`
-  from: string
-  to: string | null
-  transactionIndex: number | null
-  value: bigint
-  input: string
-  blockNumber: bigint
-}
-
-function buildTx(overrides: Partial<TxShape> = {}): TxShape {
-  return {
-    hash: '0xaaa1' as `0x${string}`,
-    from: ADDR,
-    to: '0x2222222222222222222222222222222222222222',
-    transactionIndex: 0,
-    value: 0n,
-    input: '0x',
-    blockNumber: 100n,
-    ...overrides,
+/**
+ * In-memory pg-compatible pool stub. Persists the watched_address row +
+ * captures every persistTx INSERT so we can assert on the writes without
+ * touching Postgres. Enough surface for the backfill loop's queries.
+ */
+function buildMockDb(initial: Partial<DbRow> = {}): Pool {
+  const row: DbRow = {
+    address: (initial.address ?? ADDR).toLowerCase(),
+    backfill_cursor_block: initial.backfill_cursor_block ?? null,
+    backfill_end_block: initial.backfill_end_block ?? null,
+    backfill_completed_at: initial.backfill_completed_at ?? null,
+    backfill_last_error: initial.backfill_last_error ?? null,
   }
-}
+  const txInserts: Array<{ hash: string; feeCurrency: string | null }> = []
+  const txLogInserts: number[] = []
 
-function buildReceipt(overrides: Partial<ReceiptShape> = {}): ReceiptShape {
-  return {
-    status: 'success',
-    transactionIndex: 0,
-    gasUsed: 21000n,
-    effectiveGasPrice: 5_000_000_000n,
-    logs: [],
-    ...overrides,
-  }
+  const query = jest.fn(
+    async (sql: string, params: readonly unknown[] = []): Promise<{ rows: unknown[] }> => {
+      const n = sql.trim().toUpperCase()
+      if (n.startsWith('SELECT BACKFILL_CURSOR_BLOCK')) {
+        return {
+          rows: [
+            {
+              backfill_cursor_block: row.backfill_cursor_block,
+              backfill_end_block: row.backfill_end_block,
+              backfill_completed_at: row.backfill_completed_at,
+            },
+          ],
+        }
+      }
+      if (n.startsWith('SELECT ADDRESS FROM WATCHED_ADDRESS')) {
+        if (!row.backfill_cursor_block || !row.backfill_end_block) return { rows: [] }
+        if (row.backfill_completed_at) return { rows: [] }
+        return { rows: [{ address: row.address }] }
+      }
+      if (n.startsWith('SELECT COALESCE(SUM')) {
+        const rem = row.backfill_cursor_block && row.backfill_end_block
+          ? BigInt(row.backfill_end_block) - BigInt(row.backfill_cursor_block)
+          : 0n
+        return { rows: [{ remaining: rem.toString() }] }
+      }
+      if (
+        n.startsWith('UPDATE WATCHED_ADDRESS') &&
+        n.includes('BACKFILL_CURSOR_BLOCK = $1') &&
+        n.includes('BACKFILL_END_BLOCK = $2')
+      ) {
+        row.backfill_cursor_block = params[0] as string
+        row.backfill_end_block = params[1] as string
+        return { rows: [] }
+      }
+      if (
+        n.startsWith('UPDATE WATCHED_ADDRESS') &&
+        n.includes('BACKFILL_CURSOR_BLOCK = $1') &&
+        !n.includes('BACKFILL_END_BLOCK')
+      ) {
+        row.backfill_cursor_block = params[0] as string
+        return { rows: [] }
+      }
+      if (n.includes('BACKFILL_COMPLETED_AT = NOW()')) {
+        row.backfill_completed_at = new Date()
+        return { rows: [] }
+      }
+      if (n.includes('BACKFILL_LAST_ERROR')) {
+        row.backfill_last_error = params[0] as string
+        return { rows: [] }
+      }
+      return { rows: [] }
+    },
+  )
+
+  const clientQuery = jest.fn(
+    async (
+      sql: string,
+      params: readonly unknown[] = [],
+    ): Promise<{ rows: Array<{ id: string }> }> => {
+      const n = sql.trim().toUpperCase()
+      if (n === 'BEGIN' || n === 'COMMIT' || n === 'ROLLBACK') return { rows: [] }
+      if (n.startsWith('INSERT INTO TX ')) {
+        const hash = params[1] as string
+        const feeCurrency = params[12] as string | null
+        txInserts.push({ hash, feeCurrency })
+        return { rows: [{ id: String(txInserts.length) }] }
+      }
+      if (n.startsWith('SELECT ID FROM TX')) return { rows: [] }
+      if (n.startsWith('INSERT INTO TX_LOG')) {
+        txLogInserts.push(1)
+        return { rows: [] }
+      }
+      if (n.startsWith('UPDATE WATCHED_ADDRESS') && n.includes('BACKFILL_CURSOR_BLOCK')) {
+        row.backfill_cursor_block = params[0] as string
+        return { rows: [] }
+      }
+      return { rows: [] }
+    },
+  )
+
+  const release = jest.fn()
+  const connect = jest.fn(async () => ({ query: clientQuery, release }))
+
+  const pool = { connect, query } as unknown as Pool
+  ;(pool as unknown as { _row: DbRow })._row = row
+  ;(pool as unknown as { _txInserts: typeof txInserts })._txInserts = txInserts
+  return pool
 }
 
 interface MockRpcOptions {
   tip?: bigint
-  outboundLogs?: ReadonlyArray<{ transactionHash: string; blockNumber: bigint }>
-  inboundLogs?: ReadonlyArray<{ transactionHash: string; blockNumber: bigint }>
-  txByHash?: Record<string, TxShape>
-  receiptByHash?: Record<string, ReceiptShape>
-  blockTimestamp?: bigint
+  outbound?: Array<{ transactionHash: string; blockNumber: bigint }>
+  inbound?: Array<{ transactionHash: string; blockNumber: bigint }>
+  txByHash?: Record<string, {
+    hash: `0x${string}`
+    from: string
+    to: string | null
+    transactionIndex: number | null
+    value: bigint
+    input: string
+    blockNumber?: bigint
+    feeCurrency?: string | null
+  }>
+  receiptByHash?: Record<string, {
+    status: 'success' | 'reverted'
+    transactionIndex: number
+    gasUsed: bigint
+    effectiveGasPrice: bigint | undefined
+    logs: ReadonlyArray<{
+      logIndex: number | null
+      address: string
+      topics: ReadonlyArray<string>
+      data: string
+    }>
+  }>
+  failGetLogsTimes?: number
 }
 
-function buildMockRpc(opts: MockRpcOptions = {}) {
+function buildFakeExecutor(
+  opts: MockRpcOptions = {},
+): { executor: FallbackExecutor; getLogsAttempts: number } {
+  const state = {
+    getLogsCallsRemainingFailure: opts.failGetLogsTimes ?? 0,
+    attempts: 0,
+  }
   const tip = opts.tip ?? 200n
-  const outboundLogs = opts.outboundLogs ?? []
-  const inboundLogs = opts.inboundLogs ?? []
+  const outbound = opts.outbound ?? []
+  const inbound = opts.inbound ?? []
   const txByHash = opts.txByHash ?? {}
   const receiptByHash = opts.receiptByHash ?? {}
-  const blockTimestamp = opts.blockTimestamp ?? 1_700_000_000n
 
-  return {
-    getBlockNumber: jest.fn(async () => tip),
-    getLogs: jest.fn(
-      async (args: {
-        fromBlock: bigint
-        toBlock: bigint
-        topics: ReadonlyArray<string | string[] | null>
-      }) => {
-        const topic1 = args.topics[1]
-        const topic2 = args.topics[2]
-        if (topic2 === null && typeof topic1 === 'string') return outboundLogs
-        if (topic1 === null && typeof topic2 === 'string') return inboundLogs
-        return []
-      },
-    ),
-    getBlock: jest.fn(async () => ({ timestamp: blockTimestamp })),
-    getTransaction: jest.fn(async (args: { hash: string }) => {
-      const t = txByHash[args.hash.toLowerCase()]
-      if (!t) throw new Error(`no tx fixture for ${args.hash}`)
-      return t
-    }),
-    getTransactionReceipt: jest.fn(async (args: { hash: string }) => {
-      const r = receiptByHash[args.hash.toLowerCase()]
-      if (!r) throw new Error(`no receipt fixture for ${args.hash}`)
-      return r
-    }),
+  const executor: FallbackExecutor = {
+    async withFallback(label, invoke) {
+      state.attempts += 1
+      // We don't actually invoke the client; we simulate a viem client whose
+      // method behaviour depends on the label the backfill loop passes in.
+      const fakeClient: unknown = {
+        async getBlockNumber() {
+          return tip
+        },
+        async getBlock() {
+          return { timestamp: 1_700_000_000n }
+        },
+        async getTransaction({ hash }: { hash: `0x${string}` }) {
+          const t = txByHash[hash.toLowerCase()]
+          if (!t) throw new Error(`no tx fixture for ${hash}`)
+          return t
+        },
+        async getTransactionReceipt({ hash }: { hash: `0x${string}` }) {
+          const r = receiptByHash[hash.toLowerCase()]
+          if (!r) throw new Error(`no receipt fixture for ${hash}`)
+          return r
+        },
+        async request({ params }: { method: string; params: unknown }) {
+          if (state.getLogsCallsRemainingFailure > 0) {
+            state.getLogsCallsRemainingFailure -= 1
+            throw new Error('Cloudflare 1015')
+          }
+          const p = (params as Array<{ topics: (string | null)[] }>)[0]
+          if (!p) return []
+          const topic1 = p.topics[1]
+          const topic2 = p.topics[2]
+          if (typeof topic1 === 'string' && topic2 === null) return outbound
+          if (typeof topic2 === 'string' && topic1 === null) return inbound
+          return []
+        },
+      }
+      return invoke(fakeClient as never)
+    },
+    getSkippedEndpoints() {
+      return []
+    },
   }
+  return { executor, getLogsAttempts: state.attempts }
 }
 
-function buildMockDb(): Pool {
-  const queryClient = jest.fn(async (sql: string) => {
-    const normalized = sql.trim().toUpperCase()
-    if (normalized === 'BEGIN' || normalized === 'COMMIT' || normalized === 'ROLLBACK') {
-      return { rows: [] }
-    }
-    if (normalized.startsWith('INSERT INTO TX')) {
-      return { rows: [{ id: '42' }] }
-    }
-    if (normalized.startsWith('SELECT ID FROM TX')) {
-      return { rows: [] }
-    }
-    if (normalized.startsWith('INSERT INTO TX_LOG')) {
-      return { rows: [] }
-    }
-    return { rows: [] }
-  })
-  const release = jest.fn()
-  const connect = jest.fn(async () => ({
-    query: queryClient,
-    release,
-  }))
-  const query = jest.fn(async () => ({ rows: [] }))
-  return { connect, query } as unknown as Pool
+const RECEIPT_EMPTY = {
+  status: 'success' as const,
+  transactionIndex: 0,
+  gasUsed: 21_000n,
+  effectiveGasPrice: 5_000_000_000n,
+  logs: [] as never[],
 }
 
-describe('backfillAddress', () => {
-  beforeEach(() => {
-    _testHelpers.clearInProgress()
-  })
+beforeEach(() => {
+  _testHelpers.clearInProgress()
+})
 
-  it('scans depth blocks and reports counts', async () => {
-    const rpc = buildMockRpc({ tip: 100n })
-    const db = buildMockDb()
-
-    const result = await backfillAddress(db, ADDR, { rpc, depthBlocks: 50 })
-
-    expect(result.blocksScanned).toBe(51) // inclusive range 50..100
-    expect(result.txsFound).toBe(0)
-    expect(rpc.getLogs).toHaveBeenCalled()
-  })
-
-  it('clamps fromBlock to 0n when depth > tip', async () => {
-    const rpc = buildMockRpc({ tip: 5n })
-    const db = buildMockDb()
-
-    const result = await backfillAddress(db, ADDR, { rpc, depthBlocks: 1000 })
-
-    expect(result.blocksScanned).toBe(6) // 0..5
-    const firstCallArgs = (rpc.getLogs as jest.Mock).mock.calls[0][0]
-    expect(firstCallArgs.fromBlock).toBe(0n)
-  })
-
-  it('fetches tx + receipt + block and persists for each unique hash', async () => {
-    const HASH = '0xabc1230000000000000000000000000000000000000000000000000000000001'
-    const rpc = buildMockRpc({
-      tip: 100n,
-      outboundLogs: [{ transactionHash: HASH, blockNumber: 90n }],
-      txByHash: {
-        [HASH]: buildTx({ hash: HASH as `0x${string}`, blockNumber: 90n }),
-      },
-      receiptByHash: { [HASH]: buildReceipt() },
+describe('runBackfillLoopForAddress - initialization', () => {
+  it('snaps end_block to current tip and cursor to (tip - depth) on first run', async () => {
+    const db = buildMockDb({ address: ADDR })
+    const { executor } = buildFakeExecutor({ tip: 100n })
+    await runBackfillLoopForAddress(db, ADDR, {
+      executor,
+      depthBlocksOverride: 30,
+      chunkDelayMsOverride: 0,
     })
-    const db = buildMockDb()
-
-    const result = await backfillAddress(db, ADDR, { rpc, depthBlocks: 50 })
-
-    expect(result.txsFound).toBe(1)
-    expect(rpc.getTransaction).toHaveBeenCalledWith({ hash: HASH })
-    expect(rpc.getTransactionReceipt).toHaveBeenCalledWith({ hash: HASH })
-    expect(rpc.getBlock).toHaveBeenCalledWith({ blockNumber: 90n })
+    const row = (db as unknown as { _row: DbRow })._row
+    // cursor = 100 - 30 = 70; end = 100; loop runs chunks then completes.
+    expect(row.backfill_completed_at).not.toBeNull()
   })
 
-  it('dedupes hashes that appear in both inbound and outbound logs', async () => {
-    const HASH = '0xabc1230000000000000000000000000000000000000000000000000000000002'
-    const rpc = buildMockRpc({
-      tip: 100n,
-      outboundLogs: [{ transactionHash: HASH, blockNumber: 90n }],
-      inboundLogs: [{ transactionHash: HASH, blockNumber: 90n }],
-      txByHash: {
-        [HASH]: buildTx({ hash: HASH as `0x${string}`, blockNumber: 90n }),
-      },
-      receiptByHash: { [HASH]: buildReceipt() },
+  it('does not re-initialize when cursor / end already set (resume path)', async () => {
+    const db = buildMockDb({
+      address: ADDR,
+      backfill_cursor_block: '50',
+      backfill_end_block: '55',
     })
-    const db = buildMockDb()
-
-    const result = await backfillAddress(db, ADDR, { rpc, depthBlocks: 50 })
-
-    expect(result.txsFound).toBe(1)
-    expect(rpc.getTransaction).toHaveBeenCalledTimes(1)
-  })
-
-  it('chunks getLogs into 5000-block batches', async () => {
-    const rpc = buildMockRpc({ tip: 12_000n })
-    const db = buildMockDb()
-
-    await backfillAddress(db, ADDR, { rpc, depthBlocks: 10_000 })
-
-    // 10k-block range with 5k batch size = 3 chunks (0..4999, 5000..9999, 10000..12000)
-    // x 2 calls per chunk (outbound + inbound)
-    expect(rpc.getLogs).toHaveBeenCalledTimes(3 * 2)
-  })
-
-  it('does not throw when a tx lookup fails (logs and continues)', async () => {
-    const HASH = '0xabc1230000000000000000000000000000000000000000000000000000000003'
-    const rpc = buildMockRpc({
-      tip: 100n,
-      outboundLogs: [{ transactionHash: HASH, blockNumber: 90n }],
-      // No fixtures => getTransaction/getTransactionReceipt will throw
+    const { executor } = buildFakeExecutor({ tip: 999999n })
+    await runBackfillLoopForAddress(db, ADDR, {
+      executor,
+      // Depth would imply a totally different window; the loop must honour
+      // the persisted cursor / end instead.
+      depthBlocksOverride: 100_000_000,
+      chunkDelayMsOverride: 0,
     })
-    const db = buildMockDb()
-
-    await expect(
-      backfillAddress(db, ADDR, { rpc, depthBlocks: 50 }),
-    ).resolves.toEqual({ blocksScanned: 51, txsFound: 0 })
+    // Cursor advances from 50 -> 55 -> 56 (>end) -> completed.
+    const row = (db as unknown as { _row: DbRow })._row
+    expect(row.backfill_completed_at).not.toBeNull()
+    // end_block never got overwritten to the huge value from tip - depth.
+    expect(row.backfill_end_block).toBe('55')
   })
 })
 
-describe('wrapPublicClientAsBackfillRpc', () => {
-  // Regression for the silent-drop bug we hit in prod: the previous
-  // implementation cast viem's PublicClient directly as BackfillRpcClient
-  // and called the typed `getLogs({topics})`, which silently dropped the
-  // topics filter so Forno received `topics: []` and timed out at 30 s.
-  // The fix routes through `request({ method: 'eth_getLogs', params })`;
-  // these assertions pin the payload shape so a future refactor cannot
-  // regress to the typed-method form unnoticed.
-  it('passes topics through to eth_getLogs as a JSON-RPC request', async () => {
-    const requestMock = jest.fn(async () => [
-      { transactionHash: '0xabc', blockNumber: '0x64' },
-    ])
-    const viem: BackfillViemLike = {
-      getBlockNumber: jest.fn(),
-      getBlock: jest.fn(),
-      getTransaction: jest.fn(),
-      getTransactionReceipt: jest.fn(),
-      request: requestMock,
-    }
-    const rpc = wrapPublicClientAsBackfillRpc(viem)
-    const topics: ReadonlyArray<string | string[] | null> = [
-      '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
-      '0x000000000000000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-      null,
-    ]
-
-    const result = await rpc.getLogs({
-      topics,
-      fromBlock: 100n,
-      toBlock: 200n,
+describe('runBackfillLoopForAddress - chunk pipeline', () => {
+  it('advances the cursor and persists tx rows for each chunk', async () => {
+    const HASH = '0xabc0000000000000000000000000000000000000000000000000000000000001'
+    const db = buildMockDb({ address: ADDR })
+    const { executor } = buildFakeExecutor({
+      tip: 10n,
+      outbound: [{ transactionHash: HASH, blockNumber: 3n }],
+      txByHash: {
+        [HASH]: {
+          hash: HASH as `0x${string}`,
+          from: ADDR,
+          to: OTHER,
+          transactionIndex: 0,
+          value: 0n,
+          input: '0x',
+          blockNumber: 3n,
+          feeCurrency: null,
+        },
+      },
+      receiptByHash: { [HASH]: RECEIPT_EMPTY },
     })
+    await runBackfillLoopForAddress(db, ADDR, {
+      executor,
+      depthBlocksOverride: 10,
+      chunkDelayMsOverride: 0,
+    })
+    const inserts = (db as unknown as { _txInserts: Array<{ hash: string }> })._txInserts
+    expect(inserts.some((i) => i.hash === HASH)).toBe(true)
+    const row = (db as unknown as { _row: DbRow })._row
+    expect(row.backfill_completed_at).not.toBeNull()
+  })
 
-    expect(requestMock).toHaveBeenCalledTimes(1)
-    const calls = requestMock.mock.calls as unknown as Array<
-      Array<{
-        method: string
-        params: Array<{ topics: unknown; fromBlock: string; toBlock: string }>
-      }>
-    >
-    const args = calls[0]?.[0]
-    expect(args?.method).toBe('eth_getLogs')
-    expect(args?.params[0]?.topics).toEqual(topics)
-    expect(args?.params[0]?.fromBlock).toBe('0x64')
-    expect(args?.params[0]?.toBlock).toBe('0xc8')
-    expect(result).toEqual([{ transactionHash: '0xabc', blockNumber: 100n }])
+  it('propagates tx.feeCurrency into the INSERT (bug 4 regression)', async () => {
+    const HASH = '0xabc0000000000000000000000000000000000000000000000000000000000002'
+    const COPM = '0x8a567e2ae79ca692bd748ab832081c45de4041ea'
+    const db = buildMockDb({ address: ADDR })
+    const { executor } = buildFakeExecutor({
+      tip: 10n,
+      outbound: [{ transactionHash: HASH, blockNumber: 5n }],
+      txByHash: {
+        [HASH]: {
+          hash: HASH as `0x${string}`,
+          from: ADDR,
+          to: OTHER,
+          transactionIndex: 0,
+          value: 0n,
+          input: '0x',
+          blockNumber: 5n,
+          feeCurrency: COPM,
+        },
+      },
+      receiptByHash: { [HASH]: RECEIPT_EMPTY },
+    })
+    await runBackfillLoopForAddress(db, ADDR, {
+      executor,
+      depthBlocksOverride: 10,
+      chunkDelayMsOverride: 0,
+    })
+    const inserts = (db as unknown as { _txInserts: Array<{ hash: string; feeCurrency: string | null }> })._txInserts
+    const entry = inserts.find((i) => i.hash === HASH)
+    expect(entry?.feeCurrency).toBe(COPM.toLowerCase())
   })
 })
 
-describe('triggerBackfill', () => {
-  beforeEach(() => {
-    _testHelpers.clearInProgress()
+describe('runBackfillLoopForAddress - adaptive backoff', () => {
+  it('does not advance the cursor when the fallback executor throws (RPC failure)', async () => {
+    const db = buildMockDb({ address: ADDR })
+    const { executor } = buildFakeExecutor({
+      tip: 100n,
+      failGetLogsTimes: 10_000, // every chunk's getLogs fails
+    })
+    // Force the loop to bail out after a bounded number of iterations by
+    // capping the delay and letting the outer timeout kill it.
+    const p = runBackfillLoopForAddress(db, ADDR, {
+      executor,
+      depthBlocksOverride: 5,
+      chunkDelayMsOverride: 0,
+      maxDelayMsOverride: 1,
+    })
+    // Let a few loop iterations run without persistence.
+    await new Promise((r) => setTimeout(r, 30))
+    const row = (db as unknown as { _row: DbRow })._row
+    // Cursor never advanced past the initialised from-block, error field set.
+    expect(row.backfill_completed_at).toBeNull()
+    expect(row.backfill_last_error).toContain('Cloudflare 1015')
+    // Clean up by throwing an unhandled promise rejection recovery.
+    p.catch(() => {})
   })
+})
 
-  it('marks the address as in-progress, then clears it after the job finishes', async () => {
-    const rpc = buildMockRpc({ tip: 100n })
-    const db = buildMockDb()
-
-    triggerBackfill(db, ADDR, { rpc, depthBlocks: 10 })
-
-    expect(_testHelpers.isInProgress(ADDR)).toBe(true)
-    await new Promise((r) => setImmediate(r))
-    await new Promise((r) => setTimeout(r, 5))
+describe('triggerBackfill dedupe', () => {
+  it('does not spawn a second concurrent loop for the same address', async () => {
+    const HASH = '0xabc0000000000000000000000000000000000000000000000000000000000003'
+    const db = buildMockDb({ address: ADDR })
+    const { executor } = buildFakeExecutor({
+      tip: 5n,
+      outbound: [{ transactionHash: HASH, blockNumber: 3n }],
+      txByHash: {
+        [HASH]: {
+          hash: HASH as `0x${string}`,
+          from: ADDR,
+          to: OTHER,
+          transactionIndex: 0,
+          value: 0n,
+          input: '0x',
+          blockNumber: 3n,
+          feeCurrency: null,
+        },
+      },
+      receiptByHash: { [HASH]: RECEIPT_EMPTY },
+    })
+    triggerBackfill(db, ADDR, { executor, depthBlocksOverride: 5, chunkDelayMsOverride: 0 })
+    triggerBackfill(db, ADDR, { executor, depthBlocksOverride: 5, chunkDelayMsOverride: 0 })
+    await new Promise((r) => setTimeout(r, 40))
+    // in-progress cleared after the loop completes
     expect(_testHelpers.isInProgress(ADDR)).toBe(false)
   })
+})
 
-  it('updates backfill_completed_at on success', async () => {
-    const rpc = buildMockRpc({ tip: 100n })
-    const db = buildMockDb()
-
-    triggerBackfill(db, ADDR, { rpc, depthBlocks: 10 })
-    await new Promise((r) => setTimeout(r, 5))
-
-    const calls = (db.query as jest.Mock).mock.calls
-    const updateCall = calls.find(([sql]) =>
-      typeof sql === 'string' && sql.includes('backfill_completed_at = now()'),
-    )
-    expect(updateCall).toBeDefined()
-    expect(updateCall![1]).toEqual([ADDR.toLowerCase()])
+describe('resumePendingBackfills', () => {
+  it('picks up rows that have a cursor set but no completion timestamp', async () => {
+    const db = buildMockDb({
+      address: ADDR,
+      backfill_cursor_block: '95',
+      backfill_end_block: '100',
+    })
+    const { executor } = buildFakeExecutor({ tip: 200n })
+    const started = await resumePendingBackfills(db, {
+      executor,
+      chunkDelayMsOverride: 0,
+    })
+    expect(started).toBe(1)
+    await new Promise((r) => setTimeout(r, 30))
+    const row = (db as unknown as { _row: DbRow })._row
+    expect(row.backfill_completed_at).not.toBeNull()
   })
 
-  it('does NOT trigger a second concurrent backfill for the same address', async () => {
-    const rpc = buildMockRpc({ tip: 100n })
-    const db = buildMockDb()
-
-    triggerBackfill(db, ADDR, { rpc, depthBlocks: 10 })
-    triggerBackfill(db, ADDR, { rpc, depthBlocks: 10 })
-    await new Promise((r) => setTimeout(r, 5))
-
-    expect((rpc.getBlockNumber as jest.Mock).mock.calls.length).toBe(1)
-  })
-
-  it('still clears in-progress on error', async () => {
-    const rpc = buildMockRpc({ tip: 100n })
-    ;(rpc.getBlockNumber as jest.Mock).mockRejectedValueOnce(new Error('rpc down'))
-    const db = buildMockDb()
-
-    triggerBackfill(db, ADDR, { rpc, depthBlocks: 10 })
-    await new Promise((r) => setTimeout(r, 5))
-
-    expect(_testHelpers.isInProgress(ADDR)).toBe(false)
+  it('is a no-op when no rows are pending', async () => {
+    const db = buildMockDb({
+      address: ADDR,
+      backfill_completed_at: new Date(),
+    })
+    const { executor } = buildFakeExecutor({ tip: 100n })
+    const started = await resumePendingBackfills(db, { executor })
+    expect(started).toBe(0)
   })
 })

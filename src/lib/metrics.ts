@@ -71,6 +71,36 @@ new Gauge({
   },
 })
 
+// Backfill counters + gauges. Emitted by the backfill loop after every
+// chunk transaction. `outcome=ok` = chunk fully persisted + cursor advanced;
+// `rpc_error` = every fallback endpoint failed for this chunk (retry on the
+// next iteration with backoff); `persist_error` = at least one tx in the
+// chunk failed the local DB write (the successful ones DO land + cursor
+// still advances).
+export const transactionsIndexerBackfillChunksTotal = new Counter({
+  name: 'transactions_indexer_backfill_chunks_total',
+  help: 'Backfill chunks processed by outcome',
+  labelNames: ['outcome'],
+  registers: [metricsRegistry],
+})
+
+// How many /watch backfills are running right now. Non-persistent - resets on
+// process restart; the boot-time resume path re-populates it as it kicks off
+// resumed jobs.
+export const transactionsIndexerBackfillActiveJobs = new Gauge({
+  name: 'transactions_indexer_backfill_active_jobs',
+  help: 'Number of backfill loops currently executing',
+  registers: [metricsRegistry],
+})
+
+// Total blocks remaining to scan across ALL in-progress backfills. Grafana
+// can chart this against wall-clock to estimate ETA.
+export const transactionsIndexerBackfillBlocksRemaining = new Gauge({
+  name: 'transactions_indexer_backfill_blocks_remaining',
+  help: 'Sum of (backfill_end_block - backfill_cursor_block) across in-progress backfills',
+  registers: [metricsRegistry],
+})
+
 // Transactions indexer lag in blocks (celo tip - last indexed block). Updated
 // by the worker on every successful tick AND by the indexer health route.
 // Grafana alerts when this stays > 20 for >2 min (per WRI Track C plan AC #3).
