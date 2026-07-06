@@ -14,6 +14,9 @@ export type TokenTransactionType =
   | 'SENT'
   | 'SWAP_TRANSACTION'
   | 'APPROVAL'
+  | 'DEPOSIT'
+  | 'WITHDRAW'
+  | 'CLAIM_REWARD'
 
 export interface LocalAmount {
   value: string
@@ -83,10 +86,22 @@ export interface ApprovalTransaction extends BaseTransaction {
   tokenId: string
 }
 
+// User-held Earn positions (Neeru, Allbridge, ...). `appId` identifies the
+// protocol so the wallet can render a protocol-specific label + icon;
+// `positionId` is the internal id used by the protocol's own indexer /
+// hooks-api so the wallet can deep-link back to the manage screen.
+export interface EarnTransaction extends BaseTransaction {
+  type: 'DEPOSIT' | 'WITHDRAW' | 'CLAIM_REWARD'
+  appId: string
+  positionId: string | null
+  amount: TokenAmount
+}
+
 export type TokenTransaction =
   | TransferTransaction
   | SwapTransaction
   | ApprovalTransaction
+  | EarnTransaction
 
 // Raw shapes loaded from Postgres / viem for the classifier.
 export interface RawTxRow {

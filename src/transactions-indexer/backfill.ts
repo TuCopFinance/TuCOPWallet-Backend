@@ -200,6 +200,7 @@ async function initializeBackfillWindowIfNeeded(
   address: string,
   currentTip: bigint,
   depthBlocks: bigint,
+  walletCreatedAtIso: string | undefined,
 ): Promise<{ cursor: bigint; end: bigint } | null> {
   const existing = await readBackfillWindow(db, address)
   if (!existing) return null
@@ -208,7 +209,14 @@ async function initializeBackfillWindowIfNeeded(
     return { cursor: existing.cursorBlock, end: existing.endBlock }
   }
   const end = currentTip
-  const from = currentTip > depthBlocks ? currentTip - depthBlocks : 0n
+  const defaultFrom = currentTip > depthBlocks ? currentTip - depthBlocks : 0n
+  let from = defaultFrom
+  if (walletCreatedAtIso) {
+    const derived = walletCreatedAtToFromBlock(walletCreatedAtIso, currentTip)
+    // Extend only: never truncate a valid default window if the user
+    // creation date happens to be more recent than the default depth.
+    if (derived < from) from = derived
+  }
   await db.query(
     `UPDATE watched_address
        SET backfill_cursor_block = $1,
@@ -217,7 +225,7 @@ async function initializeBackfillWindowIfNeeded(
     [from.toString(), end.toString(), address],
   )
   log.info(
-    `backfill window initialized for ${address}: [${from.toString()}, ${end.toString()}]`,
+    `backfill window initialized for ${address}: [${from.toString()}, ${end.toString()}]${walletCreatedAtIso ? ` (walletCreatedAt=${walletCreatedAtIso})` : ''}`,
   )
   return { cursor: from, end }
 }
@@ -327,6 +335,52 @@ export interface RunBackfillOptions {
   depthBlocksOverride?: number
   chunkDelayMsOverride?: number
   maxDelayMsOverride?: number
+  // When set, the backfill window's `fromBlock` is chosen as the older of
+  // (a) the tip-minus-depth default and (b) an estimate derived from
+  // walletCreatedAtIso via `walletCreatedAtToFromBlock`. Cap enforced
+  // internally via SAFETY_MAX_BACKFILL_BLOCKS.
+  walletCreatedAtIso?: string
+}
+
+// Celo L2 migration (block 31056500, ~2025-03-26). Pre-migration blocks
+// average ~5 s each; post-migration ~1 s. We segment the conversion so a
+// wallet created before the migration doesn't get an underestimated
+// fromBlock (which would leave old activity outside the scan window).
+const CELO_L2_MIGRATION_TIMESTAMP_MS = Date.parse('2025-03-26T00:00:00Z')
+const POST_L2_SECS_PER_BLOCK = 1
+const PRE_L2_SECS_PER_BLOCK = 5
+
+// Never scan more than this many blocks even if walletCreatedAt implies a
+// deeper window. Protects the relay from an accidentally-huge backfill
+// blowing up the RPC budget for other watched wallets. 5M blocks is about
+// 8 weeks post-L2 which covers 99%+ of TuCop user creation dates today.
+const SAFETY_MAX_BACKFILL_BLOCKS = 5_000_000n
+
+export function walletCreatedAtToFromBlock(
+  walletCreatedAtIso: string,
+  currentTip: bigint,
+  nowMs: number = Date.now(),
+): bigint {
+  const createdAtMs = Date.parse(walletCreatedAtIso)
+  if (!Number.isFinite(createdAtMs) || createdAtMs > nowMs) return currentTip
+  const secondsSinceCreation = Math.max(0, Math.floor((nowMs - createdAtMs) / 1000))
+  let approxBlocks: bigint
+  if (createdAtMs >= CELO_L2_MIGRATION_TIMESTAMP_MS) {
+    approxBlocks = BigInt(secondsSinceCreation * POST_L2_SECS_PER_BLOCK)
+  } else {
+    const postL2Seconds = Math.max(0, Math.floor((nowMs - CELO_L2_MIGRATION_TIMESTAMP_MS) / 1000))
+    const preL2Seconds = Math.max(
+      0,
+      Math.floor((CELO_L2_MIGRATION_TIMESTAMP_MS - createdAtMs) / 1000),
+    )
+    approxBlocks =
+      BigInt(postL2Seconds * POST_L2_SECS_PER_BLOCK) +
+      BigInt(Math.floor(preL2Seconds / PRE_L2_SECS_PER_BLOCK))
+  }
+  if (approxBlocks > SAFETY_MAX_BACKFILL_BLOCKS) {
+    approxBlocks = SAFETY_MAX_BACKFILL_BLOCKS
+  }
+  return currentTip > approxBlocks ? currentTip - approxBlocks : 0n
 }
 
 // Runs the backfill loop for a single address until either (a) the cursor
@@ -355,7 +409,13 @@ export async function runBackfillLoopForAddress(
     )
     return
   }
-  const window = await initializeBackfillWindowIfNeeded(db, userLower, tip, depth)
+  const window = await initializeBackfillWindowIfNeeded(
+    db,
+    userLower,
+    tip,
+    depth,
+    options.walletCreatedAtIso,
+  )
   if (!window) {
     log.info(`no active backfill needed for ${userLower} (row missing or completed)`)
     return

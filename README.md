@@ -395,8 +395,18 @@ The forward worker is NOT disabled by these switches; it keeps advancing `indexe
 Registers an address for indexing and triggers a one-shot historical backfill in the background. Called by the wallet at boot after `walletAddressInitialized`. Idempotent, safe to retry, the wallet should not block on its result.
 
 ```json
-{ "address": "0x..." }
+{ "address": "0x...", "walletCreatedAt": "2026-01-15T10:30:00.000Z" }
 ```
+
+`walletCreatedAt` is optional; when the wallet supplies it, the backfill window's `fromBlock` is extended to cover activity going back to that timestamp instead of the default `TX_INDEXER_BACKFILL_BLOCKS` tail. Rules:
+
+- ISO 8601 timestamp (UTC). Any Date.parse-compatible string works but `.toISOString()` is the recommended shape.
+- Rejected if in the future, unparseable, or earlier than `2020-04-01T00:00:00Z` (Celo mainnet floor).
+- Never truncates the default window - it only extends it further into the past if the derived `fromBlock` is older than the default.
+- Hard cap: never scans more than 5 000 000 blocks even if the timestamp implies deeper. This protects the RPC budget for other watched wallets from an accidentally-huge backfill.
+- The formula segments across the Celo L2 migration (block 31 056 500 at `2025-03-26T00:00:00Z`): ~1 s/block post-L2, ~5 s/block pre-L2.
+
+When `walletCreatedAt` is omitted, the backfill uses the existing `TX_INDEXER_BACKFILL_BLOCKS` default (10 000 blocks ~ 2.8 hours on Celo L2). Passing it is safe on repeat `/watch` calls: the window is only initialised once per address and subsequent `/watch` requests do not re-trigger backfill if it is already complete.
 
 Response `200`:
 
@@ -410,9 +420,9 @@ Response `200`:
 
 `backfillStartedAt` is the timestamp of the first INSERT for this address (set once, preserved across re-watch calls). `backfillCompleted` flips to `true` after the background job finishes writing historical rows. The HTTP response is sent immediately - the wallet should not await `backfillCompleted` becoming `true`, just poll `/feed` and rows will appear as the backfill makes progress.
 
-The backfill scans the last `TX_INDEXER_BACKFILL_BLOCKS` (default 10 000) for ERC20 Transfer events touching the address as `from` or `to`, fetches tx + receipt + block timestamp via JSON-RPC, and writes through the same persistence layer the live worker uses. Native CELO sends are not discovered by this method (acceptable for an MVP since real users pay gas in stables); the live worker still catches them going forward.
+The backfill scans the derived block window for ERC20 Transfer events touching the address as `from` or `to`, fetches tx + receipt + block timestamp via JSON-RPC, and writes through the same persistence layer the live worker uses. Native CELO sends are not discovered by this method (acceptable for an MVP since real users pay gas in stables); the live worker still catches them going forward.
 
-Errors: `400 invalid address`, `503 database not configured`, `500 database error`.
+Errors: `400 invalid address`, `400 invalid walletCreatedAt`, `503 database not configured`, `500 database error`.
 
 #### `GET /api/transactions/indexer/health`
 
@@ -434,7 +444,7 @@ Errors: `503 database not configured`, `500 internal` (when the indexer_state qu
 
 #### `GET /api/transactions/feed`
 
-Byte-compatible replacement for Valora. Same response envelope (`{ transactions, pageInfo: { hasNextPage, endCursor } }`) and same `TokenTransaction` discriminated union (`SENT` / `RECEIVED` / `SWAP_TRANSACTION` / `APPROVAL`).
+Byte-compatible replacement for Valora. Same response envelope (`{ transactions, pageInfo: { hasNextPage, endCursor } }`) and same `TokenTransaction` discriminated union (`SENT` / `RECEIVED` / `SWAP_TRANSACTION` / `APPROVAL` / `DEPOSIT` / `WITHDRAW` / `CLAIM_REWARD`).
 
 **Query params:**
 
@@ -450,6 +460,8 @@ Byte-compatible replacement for Valora. Same response envelope (`{ transactions,
 **7702 atomic-batch extension:** when one tx atomically sells more than one token, the wallet receives a single `SwapTransaction` whose `fromTokenAmounts[]` lists every sold token; `outAmount` is the highest-value leg so existing single-leg renderers keep working unchanged. `inAmount` is the bought token. The selector keyed off is `0x3f707e6b` (`execute((address,uint256,bytes)[])` on the BatchExecutor at `0xaE6a87E88b55644Eda54C3AA55B11944eE5E1DFe`).
 
 **Token IDs:** ERC20s are emitted as `celo-mainnet:0x<contract>`. CELO native is emitted as its ERC20 contract id `celo-mainnet:0x471ece3750da237f93b8e339c536989b8978a438`, not a `:native` sentinel, so the wallet's token registry resolves it the same way as any other ERC20.
+
+**Earn extension (`DEPOSIT` / `WITHDRAW` / `CLAIM_REWARD`):** when a tx emits an event from a configured Earn contract (currently Neeru Vaults, via `NEERU_CONTRACT_ADDRESS` + `NEERU_EVENT_A/B/C_TOPIC0`), the classifier emits an `EarnTransaction` instead of folding the deposit token movement into a bogus swap. `EarnTransaction` extends the base shape with `appId` (`"neeru-vaults"` today; other protocols pluggable via the env registry), `positionId` (string or `null`, decoded from the event's indexed `positionId` topic), and `amount` (`TokenAmount` for the ERC20 leg between the user and the earn contract). Kind A = new position -> `DEPOSIT`; Kind B = early withdrawal -> `WITHDRAW`; Kind C = matured claim -> `CLAIM_REWARD`. The Earn rule runs BEFORE the swap rules so a Neeru deposit tx (which moves COPm user -> contract) is never misclassified as a swap.
 
 Errors: `400 invalid address` / `invalid afterCursor`, `503 database not configured`, `500 database error`.
 

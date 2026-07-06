@@ -1,5 +1,6 @@
-import { classify } from './classifier'
-import type { ClassifierLog, ClassifierTx, SwapTransaction } from './types'
+import { _resetParsedEnvForTests } from '../lib/env'
+import { _resetEarnRegistryForTests, classify } from './classifier'
+import type { ClassifierLog, ClassifierTx, EarnTransaction, SwapTransaction } from './types'
 
 const USER = '0x1111111111111111111111111111111111111111'
 const COUNTERPARTY = '0x2222222222222222222222222222222222222222'
@@ -322,5 +323,218 @@ describe('classify', () => {
       input: '0xdeadbeef',
     })
     expect(classify(tx, [], USER)).toEqual([])
+  })
+})
+
+describe('classify - Earn / Neeru event classification', () => {
+  const NEERU_CONTRACT = '0x3333333333333333333333333333333333333333'
+  const NEERU_EVENT_A =
+    '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const NEERU_EVENT_B =
+    '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+  const NEERU_EVENT_C =
+    '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+
+  function setNeeruEnv({ withDepositToken = true }: { withDepositToken?: boolean } = {}): void {
+    process.env.NEERU_CONTRACT_ADDRESS = NEERU_CONTRACT
+    process.env.NEERU_EVENT_A_TOPIC0 = NEERU_EVENT_A
+    process.env.NEERU_EVENT_B_TOPIC0 = NEERU_EVENT_B
+    process.env.NEERU_EVENT_C_TOPIC0 = NEERU_EVENT_C
+    if (withDepositToken) {
+      process.env.NEERU_DEPOSIT_TOKEN_ADDRESS = TOKEN_COPM
+    } else {
+      delete process.env.NEERU_DEPOSIT_TOKEN_ADDRESS
+    }
+    _resetParsedEnvForTests()
+    _resetEarnRegistryForTests()
+  }
+
+  function unsetNeeruEnv(): void {
+    delete process.env.NEERU_CONTRACT_ADDRESS
+    delete process.env.NEERU_EVENT_A_TOPIC0
+    delete process.env.NEERU_EVENT_B_TOPIC0
+    delete process.env.NEERU_EVENT_C_TOPIC0
+    delete process.env.NEERU_DEPOSIT_TOKEN_ADDRESS
+    _resetParsedEnvForTests()
+    _resetEarnRegistryForTests()
+  }
+
+  function neeruEventLog(opts: {
+    logIndex: number
+    topic0: string
+    user: string
+    positionId: bigint
+  }): ClassifierLog {
+    return {
+      logIndex: opts.logIndex,
+      contract: NEERU_CONTRACT,
+      topic0: opts.topic0,
+      topic1: addrTopic(opts.user),
+      topic2: '0x' + uintArg(opts.positionId),
+      topic3: null,
+      data: '0x',
+    }
+  }
+
+  afterEach(() => {
+    unsetNeeruEnv()
+  })
+
+  it('kind A (deposit) emits DEPOSIT with appId + positionId + amount from user->contract Transfer', () => {
+    setNeeruEnv()
+    const tx = baseTx({ from: USER, to: NEERU_CONTRACT })
+    const logs: ClassifierLog[] = [
+      transferLog({
+        logIndex: 0,
+        contract: TOKEN_COPM,
+        from: USER,
+        to: NEERU_CONTRACT,
+        value: 100_000_000_000_000_000_000n, // 100 COPm (18 dec)
+      }),
+      neeruEventLog({ logIndex: 1, topic0: NEERU_EVENT_A, user: USER, positionId: 42n }),
+    ]
+    const out = classify(tx, logs, USER)
+    expect(out).toHaveLength(1)
+    const earn = out[0] as EarnTransaction
+    expect(earn.type).toBe('DEPOSIT')
+    expect(earn.appId).toBe('neeru-vaults')
+    expect(earn.positionId).toBe('42')
+    expect(earn.amount.tokenId).toBe(`celo-mainnet:${TOKEN_COPM}`)
+    expect(earn.amount.value).toBe('100.000000000000000000')
+    expect(earn.amount.decimals).toBe(18)
+    expect(earn.status).toBe('Complete')
+  })
+
+  it('kind B (withdraw) emits WITHDRAW with amount from contract->user Transfer', () => {
+    setNeeruEnv()
+    const tx = baseTx({ from: USER, to: NEERU_CONTRACT })
+    const logs: ClassifierLog[] = [
+      transferLog({
+        logIndex: 0,
+        contract: TOKEN_COPM,
+        from: NEERU_CONTRACT,
+        to: USER,
+        value: 50_000_000_000_000_000_000n,
+      }),
+      neeruEventLog({ logIndex: 1, topic0: NEERU_EVENT_B, user: USER, positionId: 7n }),
+    ]
+    const out = classify(tx, logs, USER)
+    expect(out).toHaveLength(1)
+    const earn = out[0] as EarnTransaction
+    expect(earn.type).toBe('WITHDRAW')
+    expect(earn.positionId).toBe('7')
+    expect(earn.amount.value).toBe('50.000000000000000000')
+  })
+
+  it('kind C (claim) emits CLAIM_REWARD with the incoming Transfer', () => {
+    setNeeruEnv()
+    const tx = baseTx({ from: USER, to: NEERU_CONTRACT })
+    const logs: ClassifierLog[] = [
+      transferLog({
+        logIndex: 0,
+        contract: TOKEN_COPM,
+        from: NEERU_CONTRACT,
+        to: USER,
+        value: 5_000_000_000_000_000_000n,
+      }),
+      neeruEventLog({ logIndex: 1, topic0: NEERU_EVENT_C, user: USER, positionId: 99n }),
+    ]
+    const out = classify(tx, logs, USER)
+    expect(out).toHaveLength(1)
+    const earn = out[0] as EarnTransaction
+    expect(earn.type).toBe('CLAIM_REWARD')
+    expect(earn.positionId).toBe('99')
+  })
+
+  it('takes precedence over the swap rule when both patterns would match', () => {
+    // Without Earn, this would look like a plain user -> router swap because
+    // there's an out-of-user + in-to-user Transfer pair. With the Neeru
+    // registry active and the contract emitting event A, it must classify
+    // as DEPOSIT instead.
+    setNeeruEnv()
+    const tx = baseTx({ from: USER, to: NEERU_CONTRACT })
+    const logs: ClassifierLog[] = [
+      transferLog({
+        logIndex: 0,
+        contract: TOKEN_COPM,
+        from: USER,
+        to: NEERU_CONTRACT,
+        value: 100_000_000_000_000_000_000n,
+      }),
+      // some receipt token minted back to the user (simulates an LP token)
+      transferLog({
+        logIndex: 1,
+        contract: TOKEN_USDM,
+        from: NEERU_CONTRACT,
+        to: USER,
+        value: 1n,
+      }),
+      neeruEventLog({ logIndex: 2, topic0: NEERU_EVENT_A, user: USER, positionId: 1n }),
+    ]
+    const out = classify(tx, logs, USER)
+    expect(out).toHaveLength(1)
+    expect(out[0]?.type).toBe('DEPOSIT')
+  })
+
+  it('ignores Neeru events emitted for a different user', () => {
+    setNeeruEnv()
+    const tx = baseTx({ from: USER, to: NEERU_CONTRACT })
+    const logs: ClassifierLog[] = [
+      transferLog({
+        logIndex: 0,
+        contract: TOKEN_COPM,
+        from: USER,
+        to: NEERU_CONTRACT,
+        value: 100n,
+      }),
+      neeruEventLog({
+        logIndex: 1,
+        topic0: NEERU_EVENT_A,
+        user: COUNTERPARTY, // some other user
+        positionId: 42n,
+      }),
+    ]
+    const out = classify(tx, logs, USER)
+    // No Earn match; falls through to swap / transfer rules. The point of
+    // this test is that we do NOT emit DEPOSIT for a Neeru event that was
+    // for a different user; whatever the fallback returns is fine.
+    expect(out.some((o) => o.type === 'DEPOSIT')).toBe(false)
+  })
+
+  it('is a no-op when Neeru env is unset (registry empty)', () => {
+    // No setNeeruEnv() call. Registry stays empty.
+    _resetEarnRegistryForTests()
+    const tx = baseTx({ from: USER, to: NEERU_CONTRACT })
+    const logs: ClassifierLog[] = [
+      transferLog({
+        logIndex: 0,
+        contract: TOKEN_COPM,
+        from: USER,
+        to: NEERU_CONTRACT,
+        value: 100n,
+      }),
+      neeruEventLog({ logIndex: 1, topic0: NEERU_EVENT_A, user: USER, positionId: 1n }),
+    ]
+    const out = classify(tx, logs, USER)
+    expect(out.some((o) => o.type === 'DEPOSIT')).toBe(false)
+  })
+
+  it('falls back to any Transfer in the correct direction when no depositToken configured', () => {
+    setNeeruEnv({ withDepositToken: false })
+    const tx = baseTx({ from: USER, to: NEERU_CONTRACT })
+    const logs: ClassifierLog[] = [
+      transferLog({
+        logIndex: 0,
+        contract: TOKEN_USDM,
+        from: USER,
+        to: NEERU_CONTRACT,
+        value: 42n,
+      }),
+      neeruEventLog({ logIndex: 1, topic0: NEERU_EVENT_A, user: USER, positionId: 1n }),
+    ]
+    const out = classify(tx, logs, USER)
+    const earn = out[0] as EarnTransaction
+    expect(earn.type).toBe('DEPOSIT')
+    expect(earn.amount.tokenId).toBe(`celo-mainnet:${TOKEN_USDM}`)
   })
 })

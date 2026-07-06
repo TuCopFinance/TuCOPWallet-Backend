@@ -1,3 +1,4 @@
+import { env } from '../lib/env'
 import {
   decimalizeValueForClassifier,
   decimalsForTokenId,
@@ -8,6 +9,7 @@ import type {
   ApprovalTransaction,
   ClassifierLog,
   ClassifierTx,
+  EarnTransaction,
   NetworkId,
   SwapTransaction,
   TokenAmount,
@@ -473,6 +475,136 @@ function classifyReceiveFromLog(
   }
 }
 
+// Earn / Neeru event classification (added 2026-07-06 to close the "Neeru
+// txs disappear from the timeline" gap the wallet team flagged). Neeru's
+// contract emits four events; the parser at `src/neeru-indexer/parser.ts`
+// tags them Kind A/B/C/D. From on-chain semantics:
+//   Kind A = new position opened -> DEPOSIT
+//   Kind B = position closed (early withdrawal) -> WITHDRAW
+//   Kind C = position closed at maturity -> CLAIM_REWARD
+//   Kind D = renew / compound (skipped for MVP; future SWAP-like semantics)
+// The mapping is env-driven so an adapter-only tweak (e.g. a new Neeru
+// event added later) can be wired via config, not a code change.
+type EarnAction = 'DEPOSIT' | 'WITHDRAW' | 'CLAIM_REWARD'
+
+interface EarnEventBinding {
+  appId: string
+  contract: string
+  actionByTopic0: Record<string, EarnAction>
+  // Optional deposit token restriction for the amount match. When null the
+  // classifier accepts any ERC20 Transfer that matches the direction.
+  depositToken: string | null
+}
+
+function loadEarnRegistry(): EarnEventBinding[] {
+  const out: EarnEventBinding[] = []
+  const neeruContract = env.NEERU_CONTRACT_ADDRESS
+  if (neeruContract) {
+    const map: Record<string, EarnAction> = {}
+    if (env.NEERU_EVENT_A_TOPIC0) map[env.NEERU_EVENT_A_TOPIC0.toLowerCase()] = 'DEPOSIT'
+    if (env.NEERU_EVENT_B_TOPIC0) map[env.NEERU_EVENT_B_TOPIC0.toLowerCase()] = 'WITHDRAW'
+    if (env.NEERU_EVENT_C_TOPIC0) map[env.NEERU_EVENT_C_TOPIC0.toLowerCase()] = 'CLAIM_REWARD'
+    if (Object.keys(map).length > 0) {
+      out.push({
+        appId: 'neeru-vaults',
+        contract: neeruContract.toLowerCase(),
+        actionByTopic0: map,
+        depositToken: env.NEERU_DEPOSIT_TOKEN_ADDRESS
+          ? env.NEERU_DEPOSIT_TOKEN_ADDRESS.toLowerCase()
+          : null,
+      })
+    }
+  }
+  return out
+}
+
+let cachedEarnRegistry: EarnEventBinding[] | null = null
+function earnRegistry(): EarnEventBinding[] {
+  if (cachedEarnRegistry === null) cachedEarnRegistry = loadEarnRegistry()
+  return cachedEarnRegistry
+}
+
+export function _resetEarnRegistryForTests(): void {
+  cachedEarnRegistry = null
+}
+
+function classifyEarnFromLogs(
+  tx: ClassifierTx,
+  logs: ClassifierLog[],
+  userAddress: string,
+): EarnTransaction | null {
+  const userLower = userAddress.toLowerCase()
+  const paddedUser = '0x' + '0'.repeat(24) + userLower.slice(2)
+  const registry = earnRegistry()
+  if (registry.length === 0) return null
+
+  let match: {
+    binding: EarnEventBinding
+    action: EarnAction
+    positionId: string | null
+  } | null = null
+  for (const log of logs) {
+    const contract = log.contract.toLowerCase()
+    const binding = registry.find((b) => b.contract === contract)
+    if (!binding) continue
+    const action = binding.actionByTopic0[log.topic0.toLowerCase()]
+    if (!action) continue
+    // topic1 = indexed user address. Match ours (case-insensitive padded).
+    if (log.topic1 && log.topic1.toLowerCase() !== paddedUser) continue
+    // topic2 = indexed position id (uint256). Decode for the emit.
+    let positionId: string | null = null
+    if (log.topic2) {
+      try {
+        positionId = BigInt(log.topic2).toString()
+      } catch {
+        positionId = null
+      }
+    }
+    match = { binding, action, positionId }
+    break
+  }
+  if (!match) return null
+
+  // Amount = the ERC20 Transfer that moved the deposit token between the
+  // user and the earn contract. For DEPOSIT that's user -> anywhere; for
+  // WITHDRAW / CLAIM_REWARD it's anywhere -> user.
+  const transfers = decodeTransferLogs(logs)
+  let amountRaw: bigint | null = null
+  let tokenContract: string | null = null
+  const preferred = match.binding.depositToken
+  for (const t of transfers) {
+    const okDirection =
+      match.action === 'DEPOSIT' ? t.from === userLower : t.to === userLower
+    if (!okDirection) continue
+    if (preferred && t.contract !== preferred) continue
+    amountRaw = t.value
+    tokenContract = t.contract
+    break
+  }
+  // If a preferred deposit token was set but no matching Transfer was
+  // found, fall back to any Transfer in the correct direction rather than
+  // dropping the whole tx from the feed.
+  if (amountRaw === null && preferred) {
+    for (const t of transfers) {
+      const okDirection =
+        match.action === 'DEPOSIT' ? t.from === userLower : t.to === userLower
+      if (!okDirection) continue
+      amountRaw = t.value
+      tokenContract = t.contract
+      break
+    }
+  }
+  if (amountRaw === null || tokenContract === null) return null
+
+  return {
+    ...baseFields(tx, userAddress),
+    type: match.action,
+    appId: match.binding.appId,
+    positionId: match.positionId,
+    amount: makeAmount(tokenIdForContract(tx.networkId, tokenContract), amountRaw),
+  }
+}
+
 export function classify(
   tx: ClassifierTx,
   logs: ClassifierLog[],
@@ -483,7 +615,13 @@ export function classify(
   // failed swaps from the user. Consumers should key badge colour / retry
   // logic off `status` at the top level.
 
-  // Rules are applied in plan order; the first matching rule wins.
+  // Rules are applied in plan order; the first matching rule wins. Earn
+  // events run BEFORE the swap heuristics: a Neeru deposit tx also has a
+  // COPm Transfer out of the user, which classify7702Atomic /
+  // classifyAggregatorSwap would otherwise fold into a bogus swap.
+  const earn = classifyEarnFromLogs(tx, logs, userAddress)
+  if (earn) return [earn]
+
   const r1 = classify7702Atomic(tx, logs, userAddress)
   if (r1) return [r1]
 
