@@ -182,6 +182,23 @@ const envSchema = z.object({
   // 10_000 blocks (~14 h on Celo's 5 s blocks). Set to 0 to disable backfill.
   TX_INDEXER_BACKFILL_BLOCKS: zPositiveInt.optional().default(10_000),
 
+  // Kill switches for /api/transactions/feed and /watch. Evaluated per-request
+  // (not at boot) so the flip takes effect on the next request without a
+  // Railway restart. Default true. Set to the literal string "false" to gate
+  // the route to 503. Added 2026-07-05 in response to the shape-bug rollback
+  // during the WRI_TX_FEED_TUCOP_V1 rollout so backend has a same-second pause
+  // path independent of the wallet's Statsig gate.
+  TX_FEED_ENABLED: z
+    .string()
+    .optional()
+    .default('true')
+    .transform((v) => v !== 'false'),
+  TX_WATCH_ENABLED: z
+    .string()
+    .optional()
+    .default('true')
+    .transform((v) => v !== 'false'),
+
   // Neeru contract (REQUIRED if NEERU_INDEXER_ENABLED=true; refined below)
   NEERU_INDEXER_GENESIS_BLOCK: z.coerce.bigint().optional(),
   NEERU_CONTRACT_ADDRESS: zHexAddress.optional(),

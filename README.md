@@ -357,6 +357,22 @@ Backend-owned replacement for Valora's `getWalletTransactions`. Indexes Celo blo
 
 **Required env to enable on Railway:** `DATABASE_URL` (Postgres; migrations run on boot) and `INDEXER_ENABLED=true`. Without these the routes return `503` and the indexer loop is a no-op. Optional: `TX_INDEXER_BACKFILL_BLOCKS` (default `10000`, ~14 h on Celo's 5 s blocks) caps how far back the backfill job scans on first watch; set to `0` to disable backfill.
 
+**Kill switches (evaluated per-request; flip takes effect on next request without a restart):**
+
+- `TX_FEED_ENABLED` (default `true`). Set to the literal string `false` to gate `/api/transactions/feed` to a `503 { "error": "feed disabled" }` response.
+- `TX_WATCH_ENABLED` (default `true`). Same for `/api/transactions/watch` -> `503 { "error": "watch disabled" }`.
+
+The forward worker is NOT disabled by these switches; it keeps advancing `indexer_state` so a re-flip lands on a fresh cursor. To pause the worker itself, unset `INDEXER_ENABLED` (requires a Railway restart).
+
+**Response shape (`TokenTransaction`) - important post-2026-07-05:**
+
+- `TokenAmount.value` is a **decimalised human-readable string** (e.g. `"3500.000000000000000000"`), NOT raw wei. The wallet consumes it via `new BigNumber(value)` without dividing by `10^decimals`. Pre-fix the classifier emitted raw wei here and the wallet rendered the raw integer as the displayed amount.
+- `TokenAmount.decimals` is the number of decimals used to scale `value`. `null` when the token is outside the canonical CIP-64 / Mento registry - in that case `value` is the raw wei fallback so no precision is silently lost.
+- `TokenAmount.timestamp` mirrors the parent tx's top-level timestamp (ms). Populated for every amount to match Valora's shape.
+- `TokenAmount.localAmount` is always populated - either the peg-matched conversion or explicit `null` when the token has no peg or the requested `localCurrencyCode` does not match the peg.
+- `TokenTransaction.status` is `"Complete"` for successful txs and `"Failed"` for reverted txs. Reverted txs used to be omitted entirely; from 2026-07-05 they surface with `status: "Failed"` so the wallet timeline can show attempted actions.
+- Swap classifier uses an **outbound-minus-inbound heuristic** to pick primary legs: tokens that appear on both sides of the tx (round-trip / mirror mint+burn refunds / fees paid in the received token) are stripped from both aggregates before `pickHighest`. This closes the "same tokenId on inAmount and outAmount" bug for Mento fee-adapter tx patterns (e.g. tx `0xb5d1cb4aef7821c7359c16937c290d091f8b5d43760afdf891985137ef418781`).
+
 #### `POST /api/transactions/watch`
 
 Registers an address for indexing and triggers a one-shot historical backfill in the background. Called by the wallet at boot after `walletAddressInitialized`. Idempotent, safe to retry, the wallet should not block on its result.

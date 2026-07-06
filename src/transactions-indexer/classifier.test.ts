@@ -90,9 +90,15 @@ describe('classify', () => {
     expect(out).toHaveLength(1)
     const swap = out[0] as SwapTransaction
     expect(swap.type).toBe('SWAP_TRANSACTION')
+    expect(swap.status).toBe('Complete')
     expect(swap.inAmount.tokenId).toBe(`celo-mainnet:${TOKEN_COPM}`)
-    expect(swap.inAmount.value).toBe('999')
-    expect(swap.outAmount.tokenId).toBe(`celo-mainnet:${TOKEN_USDT}`) // highest of the 3 sold
+    // COPm is 18 decimals. 999 wei -> "0.000000000000000999" (padded).
+    expect(swap.inAmount.value).toBe('0.000000000000000999')
+    expect(swap.inAmount.decimals).toBe(18)
+    // USDT (6 decimals) wins pickHighest on raw wei (300 > 200 > 100).
+    expect(swap.outAmount.tokenId).toBe(`celo-mainnet:${TOKEN_USDT}`)
+    expect(swap.outAmount.value).toBe('0.000300')
+    expect(swap.outAmount.decimals).toBe(6)
     expect(swap.fromTokenAmounts).toHaveLength(3)
     const fromTokens = (swap.fromTokenAmounts ?? []).map((a) => a.tokenId).sort()
     expect(fromTokens).toEqual(
@@ -142,10 +148,12 @@ describe('classify', () => {
     const out = classify(tx, [], USER)
     expect(out).toHaveLength(1)
     expect(out[0]?.type).toBe('SENT')
-    const t = out[0] as { type: 'SENT'; amount: { tokenId: string; value: string }; address: string }
-    expect(t.amount.value).toBe('500')
+    const t = out[0] as { type: 'SENT'; amount: { tokenId: string; value: string; decimals: number | null }; address: string; status: string }
+    expect(t.amount.value).toBe('0.000000000000000500')
+    expect(t.amount.decimals).toBe(18)
     expect(t.amount.tokenId).toBe(`celo-mainnet:${TOKEN_USDM}`)
     expect(t.address).toBe(COUNTERPARTY)
+    expect(t.status).toBe('Complete')
   })
 
   it('rule 4: ERC20 transferFrom where user is the `to` returns RECEIVED', () => {
@@ -175,7 +183,7 @@ describe('classify', () => {
     expect(t.amount.tokenId).toBe(
       'celo-mainnet:0x471ece3750da237f93b8e339c536989b8978a438',
     )
-    expect(t.amount.value).toBe('5000000000000000000')
+    expect(t.amount.value).toBe('5.000000000000000000')
   })
 
   it('rule 6: receive via Transfer log when user is not the initiator returns RECEIVED', () => {
@@ -191,12 +199,73 @@ describe('classify', () => {
     expect(out).toHaveLength(1)
     expect(out[0]?.type).toBe('RECEIVED')
     const t = out[0] as { type: 'RECEIVED'; amount: { tokenId: string; value: string } }
-    expect(t.amount.value).toBe('1234')
+    expect(t.amount.value).toBe('0.000000000000001234')
   })
 
-  it('reverted transactions are omitted', () => {
-    const tx = baseTx({ status: 'reverted', valueWei: 1n })
-    expect(classify(tx, [], USER)).toEqual([])
+  // Post-2026-07-05: reverted txs surface with status: 'Failed' instead of
+  // being dropped, so the wallet timeline can show attempted actions.
+  it('reverted native send is emitted with status: Failed', () => {
+    const tx = baseTx({
+      status: 'reverted',
+      valueWei: 1n,
+      from: USER,
+      to: COUNTERPARTY,
+      input: '0x',
+    })
+    const out = classify(tx, [], USER)
+    expect(out).toHaveLength(1)
+    expect(out[0]?.type).toBe('SENT')
+    expect(out[0]?.status).toBe('Failed')
+  })
+
+  // Regression fixture for Bug 2 (2026-07-05). Reproduces the wallet team's
+  // spike v2 tx 0xb5d1cb4aef... which is a COPm -> USDm swap where the Mento
+  // fee adapter pre-charges + refunds a COPm amount (mirror burn+mint) larger
+  // than the swapped USDm in raw wei. Pre-fix pickHighest picked COPm on both
+  // inbound and outbound; the outbound-minus-inbound heuristic filters COPm
+  // from both aggregates and the classifier picks the semantically correct
+  // pair.
+  it('rule 2: mirror mint/burn refund does not corrupt inAmount/outAmount', () => {
+    const MENTO_POOL = '0x3333333333333333333333333333333333333333'
+    const BROKER = '0x4444444444444444444444444444444444444444'
+    const FEE_SINK = '0x5555555555555555555555555555555555555555'
+    const AGG_FEE = '0x6666666666666666666666666666666666666666'
+    const BURN = '0x0000000000000000000000000000000000000000'
+    const tx = baseTx({
+      hash: '0xb5d1cb4aef7821c7359c16937c290d091f8b5d43760afdf891985137ef418781',
+      from: USER,
+      to: SQUID_ROUTER,
+      input: '0x12345678' + '00'.repeat(32),
+    })
+    const swapOut = 3_502_550_000_000_000_000_000n // 3502.55 COPm to pool
+    const refund = 32_189_703_752_759_390_600n // 32.189... COPm burn + mirror mint
+    const swapIn = 1_013_769_540_000_000_000n // 1.013 USDm from pool
+    const feeSmall = 1_237_994_800_000_000_000n // 1.237 COPm fee
+    const feeAgg = 14_630_401_209_248_830_000n // 14.63 COPm aggregator fee
+    const logs: ClassifierLog[] = [
+      transferLog({ logIndex: 0, contract: TOKEN_COPM, from: USER, to: BURN, value: refund }),
+      transferLog({ logIndex: 1, contract: TOKEN_COPM, from: USER, to: MENTO_POOL, value: swapOut }),
+      transferLog({ logIndex: 2, contract: TOKEN_COPM, from: MENTO_POOL, to: BROKER, value: swapOut }),
+      transferLog({ logIndex: 3, contract: TOKEN_COPM, from: BROKER, to: BURN, value: swapOut }),
+      transferLog({ logIndex: 4, contract: TOKEN_USDM, from: BURN, to: MENTO_POOL, value: swapIn }),
+      transferLog({ logIndex: 5, contract: TOKEN_USDM, from: MENTO_POOL, to: USER, value: swapIn }),
+      transferLog({ logIndex: 6, contract: TOKEN_COPM, from: BURN, to: USER, value: refund }),
+      transferLog({ logIndex: 7, contract: TOKEN_COPM, from: USER, to: FEE_SINK, value: feeSmall }),
+      transferLog({ logIndex: 8, contract: TOKEN_COPM, from: USER, to: AGG_FEE, value: feeAgg }),
+    ]
+    const out = classify(tx, logs, USER)
+    expect(out).toHaveLength(1)
+    const swap = out[0] as SwapTransaction
+    expect(swap.type).toBe('SWAP_TRANSACTION')
+    // Pre-fix: both inAmount and outAmount would be COPm because the mirror
+    // mint (32.189 COPm) beats the swap USDm (1.013) in raw wei on the
+    // received side, and the pickHighest on outbound also picked COPm.
+    // Post-fix: COPm appears on both sides -> stripped from both -> received
+    // reduces to {USDm} only, outbound falls back to full soldByToken
+    // (COPm only) and picks COPm.
+    expect(swap.outAmount.tokenId).toBe(`celo-mainnet:${TOKEN_COPM}`)
+    expect(swap.inAmount.tokenId).toBe(`celo-mainnet:${TOKEN_USDM}`)
+    expect(swap.inAmount.value).toBe('1.013769540000000000')
   })
 
   it('unrecognized contract call by user with no Transfer logs returns []', () => {

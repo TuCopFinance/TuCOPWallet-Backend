@@ -23,7 +23,20 @@ export interface LocalAmount {
 
 export interface TokenAmount {
   tokenId: string
+  // Human-decimal string (e.g. "3500.000000000000000000"). NOT raw wei -
+  // Valora consumers `new BigNumber(value)` and pass it to formatValueToDisplay
+  // without dividing by 10^decimals. See `decimalizeValueForClassifier` in
+  // ./priceOracle.ts. Emergency fix 2026-07-05: pre-fix the classifier
+  // emitted raw wei here and the wallet rendered garbage.
   value: string
+  // The number of decimals used to scale `value`. `null` when the token is
+  // outside the canonical CIP-64/Mento registry; in that case `value` is
+  // the raw wei string as a fallback so no precision is silently lost.
+  decimals: number | null
+  // Redundant with the parent tx's top-level timestamp, mirrored on each
+  // amount to match Valora. Populated by `enrichTransactionWithLocalAmount`
+  // so the classifier itself stays timestamp-agnostic per-amount.
+  timestamp?: number
   localAmount?: LocalAmount | null
 }
 
@@ -32,12 +45,19 @@ export interface FeeEntry {
   amount: TokenAmount
 }
 
+// Terminal status of the tx. Matches the exact strings Valora emits on
+// `getWalletTransactions`; the wallet keys off this to decide badge colour /
+// error label. Reverted txs used to be omitted entirely; from 2026-07-05
+// they surface with `status: "Failed"`.
+export type TxTerminalStatus = 'Complete' | 'Failed'
+
 interface BaseTransaction {
   networkId: NetworkId
   transactionHash: string
   timestamp: number
   block: string
   address: string
+  status: TxTerminalStatus
   fees: FeeEntry[]
 }
 
