@@ -138,6 +138,61 @@ describe('POST /api/transactions/watch', () => {
     expect(res.body.backfillCompleted).toBe(true)
     expect(mockTriggerBackfill).not.toHaveBeenCalled()
   })
+
+  describe('walletCreatedAt validation', () => {
+    it('accepts a valid past ISO 8601 walletCreatedAt and passes it to backfill', async () => {
+      const iso = '2026-01-15T10:30:00.000Z'
+      const res = await request(app)
+        .post('/api/transactions/watch')
+        .send({ address: VALID_ADDRESS, walletCreatedAt: iso })
+      expect(res.status).toBe(200)
+      expect(mockTriggerBackfill).toHaveBeenCalledTimes(1)
+      const [, address, options] = mockTriggerBackfill.mock.calls[0]
+      expect(address).toBe(VALID_ADDRESS)
+      expect(options).toEqual({ walletCreatedAtIso: iso })
+    })
+
+    it('omits walletCreatedAtIso from options when not provided', async () => {
+      await request(app).post('/api/transactions/watch').send({ address: VALID_ADDRESS })
+      expect(mockTriggerBackfill).toHaveBeenCalledTimes(1)
+      const [, , options] = mockTriggerBackfill.mock.calls[0]
+      expect(options).toEqual({})
+    })
+
+    it('rejects non-string walletCreatedAt', async () => {
+      const res = await request(app)
+        .post('/api/transactions/watch')
+        .send({ address: VALID_ADDRESS, walletCreatedAt: 12345 })
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'invalid walletCreatedAt' })
+      expect(mockTriggerBackfill).not.toHaveBeenCalled()
+    })
+
+    it('rejects unparseable walletCreatedAt string', async () => {
+      const res = await request(app)
+        .post('/api/transactions/watch')
+        .send({ address: VALID_ADDRESS, walletCreatedAt: 'not-a-date' })
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'invalid walletCreatedAt' })
+    })
+
+    it('rejects future walletCreatedAt', async () => {
+      const future = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+      const res = await request(app)
+        .post('/api/transactions/watch')
+        .send({ address: VALID_ADDRESS, walletCreatedAt: future })
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'invalid walletCreatedAt' })
+    })
+
+    it('rejects walletCreatedAt before 2020-04-01 (Celo genesis floor)', async () => {
+      const res = await request(app)
+        .post('/api/transactions/watch')
+        .send({ address: VALID_ADDRESS, walletCreatedAt: '2019-01-01T00:00:00.000Z' })
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'invalid walletCreatedAt' })
+    })
+  })
 })
 
 describe('GET /api/transactions/feed', () => {
