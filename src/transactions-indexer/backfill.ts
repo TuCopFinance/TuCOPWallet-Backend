@@ -64,6 +64,9 @@ export interface BackfillRpcClient {
     transactionIndex: number | null
     value: bigint
     input: string
+    // See worker.ts IndexerRpcClient for the semantics: CIP-64 fee-token
+    // address, absent for native-CELO-fee txs.
+    feeCurrency?: string | null
   }>
   getTransactionReceipt(args: { hash: Hash }): Promise<{
     status: 'success' | 'reverted'
@@ -93,6 +96,7 @@ export interface BackfillViemLike {
     value: bigint
     input: string
     blockNumber?: bigint
+    feeCurrency?: string | null
   }>
   getTransactionReceipt(args: { hash: `0x${string}` }): Promise<{
     status: 'success' | 'reverted'
@@ -258,6 +262,7 @@ export async function backfillAddress(
             transactionIndex: tx.transactionIndex,
             value: tx.value,
             input: tx.input,
+            feeCurrency: tx.feeCurrency ?? null,
           },
           blockNumber,
           blockTimestampMs,
