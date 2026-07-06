@@ -218,14 +218,19 @@ describe('classify', () => {
     expect(out[0]?.status).toBe('Failed')
   })
 
-  // Regression fixture for Bug 2 (2026-07-05). Reproduces the wallet team's
-  // spike v2 tx 0xb5d1cb4aef... which is a COPm -> USDm swap where the Mento
-  // fee adapter pre-charges + refunds a COPm amount (mirror burn+mint) larger
-  // than the swapped USDm in raw wei. Pre-fix pickHighest picked COPm on both
-  // inbound and outbound; the outbound-minus-inbound heuristic filters COPm
-  // from both aggregates and the classifier picks the semantically correct
-  // pair.
-  it('rule 2: mirror mint/burn refund does not corrupt inAmount/outAmount', () => {
+  // Regression fixture for Bug 2 (2026-07-05) + Bug 4 (2026-07-06) + Option B
+  // (2026-07-06). Reproduces the wallet team's spike v2 tx 0xb5d1cb4aef... -
+  // a COPm -> USDm Mento swap with fee paid in COPm via CIP-64. Verifies:
+  //
+  //   - Bug 2: inAmount and outAmount classify to distinct tokens (not both
+  //     COPm as pre-fix pickHighest emitted due to the mirror mint refund).
+  //   - Option B: outAmount value is the SWAP LEG ONLY (log[1] = 3502.55),
+  //     not the sum of swap + burn + fees + refund. Matches Valora shape
+  //     for continuity with users' Valora screenshots.
+  //   - Bug 4: fees[0].amount.tokenId reflects `tx.feeCurrency` (COPm here),
+  //     not the always-CELO fallback that pre-fix persistTx wrote due to a
+  //     hardcoded null.
+  it('rule 2 + option B: Mento swap with mirror refund + CIP-64 fee', () => {
     const MENTO_POOL = '0x3333333333333333333333333333333333333333'
     const BROKER = '0x4444444444444444444444444444444444444444'
     const FEE_SINK = '0x5555555555555555555555555555555555555555'
@@ -236,12 +241,16 @@ describe('classify', () => {
       from: USER,
       to: SQUID_ROUTER,
       input: '0x12345678' + '00'.repeat(32),
+      // CIP-64 tx paying gas in COPm. Pre-Bug-4, persistTx wrote null here
+      // regardless of the on-chain value and the classifier emitted CELO;
+      // now feeCurrency flows through and the fee row is labeled COPm.
+      feeCurrency: TOKEN_COPM,
     })
-    const swapOut = 3_502_550_000_000_000_000_000n // 3502.55 COPm to pool
+    const swapOut = 3_502_550_000_000_000_000_000n // 3502.55 COPm to pool (swap leg)
     const refund = 32_189_703_752_759_390_600n // 32.189... COPm burn + mirror mint
     const swapIn = 1_013_769_540_000_000_000n // 1.013 USDm from pool
-    const feeSmall = 1_237_994_800_000_000_000n // 1.237 COPm fee
-    const feeAgg = 14_630_401_209_248_830_000n // 14.63 COPm aggregator fee
+    const feeSmall = 1_237_994_800_000_000_000n // 1.237 COPm fee (out to fee sink)
+    const feeAgg = 14_630_401_209_248_830_000n // 14.63 COPm agg fee (out to agg)
     const logs: ClassifierLog[] = [
       transferLog({ logIndex: 0, contract: TOKEN_COPM, from: USER, to: BURN, value: refund }),
       transferLog({ logIndex: 1, contract: TOKEN_COPM, from: USER, to: MENTO_POOL, value: swapOut }),
@@ -257,15 +266,44 @@ describe('classify', () => {
     expect(out).toHaveLength(1)
     const swap = out[0] as SwapTransaction
     expect(swap.type).toBe('SWAP_TRANSACTION')
-    // Pre-fix: both inAmount and outAmount would be COPm because the mirror
-    // mint (32.189 COPm) beats the swap USDm (1.013) in raw wei on the
-    // received side, and the pickHighest on outbound also picked COPm.
-    // Post-fix: COPm appears on both sides -> stripped from both -> received
-    // reduces to {USDm} only, outbound falls back to full soldByToken
-    // (COPm only) and picks COPm.
+    // Bug 2 still fixed.
     expect(swap.outAmount.tokenId).toBe(`celo-mainnet:${TOKEN_COPM}`)
     expect(swap.inAmount.tokenId).toBe(`celo-mainnet:${TOKEN_USDM}`)
     expect(swap.inAmount.value).toBe('1.013769540000000000')
+    // Option B: outAmount is the SWAP LEG only (log[1] = 3502.55 COPm),
+    // not the sum of swap + burn + fees + refund (3550.61 COPm).
+    expect(swap.outAmount.value).toBe('3502.550000000000000000')
+    // Bug 4: fee row labeled with COPm (feeCurrency), not CELO.
+    expect(swap.fees).toHaveLength(1)
+    expect(swap.fees[0]?.amount.tokenId).toBe(`celo-mainnet:${TOKEN_COPM}`)
+    expect(swap.fees[0]?.amount.decimals).toBe(18)
+  })
+
+  // Bug 4 sub-case: adapter-only fee currency (USDC / USDT). The tx pays
+  // gas via the USDC fee-currency adapter contract. The classifier must
+  // surface the underlying USDC token on the fees row, downshifted from
+  // the adapter's 18-decimal normalised units to USDC's 6-decimal native
+  // scale, so the wallet renders "you paid X USDC in gas".
+  it('bug 4: CIP-64 fee via USDC adapter -> underlying USDC on fees[]', () => {
+    const USDC_ADAPTER = '0x2f25deb3848c207fc8e0c34035b3ba7fc157602b'
+    const USDC_UNDERLYING = '0xceba9300f2b948710d2653dd7b07f33a8b32118c'
+    const tx = baseTx({
+      from: USER,
+      to: COUNTERPARTY,
+      // 200_000 gas x 5 gwei-equivalent-in-adapter-units = 1e15 wei (18-normalised)
+      // = 0.001 in underlying USDC terms (6 decimals).
+      gasUsed: 200_000n,
+      effectiveGasPrice: 5_000_000_000n,
+      feeCurrency: USDC_ADAPTER,
+      input: '0xa9059cbb' + addrArg(COUNTERPARTY) + uintArg(1n),
+    })
+    const out = classify(tx, [], USER)
+    expect(out).toHaveLength(1)
+    const fee = out[0]?.fees[0]?.amount
+    expect(fee?.tokenId).toBe(`celo-mainnet:${USDC_UNDERLYING}`)
+    expect(fee?.decimals).toBe(6)
+    // 200000 * 5e9 = 1e15 raw (18-normalised) / 1e12 = 1000 (6-dec raw) = 0.001000 USDC padded
+    expect(fee?.value).toBe('0.001000')
   })
 
   it('unrecognized contract call by user with no Transfer logs returns []', () => {
