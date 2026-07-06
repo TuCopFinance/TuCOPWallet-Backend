@@ -355,7 +355,23 @@ Per-token `status` values: `approved`, `already_approved`, `skipped_no_balance`,
 
 Backend-owned replacement for Valora's `getWalletTransactions`. Indexes Celo blocks for opted-in addresses and classifies into the same `TokenTransaction` shape the wallet already consumes, with an extension for EIP-7702 atomic batches (which Valora omits).
 
-**Required env to enable on Railway:** `DATABASE_URL` (Postgres; migrations run on boot) and `INDEXER_ENABLED=true`. Without these the routes return `503` and the indexer loop is a no-op. Optional: `TX_INDEXER_BACKFILL_BLOCKS` (default `10000`, ~14 h on Celo's 5 s blocks) caps how far back the backfill job scans on first watch; set to `0` to disable backfill.
+**Required env to enable on Railway:** `DATABASE_URL` (Postgres; migrations run on boot) and `INDEXER_ENABLED=true`. Without these the routes return `503` and the indexer loop is a no-op.
+
+**Historical backfill (`POST /watch` triggers, resumable across restarts):**
+
+- `TX_INDEXER_BACKFILL_BLOCKS` (default `10000`, tunable up to millions of blocks). Depth of the historical scan window measured from the current tip at first-watch time.
+- `TX_INDEXER_BACKFILL_CHUNK_DELAY_MS` (default `150`). Baseline sleep between eth_getLogs chunks. Doubles up to `TX_INDEXER_BACKFILL_MAX_DELAY_MS` (default `5000`) on RPC failure and decays back down on success.
+- `TX_INDEXER_BACKFILL_ENABLED` (default `true`). Kill switch for the backfill loop specifically; `/watch` still registers addresses when disabled but no historical scan runs.
+
+The backfill uses the same primary -> forno -> ankr -> drpc fallback chain the Neeru indexer ships (see `src/lib/celoRpcFallback.ts`); a circuit breaker per endpoint (3 fails -> skip 5 min) transparently rotates around Cloudflare 1015 / 429s / timeouts. Progress is checkpointed per chunk (`watched_address.backfill_cursor_block` advances inside the same transaction that persists the chunk's tx rows), so a Railway redeploy mid-scan resumes exactly where it left off. The boot path calls `resumePendingBackfills(db)` to auto-restart every `backfill_completed_at IS NULL AND backfill_cursor_block IS NOT NULL` row.
+
+Grafana metrics for the backfill loop:
+
+```text
+transactions_indexer_backfill_chunks_total{outcome="ok|persist_error|rpc_error"}
+transactions_indexer_backfill_active_jobs
+transactions_indexer_backfill_blocks_remaining
+```
 
 **Kill switches (evaluated per-request; flip takes effect on next request without a restart):**
 
