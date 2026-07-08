@@ -126,6 +126,56 @@ describe('classify', () => {
     expect(swap.fromTokenAmounts).toBeUndefined()
   })
 
+  it('rule 2 multi-hop: Squid Router fundAndRunMulticall with DIFFERENT counterparties on outbound and inbound classifies as SWAP_TRANSACTION', () => {
+    // Real-world shape from tx
+    // 0x28d17073f7bd30d88d429169e38f675aa3d8c826ecaa9961a2708e05ffdfb0b9
+    // (wallet team's diff 2026-07-08). User calls Squid Router which
+    // routes through Mento pool A for the outbound leg and Mento pool
+    // B for the inbound leg. Router itself never appears as
+    // counterparty in any Transfer log.
+    const MENTO_POOL_A = '0xad6cea45f98444a922a2b4fe96b8c90f0862d2f4'
+    const MENTO_POOL_B = '0x34757893070b0fc5de37aaf2844255ff90f7f1e0'
+    const tx = baseTx({
+      from: USER,
+      to: SQUID_ROUTER,
+      input: '0x58181a80' + '00'.repeat(32),
+    })
+    const logs: ClassifierLog[] = [
+      transferLog({ logIndex: 0, contract: TOKEN_COPM, from: USER, to: MENTO_POOL_A, value: 100_000_000_000_000_000_000n }),
+      transferLog({ logIndex: 1, contract: TOKEN_COPM, from: MENTO_POOL_A, to: MENTO_POOL_B, value: 100_000_000_000_000_000_000n }),
+      transferLog({ logIndex: 2, contract: TOKEN_USDC, from: MENTO_POOL_B, to: USER, value: 1_005_678n }),
+    ]
+    const out = classify(tx, logs, USER)
+    expect(out).toHaveLength(1)
+    const swap = out[0] as SwapTransaction
+    expect(swap.type).toBe('SWAP_TRANSACTION')
+    expect(swap.outAmount.tokenId).toBe(`celo-mainnet:${TOKEN_COPM}`)
+    expect(swap.inAmount.tokenId).toBe(`celo-mainnet:${TOKEN_USDC}`)
+  })
+
+  it('rule 2 multi-hop: unknown router (NOT in KNOWN_AGGREGATOR_TARGETS) still requires counterparty intersection', () => {
+    // Sanity: relaxing the intersect check ONLY for known aggregators.
+    // Unknown routers still need the classic same-intermediary heuristic
+    // to avoid false-positives on random contracts that happen to have
+    // multi-way Transfer logs.
+    const UNKNOWN_ROUTER = '0x9999999999999999999999999999999999999999'
+    const RANDOM_POOL_A = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const RANDOM_POOL_B = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    const tx = baseTx({
+      from: USER,
+      to: UNKNOWN_ROUTER,
+      input: '0x12345678' + '00'.repeat(32),
+    })
+    const logs: ClassifierLog[] = [
+      transferLog({ logIndex: 0, contract: TOKEN_COPM, from: USER, to: RANDOM_POOL_A, value: 100n }),
+      transferLog({ logIndex: 1, contract: TOKEN_USDC, from: RANDOM_POOL_B, to: USER, value: 1n }),
+    ]
+    const out = classify(tx, logs, USER)
+    // No same-counterparty match on an unknown router -> classifier
+    // does not treat this as a swap and falls through.
+    expect(out.some((o) => o.type === 'SWAP_TRANSACTION')).toBe(false)
+  })
+
   it('rule 3: ERC20 approve returns APPROVAL', () => {
     const tx = baseTx({
       from: USER,
