@@ -2,6 +2,7 @@ import type { Pool } from 'pg'
 import type { FallbackExecutor } from '../lib/celoRpcFallback'
 import {
   _testHelpers,
+  reopenBackfillIfDeeper,
   resumePendingBackfills,
   runBackfillLoopForAddress,
   triggerBackfill,
@@ -15,6 +16,7 @@ interface DbRow {
   address: string
   backfill_cursor_block: string | null
   backfill_end_block: string | null
+  backfill_initial_from_block: string | null
   backfill_completed_at: Date | null
   backfill_last_error: string | null
 }
@@ -29,6 +31,7 @@ function buildMockDb(initial: Partial<DbRow> = {}): Pool {
     address: (initial.address ?? ADDR).toLowerCase(),
     backfill_cursor_block: initial.backfill_cursor_block ?? null,
     backfill_end_block: initial.backfill_end_block ?? null,
+    backfill_initial_from_block: initial.backfill_initial_from_block ?? null,
     backfill_completed_at: initial.backfill_completed_at ?? null,
     backfill_last_error: initial.backfill_last_error ?? null,
   }
@@ -44,6 +47,7 @@ function buildMockDb(initial: Partial<DbRow> = {}): Pool {
             {
               backfill_cursor_block: row.backfill_cursor_block,
               backfill_end_block: row.backfill_end_block,
+              backfill_initial_from_block: row.backfill_initial_from_block,
               backfill_completed_at: row.backfill_completed_at,
             },
           ],
@@ -67,6 +71,15 @@ function buildMockDb(initial: Partial<DbRow> = {}): Pool {
       ) {
         row.backfill_cursor_block = params[0] as string
         row.backfill_end_block = params[1] as string
+        if (n.includes('BACKFILL_INITIAL_FROM_BLOCK = $1')) {
+          row.backfill_initial_from_block = params[0] as string
+        }
+        if (n.includes('BACKFILL_COMPLETED_AT = NULL')) {
+          row.backfill_completed_at = null
+        }
+        if (n.includes('BACKFILL_LAST_ERROR = NULL')) {
+          row.backfill_last_error = null
+        }
         return { rows: [] }
       }
       if (
@@ -451,5 +464,107 @@ describe('walletCreatedAtToFromBlock', () => {
     const created = new Date(CELO_L2_MIGRATION_MS).toISOString()
     const tip = 100n // tiny tip
     expect(walletCreatedAtToFromBlock(created, tip, now)).toBe(0n)
+  })
+})
+
+describe('reopenBackfillIfDeeper', () => {
+  it('no-ops when the row has never completed a backfill', async () => {
+    const db = buildMockDb({
+      address: ADDR,
+      backfill_cursor_block: '100',
+      backfill_end_block: '200',
+      backfill_completed_at: null,
+    })
+    const opened = await reopenBackfillIfDeeper(db, ADDR, 90_000_000n, '2020-06-01T00:00:00Z')
+    expect(opened).toBe(false)
+  })
+
+  it('re-opens a legacy completed row (initial_from IS NULL) with walletCreatedAt', async () => {
+    // Simulate a wallet backfilled BEFORE PR #100 with default depth
+    // 10000 blocks. backfill_initial_from_block is NULL so we cannot
+    // tell what the original floor was; the re-open falls back to
+    // scanning up to the previous end_block.
+    const now = Date.parse('2026-07-07T00:00:00Z')
+    const jestNowSpy = jest.spyOn(Date, 'now').mockReturnValue(now)
+    try {
+      const db = buildMockDb({
+        address: ADDR,
+        backfill_cursor_block: '89990001',
+        backfill_end_block: '89990000', // completed: cursor = end + 1
+        backfill_initial_from_block: null,
+        backfill_completed_at: new Date('2026-07-06T20:00:00Z'),
+      })
+      const opened = await reopenBackfillIfDeeper(
+        db,
+        ADDR,
+        90_000_000n,
+        '2026-06-15T00:00:00.000Z',
+      )
+      expect(opened).toBe(true)
+      const row = (db as unknown as { _row: DbRow })._row
+      expect(row.backfill_completed_at).toBeNull()
+      // walletCreatedAt 22 days back at 1 s/block post-L2 = 1_900_800 blocks
+      // fromBlock = tip - 1_900_800 = 88_099_200
+      expect(row.backfill_cursor_block).toBe('88099200')
+      expect(row.backfill_initial_from_block).toBe('88099200')
+      // Legacy path: end_block stays at the previous end (redundant scan
+      // acceptable because persistTx is upsert-idempotent).
+      expect(row.backfill_end_block).toBe('89990000')
+    } finally {
+      jestNowSpy.mockRestore()
+    }
+  })
+
+  it('re-opens with new end = initial_from - 1 when initial_from was recorded', async () => {
+    // Post-PR #101 row: initial_from = 89_990_000 recorded from prior
+    // /watch. New walletCreatedAt implies a deeper 88_000_000. Only the
+    // NEW range [88_000_000, 89_989_999] should be scanned.
+    const now = Date.parse('2026-07-07T00:00:00Z')
+    const jestNowSpy = jest.spyOn(Date, 'now').mockReturnValue(now)
+    try {
+      const db = buildMockDb({
+        address: ADDR,
+        backfill_cursor_block: '90000001',
+        backfill_end_block: '90000000',
+        backfill_initial_from_block: '89990000',
+        backfill_completed_at: new Date('2026-07-06T20:00:00Z'),
+      })
+      // Pick a walletCreatedAt that puts derived from at 88_000_000
+      // (2 000 000 blocks back at 1 s/block = ~23 days back)
+      const deepIso = new Date(now - 2_000_000_000).toISOString()
+      const opened = await reopenBackfillIfDeeper(db, ADDR, 90_000_000n, deepIso)
+      expect(opened).toBe(true)
+      const row = (db as unknown as { _row: DbRow })._row
+      expect(row.backfill_completed_at).toBeNull()
+      expect(row.backfill_cursor_block).toBe('88000000')
+      expect(row.backfill_initial_from_block).toBe('88000000')
+      expect(row.backfill_end_block).toBe('89989999')
+    } finally {
+      jestNowSpy.mockRestore()
+    }
+  })
+
+  it('no-ops when the row already scanned as deep as the new walletCreatedAt', async () => {
+    const now = Date.parse('2026-07-07T00:00:00Z')
+    const jestNowSpy = jest.spyOn(Date, 'now').mockReturnValue(now)
+    try {
+      const db = buildMockDb({
+        address: ADDR,
+        backfill_cursor_block: '90000001',
+        backfill_end_block: '90000000',
+        backfill_initial_from_block: '85000000', // already deep
+        backfill_completed_at: new Date('2026-07-06T20:00:00Z'),
+      })
+      // walletCreatedAt implies from = tip - 1_000_000 = 89_000_000
+      // which is NOT deeper than existing 85_000_000, so no-op.
+      const shallowIso = new Date(now - 1_000_000_000).toISOString()
+      const opened = await reopenBackfillIfDeeper(db, ADDR, 90_000_000n, shallowIso)
+      expect(opened).toBe(false)
+      const row = (db as unknown as { _row: DbRow })._row
+      expect(row.backfill_completed_at).not.toBeNull()
+      expect(row.backfill_initial_from_block).toBe('85000000')
+    } finally {
+      jestNowSpy.mockRestore()
+    }
   })
 })
