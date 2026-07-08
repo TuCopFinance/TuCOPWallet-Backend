@@ -406,7 +406,9 @@ Registers an address for indexing and triggers a one-shot historical backfill in
 - Hard cap: never scans more than 5 000 000 blocks even if the timestamp implies deeper. This protects the RPC budget for other watched wallets from an accidentally-huge backfill.
 - The formula segments across the Celo L2 migration (block 31 056 500 at `2025-03-26T00:00:00Z`): ~1 s/block post-L2, ~5 s/block pre-L2.
 
-When `walletCreatedAt` is omitted, the backfill uses the existing `TX_INDEXER_BACKFILL_BLOCKS` default (10 000 blocks ~ 2.8 hours on Celo L2). Passing it is safe on repeat `/watch` calls: the window is only initialised once per address and subsequent `/watch` requests do not re-trigger backfill if it is already complete.
+When `walletCreatedAt` is omitted, the backfill uses the existing `TX_INDEXER_BACKFILL_BLOCKS` default (10 000 blocks ~ 2.8 hours on Celo L2). Passing it is safe on repeat `/watch` calls.
+
+**Legacy re-open path.** When a repeat `/watch` call carries `walletCreatedAt` on an already-completed row and the derived `fromBlock` is DEEPER than what was originally scanned, the backfill window re-opens one-shot to scan `[new fromBlock, previous fromBlock - 1]` (or `[new fromBlock, previous end_block]` on rows backfilled before 2026-07-07, which do not record their original floor). The new floor is recorded in `backfill_initial_from_block` so subsequent `/watch` calls with the same or shallower `walletCreatedAt` no-op. `persistTx` is upsert-idempotent so any legacy-path overlap is harmless. Introduced when the WRI feed rollout at 100% (2026-07-06) surfaced coverage gaps on wallets that had been watched with the pre-`walletCreatedAt` default depth.
 
 Response `200`:
 

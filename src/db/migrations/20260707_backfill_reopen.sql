@@ -1,0 +1,21 @@
+-- Track the initial fromBlock of the last-triggered backfill window so
+-- subsequent /watch calls with a `walletCreatedAt` deeper than what we
+-- already scanned can re-open the backfill to extend coverage backwards.
+--
+-- Context (2026-07-07): PR #100 shipped walletCreatedAt support on
+-- /watch, but /watch is idempotent when backfill_completed_at IS NOT
+-- NULL. Wallets that were watched BEFORE PR #100 landed had shallow
+-- default-depth backfills (~10k blocks) and cannot benefit from a
+-- deeper walletCreatedAt-derived window without re-opening. The wallet
+-- team's diff-runner surfaced this as a real coverage gap right after
+-- flipping WRI_TX_FEED_TUCOP_V1 to 100% (Valora returned 27 more txs
+-- for spike v2 than TuCop had indexed, purely because of window size).
+--
+-- Semantics:
+--   backfill_initial_from_block = the fromBlock the current or last
+--   backfill window started at. Set on window init; updated on every
+--   re-open. Nullable so legacy rows (backfilled pre-2026-07-07) can be
+--   detected and given a one-shot re-open with their wallet-provided
+--   walletCreatedAt.
+ALTER TABLE watched_address
+  ADD COLUMN IF NOT EXISTS backfill_initial_from_block bigint;

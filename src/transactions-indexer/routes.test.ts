@@ -64,8 +64,10 @@ jest.mock('../lib/celoClient', () => {
 })
 
 const mockTriggerBackfill = jest.fn()
+const mockReopenBackfillIfDeeper = jest.fn()
 jest.mock('./backfill', () => ({
   triggerBackfill: (...args: unknown[]) => mockTriggerBackfill(...args),
+  reopenBackfillIfDeeper: (...args: unknown[]) => mockReopenBackfillIfDeeper(...args),
 }))
 
 import { app } from '../app'
@@ -74,6 +76,9 @@ describe('POST /api/transactions/watch', () => {
   beforeEach(() => {
     mockQuery.mockClear()
     mockTriggerBackfill.mockClear()
+    mockReopenBackfillIfDeeper.mockClear()
+    mockGetBlockNumber.mockReset()
+    mockGetBlockNumber.mockResolvedValue(90_000_000n)
     dbMode = 'happy'
     watchInsertRow = {
       backfill_started_at: new Date('2026-06-29T20:00:00.000Z'),
@@ -191,6 +196,68 @@ describe('POST /api/transactions/watch', () => {
         .send({ address: VALID_ADDRESS, walletCreatedAt: '2019-01-01T00:00:00.000Z' })
       expect(res.status).toBe(400)
       expect(res.body).toEqual({ error: 'invalid walletCreatedAt' })
+    })
+  })
+
+  describe('backfillCompleted + walletCreatedAt re-open path', () => {
+    beforeEach(() => {
+      watchInsertRow = {
+        backfill_started_at: new Date('2026-06-29T20:00:00.000Z'),
+        backfill_completed_at: new Date('2026-06-29T20:05:00.000Z'),
+      }
+    })
+
+    it('calls reopenBackfillIfDeeper when completed row receives walletCreatedAt', async () => {
+      mockReopenBackfillIfDeeper.mockResolvedValue(true)
+      const res = await request(app)
+        .post('/api/transactions/watch')
+        .send({ address: VALID_ADDRESS, walletCreatedAt: '2026-01-15T10:30:00.000Z' })
+      expect(res.status).toBe(200)
+      expect(res.body.backfillCompleted).toBe(true)
+      // The re-open runs in a background task; give it a tick.
+      await new Promise((r) => setImmediate(r))
+      expect(mockReopenBackfillIfDeeper).toHaveBeenCalledTimes(1)
+      const [, address, tip, iso] = mockReopenBackfillIfDeeper.mock.calls[0]
+      expect(address).toBe(VALID_ADDRESS)
+      expect(tip).toBe(90_000_000n)
+      expect(iso).toBe('2026-01-15T10:30:00.000Z')
+    })
+
+    it('triggers backfill only when reopenBackfillIfDeeper returns true', async () => {
+      mockReopenBackfillIfDeeper.mockResolvedValue(true)
+      await request(app)
+        .post('/api/transactions/watch')
+        .send({ address: VALID_ADDRESS, walletCreatedAt: '2026-01-15T10:30:00.000Z' })
+      await new Promise((r) => setImmediate(r))
+      expect(mockTriggerBackfill).toHaveBeenCalledTimes(1)
+    })
+
+    it('does NOT trigger backfill when reopen returns false (nothing deeper to scan)', async () => {
+      mockReopenBackfillIfDeeper.mockResolvedValue(false)
+      await request(app)
+        .post('/api/transactions/watch')
+        .send({ address: VALID_ADDRESS, walletCreatedAt: '2026-01-15T10:30:00.000Z' })
+      await new Promise((r) => setImmediate(r))
+      expect(mockReopenBackfillIfDeeper).toHaveBeenCalledTimes(1)
+      expect(mockTriggerBackfill).not.toHaveBeenCalled()
+    })
+
+    it('does NOT call reopenBackfillIfDeeper when walletCreatedAt is absent (existing idempotent behaviour)', async () => {
+      await request(app).post('/api/transactions/watch').send({ address: VALID_ADDRESS })
+      await new Promise((r) => setImmediate(r))
+      expect(mockReopenBackfillIfDeeper).not.toHaveBeenCalled()
+      expect(mockTriggerBackfill).not.toHaveBeenCalled()
+    })
+
+    it('swallows RPC failures from the tip lookup without failing the /watch response', async () => {
+      mockGetBlockNumber.mockRejectedValueOnce(new Error('forno down'))
+      const res = await request(app)
+        .post('/api/transactions/watch')
+        .send({ address: VALID_ADDRESS, walletCreatedAt: '2026-01-15T10:30:00.000Z' })
+      expect(res.status).toBe(200)
+      await new Promise((r) => setImmediate(r))
+      expect(mockReopenBackfillIfDeeper).not.toHaveBeenCalled()
+      expect(mockTriggerBackfill).not.toHaveBeenCalled()
     })
   })
 })

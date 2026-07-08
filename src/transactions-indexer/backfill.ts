@@ -168,6 +168,7 @@ async function rpcFetchTx(
 interface BackfillWindow {
   cursorBlock: bigint | null
   endBlock: bigint | null
+  initialFromBlock: bigint | null
   completedAt: Date | null
 }
 
@@ -178,10 +179,12 @@ async function readBackfillWindow(
   const { rows } = await db.query<{
     backfill_cursor_block: string | null
     backfill_end_block: string | null
+    backfill_initial_from_block: string | null
     backfill_completed_at: Date | null
   }>(
     `SELECT backfill_cursor_block::text AS backfill_cursor_block,
             backfill_end_block::text AS backfill_end_block,
+            backfill_initial_from_block::text AS backfill_initial_from_block,
             backfill_completed_at
        FROM watched_address WHERE address = $1`,
     [address],
@@ -191,6 +194,9 @@ async function readBackfillWindow(
   return {
     cursorBlock: row.backfill_cursor_block ? BigInt(row.backfill_cursor_block) : null,
     endBlock: row.backfill_end_block ? BigInt(row.backfill_end_block) : null,
+    initialFromBlock: row.backfill_initial_from_block
+      ? BigInt(row.backfill_initial_from_block)
+      : null,
     completedAt: row.backfill_completed_at,
   }
 }
@@ -220,7 +226,8 @@ async function initializeBackfillWindowIfNeeded(
   await db.query(
     `UPDATE watched_address
        SET backfill_cursor_block = $1,
-           backfill_end_block = $2
+           backfill_end_block = $2,
+           backfill_initial_from_block = $1
      WHERE address = $3`,
     [from.toString(), end.toString(), address],
   )
@@ -228,6 +235,71 @@ async function initializeBackfillWindowIfNeeded(
     `backfill window initialized for ${address}: [${from.toString()}, ${end.toString()}]${walletCreatedAtIso ? ` (walletCreatedAt=${walletCreatedAtIso})` : ''}`,
   )
   return { cursor: from, end }
+}
+
+// Re-open a completed backfill when a new /watch call carries a
+// `walletCreatedAt` that implies a fromBlock DEEPER than what we
+// already scanned. One-shot per row: after the re-opened window
+// finishes, `backfill_initial_from_block` records the new floor and
+// subsequent /watch calls with the same or shallower walletCreatedAt
+// no-op.
+//
+// Scanned range on re-open:
+//   [walletCreatedAt-derived new_from, existing initial_from - 1]
+//
+// For legacy rows (backfilled pre-2026-07-07, `initial_from_block` IS
+// NULL), we do not know the original scanned floor, so we conservatively
+// re-scan up to `backfill_end_block` (the tip when the original
+// backfill snapped). persistTx is upsert-idempotent so overlap is safe;
+// it costs a bounded amount of redundant RPC work per legacy row, once.
+//
+// Returns true when the row was re-opened (backfill loop should be
+// triggered), false when the row already covers the requested
+// walletCreatedAt (no-op).
+export async function reopenBackfillIfDeeper(
+  db: Pool,
+  address: string,
+  currentTip: bigint,
+  walletCreatedAtIso: string,
+): Promise<boolean> {
+  const window = await readBackfillWindow(db, address)
+  if (!window) return false
+  if (!window.completedAt) return false
+  if (window.endBlock == null) return false
+  const derivedFrom = walletCreatedAtToFromBlock(walletCreatedAtIso, currentTip)
+  // If the row already recorded an initial_from and the new derived
+  // fromBlock is not deeper, nothing to do.
+  if (window.initialFromBlock != null && derivedFrom >= window.initialFromBlock) {
+    return false
+  }
+  // New end for the re-opened window: the boundary between what we
+  // already scanned and the new deeper range. For legacy rows without
+  // a recorded initial_from we accept the redundant re-scan up to
+  // the previous end block.
+  const newEnd =
+    window.initialFromBlock != null && window.initialFromBlock > 0n
+      ? window.initialFromBlock - 1n
+      : window.endBlock
+  if (derivedFrom > newEnd) {
+    // walletCreatedAt implies a range above what we would scan (edge
+    // case, e.g. very-recent walletCreatedAt on an older-tip
+    // backfill). Nothing to re-open.
+    return false
+  }
+  await db.query(
+    `UPDATE watched_address
+       SET backfill_completed_at = NULL,
+           backfill_cursor_block = $1,
+           backfill_end_block = $2,
+           backfill_initial_from_block = $1,
+           backfill_last_error = NULL
+     WHERE address = $3`,
+    [derivedFrom.toString(), newEnd.toString(), address],
+  )
+  log.info(
+    `backfill re-opened for ${address}: [${derivedFrom.toString()}, ${newEnd.toString()}] (walletCreatedAt=${walletCreatedAtIso})`,
+  )
+  return true
 }
 
 async function markBackfillCompleted(db: Pool, address: string): Promise<void> {
