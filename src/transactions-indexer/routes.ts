@@ -8,7 +8,7 @@ import {
   transactionsIndexerLagBlocks,
   transactionsIndexerWatchedAddresses,
 } from '../lib/metrics'
-import { triggerBackfill } from './backfill'
+import { reopenBackfillIfDeeper, triggerBackfill } from './backfill'
 import { classify } from './classifier'
 import { enrichTransactionWithLocalAmount } from './priceOracle'
 import type {
@@ -201,6 +201,32 @@ router.post('/api/transactions/watch', async (req: Request, res: Response) => {
   // SAFETY_MAX_BACKFILL_BLOCKS in backfill.ts).
   if (!backfillCompleted) {
     triggerBackfill(db, address, walletCreatedAtIso ? { walletCreatedAtIso } : {})
+  } else if (walletCreatedAtIso) {
+    // Row is completed but a walletCreatedAt was supplied. Legacy rows
+    // (backfilled pre-2026-07-07) and rows whose original window did
+    // not reach as deep as the new walletCreatedAt implies get a
+    // one-shot re-open here. Fires from a background task so /watch
+    // stays fast; the wallet does not block on the outcome. Any RPC
+    // failure inside reopenBackfillIfDeeper is confined and logged.
+    void (async () => {
+      try {
+        const client = getCeloPublicClient()
+        const tip = await client.getBlockNumber()
+        const reopened = await reopenBackfillIfDeeper(
+          db,
+          address,
+          tip,
+          walletCreatedAtIso,
+        )
+        if (reopened) {
+          triggerBackfill(db, address, { walletCreatedAtIso })
+        }
+      } catch (err) {
+        log.warn(
+          `reopen check failed for ${address}: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    })()
   }
 
   return res.json({ ok: true, backfillStartedAt, backfillCompleted })
