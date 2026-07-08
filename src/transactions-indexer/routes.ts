@@ -64,7 +64,12 @@ const HEALTH_RPC_TIMEOUT_MS = 1_500
 // wallet already ships in production (v1.118.5). EarnTransaction gained
 // appName + inAmount + outAmount (mirrored TokenAmount). v4 payloads are
 // missing these fields and would render as `undefined` in the wallet UI.
-const CACHE_SCHEMA_VERSION = 5
+// v6 (2026-07-08): classifyAggregatorSwap gained a KNOWN_AGGREGATOR_TARGETS
+// path so Squid Router `fundAndRunMulticall` txs (multi-hop routes with no
+// shared counterparty in Transfer logs) now classify as SWAP_TRANSACTION.
+// v5 cached payloads for those txs may be missing entirely from /feed and
+// need re-classification.
+const CACHE_SCHEMA_VERSION = 6
 
 interface CachedPayload {
   schemaVersion: number

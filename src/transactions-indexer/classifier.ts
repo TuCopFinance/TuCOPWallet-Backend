@@ -34,6 +34,22 @@ const SELECTOR_TRANSFER_FROM = '0x23b872dd' // transferFrom(address,address,uint
 // 0xbefe73327f874c2e60ef95939499ecbb72c2a61478eb20f011ff9e4d745be5d8.
 const SELECTOR_EXECUTE = '0x3f707e6b'
 
+// Known aggregator entry points (tx.to when the user calls the aggregator
+// directly). Used by classifyAggregatorSwap to recognize routes where the
+// counterparty pattern in Transfer logs does NOT go through a single
+// intermediary (e.g. Squid fundAndRunMulticall routes through multiple
+// Mento pools; outbound counterparty = pool A, inbound = pool B, they
+// do not intersect). Confirmed via the wallet team's diff runner
+// 2026-07-08: tx 0x28d17073... spike v2 -> Squid Router 0xce16f6.. with
+// outbound COPm to 0xad6cea45.. and inbound USDC from 0x34757893..
+const KNOWN_AGGREGATOR_TARGETS: ReadonlySet<string> = new Set([
+  '0xce16f69375520ab01377ce7b88f5ba8c48f8d666', // Squid Router (Celo)
+])
+
+function isKnownAggregatorTarget(to: string | null): boolean {
+  return to != null && KNOWN_AGGREGATOR_TARGETS.has(to.toLowerCase())
+}
+
 // CELO is an ERC20 with its own contract (0x471E...A438), not a chain-native
 // sentinel. The wallet's token registry only knows the contract id, so a
 // `celo-mainnet:native` sentinel would render as an unknown token.
@@ -327,9 +343,20 @@ function classifyAggregatorSwap(
   logs: ClassifierLog[],
   userAddress: string,
 ): SwapTransaction | null {
-  // Plan rule 2: detect Transfer(user -> X) + Transfer(X -> user) where X is
-  // the same intermediary contract. We don't hardcode the router address; any
-  // contract that follows this Transfer pattern is treated as a swap.
+  // Plan rule 2: detect a swap when the user's tx moves at least one token
+  // OUT of the wallet and receives at least one different token back.
+  //
+  // Two paths:
+  //   1) Same-counterparty (Uniswap-style single pool, some legacy Squid
+  //      routes): outboundCounterparty == inboundCounterparty. Kept as the
+  //      original heuristic so any router follows this pattern is treated
+  //      as a swap without needing a hardcoded address.
+  //   2) Known aggregator target (Squid Router fundAndRunMulticall, other
+  //      multi-hop aggregators): routing goes through multiple pools with
+  //      NO shared counterparty in the Transfer logs. Added 2026-07-08
+  //      after the wallet team's diff runner surfaced 4 fundAndRunMulticall
+  //      txs missing from /feed because path (1) failed. See
+  //      KNOWN_AGGREGATOR_TARGETS above.
   const userLower = userAddress.toLowerCase()
   if (tx.from.toLowerCase() !== userLower) return null
 
@@ -338,12 +365,18 @@ function classifyAggregatorSwap(
   const inbound = transfers.filter((m) => m.to === userLower)
   if (outbound.length === 0 || inbound.length === 0) return null
 
-  // The aggregator is the address that received tokens from the user AND
-  // returned (different) tokens to the user.
-  const outboundCounterparties = new Set(outbound.map((m) => m.to))
-  const inboundCounterparties = new Set(inbound.map((m) => m.from))
-  const intersect = [...outboundCounterparties].filter((a) => inboundCounterparties.has(a))
-  if (intersect.length === 0) return null
+  const aggregatorTarget = isKnownAggregatorTarget(tx.to)
+  if (!aggregatorTarget) {
+    // Path 1: require the same intermediary for the outbound and inbound
+    // legs. Legacy behaviour; do not weaken for unknown routers to avoid
+    // false-positives on random contracts that happen to move both ways.
+    const outboundCounterparties = new Set(outbound.map((m) => m.to))
+    const inboundCounterparties = new Set(inbound.map((m) => m.from))
+    const intersect = [...outboundCounterparties].filter((a) =>
+      inboundCounterparties.has(a),
+    )
+    if (intersect.length === 0) return null
+  }
 
   // Option B: swap-leg-only filter (same rationale as classify7702Atomic).
   const { swapOutbound, swapInbound } = filterToSwapLegs(outbound, inbound)
