@@ -428,6 +428,17 @@ const PRE_L2_SECS_PER_BLOCK = 5
 // 8 weeks post-L2 which covers 99%+ of TuCop user creation dates today.
 const SAFETY_MAX_BACKFILL_BLOCKS = 5_000_000n
 
+// Absolute safety cushion added to the derived from-block. Real Celo L2
+// block time averages ~1.04 s/block, not the flat 1 s the formula assumes;
+// over 14 days that under-estimates the block delta by ~4-8k blocks and
+// leaves the very first txs of the wallet outside the scan window. Fixed
+// by shifting the derived fromBlock BACKWARD by this many blocks. Also
+// covers the case where a wallet was pre-funded a few blocks before the
+// user-set creation timestamp. Observed 2026-07-08 with spike v2
+// (walletCreatedAt=2026-06-24, actual first tx block ~7k blocks deeper
+// than the formula's estimate).
+const WALLET_CREATED_AT_SAFETY_BUFFER_BLOCKS = 50_000n
+
 export function walletCreatedAtToFromBlock(
   walletCreatedAtIso: string,
   currentTip: bigint,
@@ -449,6 +460,9 @@ export function walletCreatedAtToFromBlock(
       BigInt(postL2Seconds * POST_L2_SECS_PER_BLOCK) +
       BigInt(Math.floor(preL2Seconds / PRE_L2_SECS_PER_BLOCK))
   }
+  // Add safety buffer BEFORE the cap so the cap remains the hard ceiling
+  // (a caller cannot escape the 5M limit by chaining the buffer).
+  approxBlocks += WALLET_CREATED_AT_SAFETY_BUFFER_BLOCKS
   if (approxBlocks > SAFETY_MAX_BACKFILL_BLOCKS) {
     approxBlocks = SAFETY_MAX_BACKFILL_BLOCKS
   }
