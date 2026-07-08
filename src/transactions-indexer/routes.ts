@@ -503,10 +503,19 @@ async function writeCache(
       schemaVersion: CACHE_SCHEMA_VERSION,
       transactions: payload,
     }
+    // UPSERT so stale rows written under a prior CACHE_SCHEMA_VERSION get
+    // refreshed on the next /feed hit. Prior `DO NOTHING` preserved the
+    // stale payload; because `tryReadCache` returns null on version
+    // mismatch, every request re-classified but never persisted the fresh
+    // payload. Symptom (2026-07-08): v5 -> v6 rolled out and 4 Squid multi
+    // hop txs stayed invisible in /feed even though the v6 classifier
+    // emits them correctly. Payload-only update; the (network_id, tx_hash,
+    // user_address) tuple is the natural key and never mutates.
     await db.query(
       `INSERT INTO classified_tx_cache (network_id, tx_hash, user_address, payload_json)
        VALUES ($1, $2, $3, $4::jsonb)
-       ON CONFLICT (network_id, tx_hash, user_address) DO NOTHING`,
+       ON CONFLICT (network_id, tx_hash, user_address)
+         DO UPDATE SET payload_json = EXCLUDED.payload_json`,
       [networkId, txHash, userAddress, JSON.stringify(versioned)],
     )
   } catch (err) {
