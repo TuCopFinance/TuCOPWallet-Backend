@@ -458,6 +458,75 @@ router.get('/api/transactions/indexer/health', async (_req: Request, res: Respon
   })
 })
 
+// Constant-time string compare; guards the admin token check against
+// timing attacks that could leak the value one character at a time.
+function safeStringEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  }
+  return diff === 0
+}
+
+// Admin: reset one address's backfill window so the next /watch call
+// re-initialises it from scratch. Used when the initial re-open scanned
+// an incorrect range (block-time slippage, RPC silent-fail) and the
+// only forward path is to re-scan the same window with the current
+// classifier / fetcher. Sends 4 NULLs into watched_address so the row
+// falls back to the fresh-init branch in
+// `initializeBackfillWindowIfNeeded`.
+//
+// Auth: shared secret via `Authorization: Bearer <TX_ADMIN_TOKEN>`.
+// Compared in constant time. When the env var is unset, the route
+// gates to 503 so a leaked URL cannot force expensive re-scans.
+//
+// Discovered 2026-07-08: spike v2 had 4 Squid multi-hop txs that never
+// reached the tx table (silent fetch failure). Legacy re-open logic
+// only extends deeper, so we had no way to force a re-scan of the
+// [initial_from, previous_end] range where the txs actually lived.
+router.post('/api/admin/reset-backfill', async (req: Request, res: Response) => {
+  const expected = env.TX_ADMIN_TOKEN
+  if (!expected) {
+    return res.status(503).json({ error: 'admin not configured' })
+  }
+  const authHeader = req.header('authorization') ?? ''
+  const provided = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+  if (!provided || !safeStringEqual(provided, expected)) {
+    return res.status(401).json({ error: 'unauthorized' })
+  }
+  const body = (req.body ?? {}) as { address?: unknown }
+  if (typeof body.address !== 'string' || !HEX_ADDRESS_RE.test(body.address)) {
+    return res.status(400).json({ error: 'invalid address' })
+  }
+  const address = body.address.toLowerCase()
+  const db = getDb()
+  if (!db) {
+    return res.status(503).json({ error: 'database not configured' })
+  }
+  try {
+    const result = await db.query(
+      `UPDATE watched_address
+          SET backfill_completed_at = NULL,
+              backfill_cursor_block = NULL,
+              backfill_end_block = NULL,
+              backfill_initial_from_block = NULL,
+              backfill_last_error = NULL
+        WHERE address = $1
+        RETURNING address`,
+      [address],
+    )
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'address not watched' })
+    }
+    log.warn(`admin reset-backfill for ${address} (state cleared)`)
+    return res.json({ ok: true, address, message: 'backfill state cleared - next /watch will re-init' })
+  } catch (err) {
+    log.error('admin reset-backfill failed:', err instanceof Error ? err.message : err)
+    return res.status(500).json({ error: 'database error' })
+  }
+})
+
 async function tryReadCache(
   db: NonNullable<ReturnType<typeof getDb>>,
   networkId: string,

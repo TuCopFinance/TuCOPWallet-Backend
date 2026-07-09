@@ -536,3 +536,92 @@ describe('kill switches: TX_FEED_ENABLED / TX_WATCH_ENABLED', () => {
     expect(res.status).toBe(200)
   })
 })
+
+describe('POST /api/admin/reset-backfill', () => {
+  const originalToken = process.env.TX_ADMIN_TOKEN
+  const TOKEN = 'test-admin-token-abc123'
+
+  beforeEach(() => {
+    process.env.TX_ADMIN_TOKEN = TOKEN
+    _resetParsedEnvForTests()
+    mockQuery.mockClear()
+    dbMode = 'happy'
+  })
+
+  afterEach(() => {
+    if (originalToken !== undefined) {
+      process.env.TX_ADMIN_TOKEN = originalToken
+    } else {
+      delete process.env.TX_ADMIN_TOKEN
+    }
+    _resetParsedEnvForTests()
+  })
+
+  it('gates to 503 when TX_ADMIN_TOKEN is unset (leaked URL cannot force resets)', async () => {
+    delete process.env.TX_ADMIN_TOKEN
+    _resetParsedEnvForTests()
+    const res = await request(app)
+      .post('/api/admin/reset-backfill')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send({ address: VALID_ADDRESS })
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'admin not configured' })
+  })
+
+  it('rejects requests without an Authorization header', async () => {
+    const res = await request(app)
+      .post('/api/admin/reset-backfill')
+      .send({ address: VALID_ADDRESS })
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'unauthorized' })
+  })
+
+  it('rejects requests with the wrong token', async () => {
+    const res = await request(app)
+      .post('/api/admin/reset-backfill')
+      .set('Authorization', 'Bearer wrong-token')
+      .send({ address: VALID_ADDRESS })
+    expect(res.status).toBe(401)
+  })
+
+  it('rejects an invalid address body', async () => {
+    const res = await request(app)
+      .post('/api/admin/reset-backfill')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send({ address: 'not-hex' })
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'invalid address' })
+  })
+
+  it('returns 404 when address is not in watched_address', async () => {
+    // Override mockQuery so UPDATE returns 0 rows
+    mockQuery.mockImplementationOnce(async () => ({ rows: [] }))
+    const res = await request(app)
+      .post('/api/admin/reset-backfill')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send({ address: VALID_ADDRESS })
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'address not watched' })
+  })
+
+  it('clears backfill state on success', async () => {
+    mockQuery.mockImplementationOnce(async () => ({
+      rows: [{ address: VALID_ADDRESS }],
+    }))
+    const res = await request(app)
+      .post('/api/admin/reset-backfill')
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send({ address: VALID_ADDRESS })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      ok: true,
+      address: VALID_ADDRESS,
+      message: 'backfill state cleared - next /watch will re-init',
+    })
+    const [sql, params] = mockQuery.mock.calls[0] ?? []
+    expect(sql).toContain('UPDATE watched_address')
+    expect(sql).toContain('backfill_completed_at = NULL')
+    expect(sql).toContain('backfill_initial_from_block = NULL')
+    expect(params).toEqual([VALID_ADDRESS])
+  })
+})
