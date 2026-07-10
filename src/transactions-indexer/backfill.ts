@@ -149,7 +149,25 @@ async function rpcFetchTx(
     ),
   ])) as [RawTx & { blockNumber?: bigint }, RawReceipt]
   const blockNumber = tx.blockNumber ?? null
-  if (blockNumber === null) return null
+  // The "silent skip" paths below used to just `return null`. Both signal
+  // a real problem worth surfacing: getTransaction succeeded on some
+  // fallback endpoint but the payload we got back is incomplete. Log LOUD
+  // so the operator can see missed txs instead of them disappearing.
+  // Discovered 2026-07-08: spike v2 had 4 Squid multi-hop txs that never
+  // made it to the tx table, and there was zero signal in Railway logs
+  // because both these branches were silent.
+  if (blockNumber === null) {
+    log.warn(
+      `rpcFetchTx skipping ${hash}: tx.blockNumber is null (RPC returned an incomplete tx payload)`,
+    )
+    return null
+  }
+  if (receipt == null || typeof receipt !== 'object' || !Array.isArray(receipt.logs)) {
+    log.warn(
+      `rpcFetchTx skipping ${hash}: receipt malformed (logs is not an array or receipt is null)`,
+    )
+    return null
+  }
   const block = (await executor.withFallback(`getBlock ${blockNumber}`, (c) =>
     c.getBlock({ blockNumber }),
   )) as { timestamp: bigint }
