@@ -69,7 +69,12 @@ const HEALTH_RPC_TIMEOUT_MS = 1_500
 // shared counterparty in Transfer logs) now classify as SWAP_TRANSACTION.
 // v5 cached payloads for those txs may be missing entirely from /feed and
 // need re-classification.
-const CACHE_SCHEMA_VERSION = 6
+// v7 (2026-07-10): classifyApprove now matches `increaseAllowance(...)`
+// (0x39509351) in addition to `approve(...)`. v6 payloads for those txs
+// were cached as `[]` and the previous UPSERT converged them; bumping
+// the schema forces re-classification once so the recovered APPROVAL
+// rows actually surface in /feed.
+const CACHE_SCHEMA_VERSION = 7
 
 interface CachedPayload {
   schemaVersion: number
