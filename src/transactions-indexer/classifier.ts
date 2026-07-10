@@ -24,6 +24,17 @@ const ERC20_TRANSFER_TOPIC0 =
 
 // 4-byte selectors (first 8 hex chars after 0x).
 const SELECTOR_APPROVE = '0x095ea7b3' // approve(address,uint256)
+// OpenZeppelin non-standard `increaseAllowance(address,uint256)`. Same
+// calldata shape as approve (spender at word 0). CELO ERC20 emits only
+// an Approval event with no Transfer log, so the backfill's Transfer
+// scan misses it; recognising the selector here lets the tx render as
+// APPROVAL when it lands via the live worker's direct-touch path.
+// Added 2026-07-10 after the wallet team's diff surfaced 3 spike v2
+// txs (0x0bf68b67, 0x765409c9, 0xd3893900) that our classifier was
+// dropping. `decreaseAllowance` intentionally omitted: emitting it as
+// APPROVAL would be misleading (it revokes) and Valora's renderer
+// does not surface it either.
+const SELECTOR_INCREASE_ALLOWANCE = '0x39509351'
 const SELECTOR_TRANSFER = '0xa9059cbb' // transfer(address,uint256)
 const SELECTOR_TRANSFER_FROM = '0x23b872dd' // transferFrom(address,address,uint256)
 
@@ -412,7 +423,10 @@ function classifyApprove(
   userAddress: string,
 ): ApprovalTransaction | null {
   if (tx.from.toLowerCase() !== userAddress.toLowerCase()) return null
-  if (selectorOf(tx.input) !== SELECTOR_APPROVE) return null
+  const selector = selectorOf(tx.input)
+  if (selector !== SELECTOR_APPROVE && selector !== SELECTOR_INCREASE_ALLOWANCE) {
+    return null
+  }
   const [spenderWord] = calldataWords(tx.input)
   if (!spenderWord) return null
   return {

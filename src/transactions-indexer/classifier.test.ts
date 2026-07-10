@@ -190,6 +190,38 @@ describe('classify', () => {
     expect(ap.tokenId).toBe(`celo-mainnet:${TOKEN_USDM}`)
   })
 
+  it('rule 3: increaseAllowance(address,uint256) also returns APPROVAL', () => {
+    // OpenZeppelin non-standard `increaseAllowance` (selector 0x39509351).
+    // CELO ERC20 emits only an Approval event with no Transfer log; without
+    // matching the selector here the classifier drops it entirely.
+    // Real prod hash: 0x0bf68b67b19501af536c26702535dc4d4769c209df63ed03eb60aa1a2554e15f
+    const TOKEN_CELO = '0x471ece3750da237f93b8e339c536989b8978a438'
+    const tx = baseTx({
+      from: USER,
+      to: TOKEN_CELO,
+      input: '0x39509351' + addrArg(SQUID_ROUTER) + uintArg(1n << 100n),
+    })
+    const out = classify(tx, [], USER)
+    expect(out).toHaveLength(1)
+    const ap = out[0] as { type: 'APPROVAL'; approvedAddress: string; tokenId: string }
+    expect(ap.type).toBe('APPROVAL')
+    expect(ap.approvedAddress).toBe(SQUID_ROUTER)
+    expect(ap.tokenId).toBe(`celo-mainnet:${TOKEN_CELO}`)
+  })
+
+  it('rule 3: decreaseAllowance is intentionally NOT classified as APPROVAL', () => {
+    // decreaseAllowance revokes/reduces; emitting it as APPROVAL would be
+    // misleading in the wallet timeline. Selector 0xa457c2d7 falls through
+    // to the unknown-selector path and yields [].
+    const tx = baseTx({
+      from: USER,
+      to: TOKEN_USDM,
+      input: '0xa457c2d7' + addrArg(SQUID_ROUTER) + uintArg(1n),
+    })
+    const out = classify(tx, [], USER)
+    expect(out.some((o) => o.type === 'APPROVAL')).toBe(false)
+  })
+
   it('rule 4: ERC20 transfer returns SENT', () => {
     const tx = baseTx({
       from: USER,
