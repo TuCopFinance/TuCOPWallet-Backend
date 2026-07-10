@@ -406,6 +406,7 @@ Registers an address for indexing and triggers a one-shot historical backfill in
 - Never truncates the default window - it only extends it further into the past if the derived `fromBlock` is older than the default.
 - Hard cap: never scans more than 5 000 000 blocks even if the timestamp implies deeper. This protects the RPC budget for other watched wallets from an accidentally-huge backfill.
 - The formula segments across the Celo L2 migration (block 31 056 500 at `2025-03-26T00:00:00Z`): ~1 s/block post-L2, ~5 s/block pre-L2.
+- Adds a 300 000-block safety buffer (~4 days at 1 s/block post-L2) to the derived from-block. Covers wallets that /watch weeks or months after their real creation, and absorbs the ~5% slippage between the flat 1 s/block estimate and real Celo L2 block time (~1.04 s/block over sustained windows). Still bounded by the 5M hard cap.
 
 When `walletCreatedAt` is omitted, the backfill uses the existing `TX_INDEXER_BACKFILL_BLOCKS` default (10 000 blocks ~ 2.8 hours on Celo L2). Passing it is safe on repeat `/watch` calls.
 

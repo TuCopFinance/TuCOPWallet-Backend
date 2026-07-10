@@ -448,14 +448,23 @@ const SAFETY_MAX_BACKFILL_BLOCKS = 5_000_000n
 
 // Absolute safety cushion added to the derived from-block. Real Celo L2
 // block time averages ~1.04 s/block, not the flat 1 s the formula assumes;
-// over 14 days that under-estimates the block delta by ~4-8k blocks and
+// over 60 days that under-estimates the block delta by ~200k+ blocks and
 // leaves the very first txs of the wallet outside the scan window. Fixed
 // by shifting the derived fromBlock BACKWARD by this many blocks. Also
 // covers the case where a wallet was pre-funded a few blocks before the
-// user-set creation timestamp. Observed 2026-07-08 with spike v2
-// (walletCreatedAt=2026-06-24, actual first tx block ~7k blocks deeper
-// than the formula's estimate).
-const WALLET_CREATED_AT_SAFETY_BUFFER_BLOCKS = 50_000n
+// user-set creation timestamp.
+//
+// History:
+// - 50_000 (2026-07-08): sized for 14-day windows at 4-5% slippage.
+//   Insufficient for spike-lifecycle wallets that /watch weeks after
+//   creation; observed 2026-07-10 on spike v2 (16-day window still
+//   missed activation-window txs by ~15k blocks).
+// - 300_000 (2026-07-10): sized for 60-day windows at 5% slippage
+//   (60 * 86400 * 0.05 ~= 260k blocks + margin). Covers wallet
+//   spike-lifecycle where users may /watch weeks or months after their
+//   real creation. Still bounded by SAFETY_MAX_BACKFILL_BLOCKS (5M) so
+//   the RPC budget stays predictable.
+const WALLET_CREATED_AT_SAFETY_BUFFER_BLOCKS = 300_000n
 
 export function walletCreatedAtToFromBlock(
   walletCreatedAtIso: string,
