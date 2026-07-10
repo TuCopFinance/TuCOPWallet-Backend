@@ -216,6 +216,14 @@ const envSchema = z.object({
     .default('true')
     .transform((v) => v !== 'false'),
 
+  // Shared secret gating the admin endpoints (currently just
+  // POST /api/admin/reset-backfill). REQUIRED for those routes to
+  // respond; leaving it unset gates the route to 503 so a leaked
+  // production URL cannot force expensive re-scans without the token.
+  // Sent as `Authorization: Bearer <TX_ADMIN_TOKEN>` in the request
+  // header. Constant-time compared so timing does not leak the value.
+  TX_ADMIN_TOKEN: z.string().optional(),
+
   // Neeru contract (REQUIRED if NEERU_INDEXER_ENABLED=true; refined below)
   NEERU_INDEXER_GENESIS_BLOCK: z.coerce.bigint().optional(),
   NEERU_CONTRACT_ADDRESS: zHexAddress.optional(),
