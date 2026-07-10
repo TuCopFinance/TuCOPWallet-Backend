@@ -445,6 +445,30 @@ Operator probe for the indexer worker. Reports the last indexed block, current C
 
 Errors: `503 database not configured`, `500 internal` (when the indexer_state query itself fails).
 
+#### `POST /api/admin/reset-backfill`
+
+Ops-only endpoint. Clears a single address's backfill state so the next `POST /watch` call re-initialises it from scratch. Use when the initial re-open scanned an incorrect range (block-time slippage, RPC silent-fail) and the `reopen-if-deeper` heuristic cannot reach the affected blocks (it only extends the window deeper, never re-scans between the current `initial_from` and the previous `end_block`).
+
+Auth: `Authorization: Bearer <TX_ADMIN_TOKEN>` header, compared in constant time. The route gates to `503 admin not configured` when the env var is unset, so a leaked production URL cannot force expensive re-scans without the token. Rotate the token via Railway env whenever needed.
+
+```json
+{ "address": "0x81dCf9160237D0EF0d4db27CFb2EA9743547f882" }
+```
+
+Response `200`:
+
+```json
+{
+  "ok": true,
+  "address": "0x81dcf9160237d0ef0d4db27cfb2ea9743547f882",
+  "message": "backfill state cleared - next /watch will re-init"
+}
+```
+
+Effect on `watched_address` (single row, filtered by address): `backfill_completed_at = NULL`, `backfill_cursor_block = NULL`, `backfill_end_block = NULL`, `backfill_initial_from_block = NULL`, `backfill_last_error = NULL`. The row itself is preserved, so `backfill_started_at` and any historical audit fields survive.
+
+Errors: `401 unauthorized`, `400 invalid address`, `404 address not watched`, `503 admin not configured` / `database not configured`, `500 database error`.
+
 #### `GET /api/transactions/feed`
 
 Byte-compatible replacement for Valora. Same response envelope (`{ transactions, pageInfo: { hasNextPage, endCursor } }`) and same `TokenTransaction` discriminated union (`SENT` / `RECEIVED` / `SWAP_TRANSACTION` / `APPROVAL` / `DEPOSIT` / `WITHDRAW` / `CLAIM_REWARD`).
