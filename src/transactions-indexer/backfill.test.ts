@@ -439,13 +439,13 @@ describe('walletCreatedAtToFromBlock', () => {
   // vs 1 s formula) plus a small margin for wallets pre-funded moments
   // before the creation timestamp. Tests below use `EXPECTED + BUFFER`
   // so the exact value stays visible and easy to update if we tune it.
-  const BUFFER = 50_000n
+  const BUFFER = 300_000n
 
   it('uses ~1 s/block for post-L2 wallets plus safety buffer', () => {
     const now = CELO_L2_MIGRATION_MS + 3_600 * 1000 // 1 hour post-L2
     const created = new Date(CELO_L2_MIGRATION_MS + 1_800 * 1000).toISOString() // 30 min post-L2
     const tip = 10_000_000n
-    // 30 min of blocks post-L2 at 1s/block = 1800 blocks + 50k buffer
+    // 30 min of blocks post-L2 at 1s/block = 1800 blocks + BUFFER
     expect(walletCreatedAtToFromBlock(created, tip, now)).toBe(tip - (1_800n + BUFFER))
   })
 
@@ -454,7 +454,7 @@ describe('walletCreatedAtToFromBlock', () => {
     const created = new Date(CELO_L2_MIGRATION_MS - 500 * 1000).toISOString() // 500 s pre-L2
     const tip = 10_000_000n
     // Post-L2 segment: 100 s * 1 = 100 blocks. Pre-L2 segment: 500 s / 5 =
-    // 100 blocks. Sub-total = 200 blocks + 50k buffer.
+    // 100 blocks. Sub-total = 200 blocks + BUFFER.
     expect(walletCreatedAtToFromBlock(created, tip, now)).toBe(tip - (200n + BUFFER))
   })
 
@@ -477,7 +477,7 @@ describe('walletCreatedAtToFromBlock', () => {
     const now = CELO_L2_MIGRATION_MS + 60 * 1000 // 60 s post-L2
     const created = new Date(CELO_L2_MIGRATION_MS + 30 * 1000).toISOString() // 30 s post-L2
     const tip = 10_000_000n
-    // 30 s of blocks = 30 blocks + 50k buffer
+    // 30 s of blocks = 30 blocks + BUFFER
     expect(walletCreatedAtToFromBlock(created, tip, now)).toBe(tip - (30n + BUFFER))
   })
 })
@@ -519,10 +519,10 @@ describe('reopenBackfillIfDeeper', () => {
       const row = (db as unknown as { _row: DbRow })._row
       expect(row.backfill_completed_at).toBeNull()
       // walletCreatedAt 22 days back at 1 s/block post-L2 = 1_900_800
-      // blocks, plus the 50_000-block safety buffer = 1_950_800.
-      // fromBlock = 90_000_000 - 1_950_800 = 88_049_200.
-      expect(row.backfill_cursor_block).toBe('88049200')
-      expect(row.backfill_initial_from_block).toBe('88049200')
+      // blocks, plus the 300_000-block safety buffer = 2_200_800.
+      // fromBlock = 90_000_000 - 2_200_800 = 87_799_200.
+      expect(row.backfill_cursor_block).toBe('87799200')
+      expect(row.backfill_initial_from_block).toBe('87799200')
       // Legacy path: end_block stays at the previous end (redundant scan
       // acceptable because persistTx is upsert-idempotent).
       expect(row.backfill_end_block).toBe('89990000')
@@ -546,15 +546,15 @@ describe('reopenBackfillIfDeeper', () => {
         backfill_completed_at: new Date('2026-07-06T20:00:00Z'),
       })
       // walletCreatedAt = now - 2 000 000 000 ms = 2M seconds back.
-      // formula: 2M blocks + 50k buffer = 2_050_000 blocks.
-      // new_from = 90_000_000 - 2_050_000 = 87_950_000.
+      // formula: 2M blocks + 300k buffer = 2_300_000 blocks.
+      // new_from = 90_000_000 - 2_300_000 = 87_700_000.
       const deepIso = new Date(now - 2_000_000_000).toISOString()
       const opened = await reopenBackfillIfDeeper(db, ADDR, 90_000_000n, deepIso)
       expect(opened).toBe(true)
       const row = (db as unknown as { _row: DbRow })._row
       expect(row.backfill_completed_at).toBeNull()
-      expect(row.backfill_cursor_block).toBe('87950000')
-      expect(row.backfill_initial_from_block).toBe('87950000')
+      expect(row.backfill_cursor_block).toBe('87700000')
+      expect(row.backfill_initial_from_block).toBe('87700000')
       expect(row.backfill_end_block).toBe('89989999')
     } finally {
       jestNowSpy.mockRestore()
@@ -572,8 +572,9 @@ describe('reopenBackfillIfDeeper', () => {
         backfill_initial_from_block: '85000000', // already deep
         backfill_completed_at: new Date('2026-07-06T20:00:00Z'),
       })
-      // walletCreatedAt implies from = tip - 1_000_000 = 89_000_000
-      // which is NOT deeper than existing 85_000_000, so no-op.
+      // walletCreatedAt = now - 1e9 ms = 1M seconds back. Formula:
+      // 1M blocks + 300k buffer = 1_300_000. from = tip - 1_300_000 =
+      // 88_700_000 which is NOT deeper than existing 85_000_000, so no-op.
       const shallowIso = new Date(now - 1_000_000_000).toISOString()
       const opened = await reopenBackfillIfDeeper(db, ADDR, 90_000_000n, shallowIso)
       expect(opened).toBe(false)
