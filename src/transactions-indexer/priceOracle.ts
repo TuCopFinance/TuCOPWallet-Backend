@@ -12,7 +12,7 @@ import type { LocalAmount, TokenAmount, TokenTransaction } from './types'
 // - Cross-time correctness (uses spot peg, not the historical price at the
 //   tx's block timestamp). The peg is stable enough for MVP feed display.
 //
-// Adding CMC + FX is a follow-up tracked in `tasks/plans/wri-transaction-feed-indexer.md`.
+// Adding CMC + FX is a follow-up tracked in ROADMAP.md.
 
 interface TokenMeta {
   symbol: string

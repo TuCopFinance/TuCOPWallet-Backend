@@ -594,10 +594,11 @@ describe('handleKindD', () => {
   const newAmount = 12_345n * 10n ** 18n
   const endTs = 1_705_000_000n
   const blockTimestamp = 1_702_592_000n
-  // 30 days of seconds; cat=1 in the default ctx below stands in for the
-  // first locked tranche. The reconstructed startTs is endTs - 30 days.
-  const lockSecsCat1 = 30n * 86_400n
-  const reconstructedStartTs = endTs - lockSecsCat1
+  // Synthetic per-category window used only to exercise the fallback
+  // branch below. Value is not a real contract value; see the memory
+  // `feedback_cero_exposicion_neeru` for the naming bar.
+  const secondaryCatWindowSecs = 14n * 86_400n
+  const reconstructedStartTs = endTs - secondaryCatWindowSecs
 
   function makeArgs(): KindDArgs {
     return {
@@ -618,7 +619,7 @@ describe('handleKindD', () => {
     return {
       positionCategory: new Map([[newId.toString(), 1]]),
       blockTimestamps: new Map([['1350000', blockTimestamp]]),
-      lockSecondsByCategory: new Map([[1, lockSecsCat1]]),
+      lockSecondsByCategory: new Map([[1, secondaryCatWindowSecs]]),
     }
   }
 
