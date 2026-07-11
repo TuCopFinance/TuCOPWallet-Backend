@@ -231,9 +231,9 @@ describe('getNeeruPositionDetail', () => {
     expect(res.positions).toHaveLength(1)
     const p = res.positions[0]!
     expect(p.positionId).toBe('100')
-    expect(p.tranche).toBe(0)
-    expect(p.trancheLabel).toBe('Flexible')
-    expect(p.principal).toBe('10000')
+    expect(p.category).toBe(0)
+    expect(p.categoryLabel).toBe('Flexible')
+    expect(p.amount).toBe('10000')
     expect(p.accruedInterest).toBe('82.5')
     expect(p.startTs).toBe(1700000000)
     expect(p.endTs).toBe(1700000000)
@@ -246,7 +246,7 @@ describe('getNeeruPositionDetail', () => {
     // Flexible tranche -> never early -> interestAfterPenalty == accrued.
     expect(p.currentPayoutIfClosed.isEarly).toBe(false)
     expect(p.currentPayoutIfClosed.penaltyBps).toBe(2000)
-    expect(p.currentPayoutIfClosed.principal).toBe('10000')
+    expect(p.currentPayoutIfClosed.amount).toBe('10000')
     expect(p.currentPayoutIfClosed.interest).toBe('82.5')
     expect(p.currentPayoutIfClosed.interestAfterPenalty).toBe('82.5')
     expect(p.currentPayoutIfClosed.total).toBe('10082.5')
@@ -346,10 +346,10 @@ describe('getNeeruPositionDetail', () => {
       '50',
     )
     expect(res.positions[0]!.currentPayoutIfClosed.total).toBe('1050')
-    expect(res.positions[0]!.trancheLabel).toBe('Flexible')
+    expect(res.positions[0]!.categoryLabel).toBe('Flexible')
 
     // 30d, isEarly=true. accrued=100, penalty=2000bps -> after = 80, total = 2080.
-    expect(res.positions[1]!.trancheLabel).toBe('7 dias')
+    expect(res.positions[1]!.categoryLabel).toBe('7 dias')
     expect(res.positions[1]!.currentPayoutIfClosed.isEarly).toBe(true)
     expect(res.positions[1]!.currentPayoutIfClosed.interestAfterPenalty).toBe(
       '80',
@@ -364,7 +364,7 @@ describe('getNeeruPositionDetail', () => {
     expect(res.positions[2]!.currentPayoutIfClosed.total).toBe('3040')
 
     // 90d, endTs == now -> not strictly < endTs -> isEarly=false
-    expect(res.positions[3]!.trancheLabel).toBe('21 dias')
+    expect(res.positions[3]!.categoryLabel).toBe('21 dias')
     expect(res.positions[3]!.currentPayoutIfClosed.isEarly).toBe(false)
     expect(res.positions[3]!.currentPayoutIfClosed.total).toBe('5025')
 

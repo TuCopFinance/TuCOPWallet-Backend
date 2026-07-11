@@ -86,7 +86,7 @@ function buildFakeRpc(opts: FakeRpcOpts): {
 function buildFakeDb(rows: ReadonlyArray<{
   position_id: string
   category: number
-  principal: string
+  amount: string
 }>) {
   const queries: { sql: string; params: readonly unknown[] }[] = []
   return {
@@ -153,7 +153,7 @@ describe('getNeeruEarnPositions', () => {
     expect(multicallCalls[0]?.contracts[0]?.functionName).toBe('tranches')
   })
 
-  it('aggregates principal + previewAccruedInterest per category for a user', async () => {
+  it('aggregates amount + previewAccruedInterest per category for a user', async () => {
     const accrued = new Map<string, bigint>([
       ['100', 5n * 10n ** 18n],
       ['101', 3n * 10n ** 18n],
@@ -168,17 +168,17 @@ describe('getNeeruEarnPositions', () => {
       {
         position_id: '100',
         category: 1,
-        principal: (50n * 10n ** 18n).toString(),
+        amount: (50n * 10n ** 18n).toString(),
       },
       {
         position_id: '101',
         category: 1,
-        principal: (30n * 10n ** 18n).toString(),
+        amount: (30n * 10n ** 18n).toString(),
       },
       {
         position_id: '200',
         category: 2,
-        principal: (10n * 10n ** 18n).toString(),
+        amount: (10n * 10n ** 18n).toString(),
       },
     ])
 
@@ -336,7 +336,7 @@ describe('getNeeruHeldPositions', () => {
       {
         position_id: '100',
         category: 2,
-        principal: (7n * 10n ** 18n).toString(),
+        amount: (7n * 10n ** 18n).toString(),
       },
     ])
 
