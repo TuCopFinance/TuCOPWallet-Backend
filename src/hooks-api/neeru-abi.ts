@@ -4,7 +4,7 @@ import type { AbiFunction } from 'viem'
 // the indexer already declares in src/neeru-indexer/abi.ts. Output names
 // are opaque (r0..r3); callers access by index.
 
-export const TRANCHES_FN_ABI = {
+export const CATEGORY_READ_FN_ABI = {
   type: 'function',
   name: 'tranches',
   stateMutability: 'view',
@@ -66,7 +66,7 @@ export const MIN_DEPOSIT_FN_ABI = {
 } as const satisfies AbiFunction
 
 export const HOOKS_READ_ABI = [
-  TRANCHES_FN_ABI,
+  CATEGORY_READ_FN_ABI,
   PREVIEW_ACCRUED_INTEREST_FN_ABI,
   EARLY_CLAIM_PENALTY_BPS_FN_ABI,
   DEPOSITS_PAUSED_FN_ABI,

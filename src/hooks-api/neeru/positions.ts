@@ -14,22 +14,12 @@ import {
   NEERU_MANAGE_URL,
   NEERU_TERMS_URL,
   hooksApiConfigured,
-  trancheImageUrl,
+  categoryImageUrl,
 } from '../config'
 import { NEERU_APP_ID } from './shortcuts'
 import type { EarnPosition, NetworkId } from './types'
 
 const log = createLogger('hooks-api:neeru:positions')
-
-// Wallet-shape compatibility note:
-// JSON fields `principal` and `tranches` on the objects returned by
-// `getEarnPositions` mirror partner-contract semantic terms. Kept as
-// a controlled exception because the wallet already reads these names
-// in the released app; renaming requires a coordinated wallet update.
-// Internal variables named `principal*` in this file are named to
-// match the API surface for readability but are not part of the
-// exception scope. See the `feedback_cero_exposicion_neeru` project
-// memory for the general rule and its exceptions list.
 
 const NETWORK_ID: NetworkId = 'celo-mainnet'
 const APP_NAME = 'Neeru Vaults'
@@ -38,7 +28,7 @@ const RAY = 10n ** 27n
 const CATEGORIES = [0, 1, 2, 3] as const
 type Category = (typeof CATEGORIES)[number]
 
-interface TrancheRead {
+interface CategoryRead {
   r0: bigint
   r1: bigint
   r2: bigint
@@ -52,14 +42,14 @@ interface TokenInfo {
 
 interface CatalogueSnapshot {
   fetchedAtMs: number
-  tranches: TrancheRead[]
+  categories: CategoryRead[]
   token: TokenInfo
 }
 
 interface OpenRow {
   position_id: string
   category: number
-  principal: string
+  amount: string
 }
 
 const CATALOGUE_TTL_MS = 30_000
@@ -76,14 +66,14 @@ export function _resetHooksApiNeeruCacheForTests(): void {
 // system via the existing function signatures that wrap it.
 
 function positionIdFor(category: Category): string {
-  return `${NETWORK_ID}:${CONTRACT_ADDRESS.toLowerCase()}:tranche-${category}`
+  return `${NETWORK_ID}:${CONTRACT_ADDRESS.toLowerCase()}:category-${category}`
 }
 
 function depositTokenId(): string {
   return `${NETWORK_ID}:${NEERU_DEPOSIT_TOKEN_ADDRESS}`
 }
 
-function trancheTitle(secs: bigint): string {
+function categoryTitle(secs: bigint): string {
   if (secs === 0n) return 'Flexible'
   const days = Number(secs / BigInt(SECONDS_PER_DAY))
   return `${days} dias`
@@ -133,7 +123,7 @@ async function fetchCatalogue(
     functionName: string
     args: readonly unknown[]
   }
-  const trancheCalls: AnyCall[] = CATEGORIES.map((c) => ({
+  const categoryCalls: AnyCall[] = CATEGORIES.map((c) => ({
     address: CONTRACT_ADDRESS,
     abi: HOOKS_READ_ABI as unknown as readonly unknown[],
     functionName: 'tranches',
@@ -154,7 +144,7 @@ async function fetchCatalogue(
     },
   ]
 
-  const calls = [...trancheCalls, ...tokenCalls]
+  const calls = [...categoryCalls, ...tokenCalls]
   const results = (await deps.rpc.multicall({
     contracts: calls as unknown as Parameters<
       NeeruIndexerRpcClient['multicall']
@@ -162,10 +152,10 @@ async function fetchCatalogue(
     allowFailure: false,
   })) as unknown as readonly unknown[]
 
-  const tranches: TrancheRead[] = []
+  const categories: CategoryRead[] = []
   for (let i = 0; i < CATEGORIES.length; i++) {
     const raw = results[i] as readonly unknown[]
-    tranches.push({
+    categories.push({
       r0: BigInt(raw[0] as bigint | number | string),
       r1: BigInt(raw[1] as bigint | number | string),
       r2: BigInt(raw[2] as bigint | number | string),
@@ -177,15 +167,15 @@ async function fetchCatalogue(
 
   catalogueCache = {
     fetchedAtMs: now(),
-    tranches,
+    categories,
     token: { decimals, symbol },
   }
   return catalogueCache
 }
 
 interface UserAggregate {
-  // sum of principal (from DB) per category
-  principal: Map<Category, bigint>
+  // sum of amount (from DB) per category
+  amountByCategory: Map<Category, bigint>
   // open positionIds per category (used to fetch previewAccruedInterest)
   openIdsByCategory: Map<Category, bigint[]>
 }
@@ -197,27 +187,27 @@ async function loadOpenRows(
   const { rows } = await db.query<OpenRow>(
     `SELECT position_id::text AS position_id,
             category,
-            amount::text AS principal
+            amount::text
        FROM neeru_positions
       WHERE user_address = $1
         AND closed = FALSE`,
     [address.toLowerCase()],
   )
 
-  const principal = new Map<Category, bigint>()
+  const amountByCategory = new Map<Category, bigint>()
   const openIdsByCategory = new Map<Category, bigint[]>()
   for (const c of CATEGORIES) {
-    principal.set(c, 0n)
+    amountByCategory.set(c, 0n)
     openIdsByCategory.set(c, [])
   }
   for (const row of rows) {
     const cat = row.category as Category
     if (cat !== 0 && cat !== 1 && cat !== 2 && cat !== 3) continue
-    const principalBn = BigInt(row.principal)
-    principal.set(cat, (principal.get(cat) ?? 0n) + principalBn)
+    const amountBn = BigInt(row.amount)
+    amountByCategory.set(cat, (amountByCategory.get(cat) ?? 0n) + amountBn)
     openIdsByCategory.get(cat)!.push(BigInt(row.position_id))
   }
-  return { principal, openIdsByCategory }
+  return { amountByCategory, openIdsByCategory }
 }
 
 async function fetchAccruedInterest(
@@ -280,15 +270,15 @@ interface BuildArgs {
 
 function buildEarnPosition(args: BuildArgs): EarnPosition {
   const { category, snapshot } = args
-  const tranche = snapshot.tranches[category]!
+  const categoryRead = snapshot.categories[category]!
   const decimals = snapshot.token.decimals
   const symbol = snapshot.token.symbol
 
-  const title = trancheTitle(tranche.r1)
-  const dailyPct = dailyYieldPercent(tranche.r0)
-  const monthlyPct = monthlyYieldPercent(tranche.r0)
+  const title = categoryTitle(categoryRead.r1)
+  const dailyPct = dailyYieldPercent(categoryRead.r0)
+  const monthlyPct = monthlyYieldPercent(categoryRead.r0)
   const balance = decimalString(args.balanceWei, decimals)
-  const tvl = decimalString(tranche.r2, decimals)
+  const tvl = decimalString(categoryRead.r2, decimals)
   const tokenId = depositTokenId()
 
   return {
@@ -302,7 +292,7 @@ function buildEarnPosition(args: BuildArgs): EarnPosition {
     displayProps: {
       title,
       description: `Genera intereses bloqueando tus Pesos por ${title}`,
-      imageUrl: trancheImageUrl(category),
+      imageUrl: categoryImageUrl(category),
       manageUrl: NEERU_MANAGE_URL,
     },
     dataProps: {
@@ -352,8 +342,8 @@ function buildEarnPosition(args: BuildArgs): EarnPosition {
     ],
     availableShortcutIds: ['deposit', 'withdraw'],
     shortcutTriggerArgs: {
-      deposit: { trancheId: category },
-      withdraw: { trancheId: category },
+      deposit: { categoryId: category },
+      withdraw: { categoryId: category },
     },
     symbol,
     decimals,
@@ -385,9 +375,9 @@ export async function getNeeruEarnPositions(
     const aggregate = await loadOpenRows(args.db, args.address)
     const accrued = await fetchAccruedInterest(args.rpc, aggregate)
     for (const c of CATEGORIES) {
-      const principal = aggregate.principal.get(c) ?? 0n
+      const amount = aggregate.amountByCategory.get(c) ?? 0n
       const interest = accrued.get(c) ?? 0n
-      balances.set(c, principal + interest)
+      balances.set(c, amount + interest)
     }
   }
 

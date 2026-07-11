@@ -11,24 +11,12 @@ import {
   EARLY_CLAIM_PENALTY_BPS_FN_ABI,
   ERC20_READ_ABI,
   PREVIEW_ACCRUED_INTEREST_FN_ABI,
-  TRANCHES_FN_ABI,
+  CATEGORY_READ_FN_ABI,
 } from '../neeru-abi'
 import { NEERU_DEPOSIT_TOKEN_ADDRESS } from '../config'
 import { monthlyYieldPercent } from './positions'
 
 const log = createLogger('hooks-api:neeru:detail')
-
-// Wallet-shape compatibility note:
-// The JSON field names `principal`, `tranche`, and `trancheLabel` on the
-// exported interfaces below are what the wallet-side renderer reads
-// today. They mirror a partner contract's semantic terms and would
-// normally be rejected by the cero-exposicion bar for tracked source
-// (see the `feedback_cero_exposicion_neeru` project memory). They are
-// kept as a controlled exception because the wallet is already in the
-// stores using these names; renaming requires a wallet release and
-// coordination we have chosen not to pay for a cosmetic win. Internal
-// variables can be freely renamed; only these API boundary field names
-// are the exception.
 
 const SECONDS_PER_DAY = 86_400
 const CACHE_TTL_MS = 30_000
@@ -56,7 +44,7 @@ interface OpenRow {
 }
 
 export interface CurrentPayoutIfClosed {
-  principal: string
+  amount: string
   interest: string
   penaltyBps: number
   interestAfterPenalty: string
@@ -66,9 +54,9 @@ export interface CurrentPayoutIfClosed {
 
 export interface NeeruPositionDetail {
   positionId: string
-  tranche: number
-  trancheLabel: string
-  principal: string
+  category: number
+  categoryLabel: string
+  amount: string
   accruedInterest: string
   monthlyRatePercentage: number
   startTs: number
@@ -113,7 +101,7 @@ export function _resetHooksApiNeeruDetailCacheForTests(): void {
 
 // decimalString moved to src/lib/decimal.ts (Fase 4 PR 28).
 
-function trancheLabel(secs: bigint): string {
+function categoryLabelFor(secs: bigint): string {
   if (secs === 0n) return 'Flexible'
   const days = Number(secs) / SECONDS_PER_DAY
   return `${days} dias`
@@ -138,7 +126,7 @@ export async function getNeeruPositionDetail(
   const { rows } = await args.db.query<OpenRow>(
     `SELECT position_id::text AS position_id,
             category,
-            amount::text AS amount,
+            amount::text,
             start_ts::text AS start_ts,
             end_ts::text AS end_ts,
             deposit_block::text AS deposit_block,
@@ -197,14 +185,14 @@ export async function getNeeruPositionDetail(
     })
   }
 
-  const tranchesRange: [number, number] = [
+  const catReadRange: [number, number] = [
     calls.length,
     calls.length + uncachedCategories.length,
   ]
   for (const c of uncachedCategories) {
     calls.push({
       address: CONTRACT_ADDRESS,
-      abi: [TRANCHES_FN_ABI] as unknown as readonly unknown[],
+      abi: [CATEGORY_READ_FN_ABI] as unknown as readonly unknown[],
       functionName: 'tranches',
       args: [c] as const,
     })
@@ -252,7 +240,7 @@ export async function getNeeruPositionDetail(
     allowFailure: true,
   })) as ReadonlyArray<MulticallResult>
 
-  // Fold cached + fresh tranches into a single lookup.
+  // Fold cached + fresh per-category values into a single lookup.
   const secsByCategory = new Map<number, bigint>()
   for (const c of distinctCategories) {
     const cached = secsCache.get(c)
@@ -262,9 +250,9 @@ export async function getNeeruPositionDetail(
   }
   for (let i = 0; i < uncachedCategories.length; i++) {
     const c = uncachedCategories[i]!
-    const r = results[tranchesRange[0] + i]
+    const r = results[catReadRange[0] + i]
     if (!r || r.status !== 'success') {
-      log.warn(`tranches(${c}) read failed - defaulting to 0`)
+      log.warn(`cat read (${c}) failed - defaulting to 0`)
       secsByCategory.set(c, 0n)
       continue
     }
@@ -344,8 +332,8 @@ export async function getNeeruPositionDetail(
       )
     }
 
-    const principalWei = BigInt(row.amount)
-    const principalStr = decimalString(principalWei, decimals)
+    const amountWei = BigInt(row.amount)
+    const amountStr = decimalString(amountWei, decimals)
     const accruedStr = decimalString(accruedWei, decimals)
     const secs = secsByCategory.get(row.category) ?? 0n
     const endTs = Number(row.end_ts)
@@ -358,13 +346,13 @@ export async function getNeeruPositionDetail(
     } else {
       interestAfterPenaltyWei = accruedWei
     }
-    const totalWei = principalWei + interestAfterPenaltyWei
+    const totalWei = amountWei + interestAfterPenaltyWei
 
     positions.push({
       positionId: row.position_id,
-      tranche: row.category,
-      trancheLabel: trancheLabel(secs),
-      principal: principalStr,
+      category: row.category,
+      categoryLabel: categoryLabelFor(secs),
+      amount: amountStr,
       accruedInterest: accruedStr,
       monthlyRatePercentage: monthlyYieldPercent(rateRaw),
       startTs: Number(row.start_ts),
@@ -373,7 +361,7 @@ export async function getNeeruPositionDetail(
       depositTxHash: row.deposit_tx_hash,
       renewedFromPositionId: null,
       currentPayoutIfClosed: {
-        principal: principalStr,
+        amount: amountStr,
         interest: accruedStr,
         penaltyBps,
         interestAfterPenalty: decimalString(interestAfterPenaltyWei, decimals),

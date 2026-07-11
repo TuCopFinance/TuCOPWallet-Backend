@@ -9,7 +9,7 @@ const USER = '0x1111111111111111111111111111111111111111'
 const TOKEN_DECIMALS = 18
 const TOKEN_SYMBOL = 'COPm'
 
-function trancheTuple(args: {
+function catReadTuple(args: {
   r0: bigint
   r1: bigint
   r2: bigint
@@ -24,7 +24,7 @@ const RATE_C = BigInt(Math.round(1e27 * 1.0005))
 const RATE_D = BigInt(Math.round(1e27 * 1.0007))
 
 interface FakeRpcOpts {
-  trancheReturns: ReadonlyArray<readonly [bigint, bigint, bigint, bigint]>
+  catReadReturns: ReadonlyArray<readonly [bigint, bigint, bigint, bigint]>
   decimals?: number
   symbol?: string
   accruedById?: Map<string, bigint>
@@ -57,10 +57,10 @@ function buildFakeRpc(opts: FakeRpcOpts): {
         args.contracts[0]?.functionName === 'tranches'
       ) {
         return [
-          opts.trancheReturns[0],
-          opts.trancheReturns[1],
-          opts.trancheReturns[2],
-          opts.trancheReturns[3],
+          opts.catReadReturns[0],
+          opts.catReadReturns[1],
+          opts.catReadReturns[2],
+          opts.catReadReturns[3],
           decimals,
           symbol,
         ]
@@ -86,7 +86,7 @@ function buildFakeRpc(opts: FakeRpcOpts): {
 function buildFakeDb(rows: ReadonlyArray<{
   position_id: string
   category: number
-  principal: string
+  amount: string
 }>) {
   const queries: { sql: string; params: readonly unknown[] }[] = []
   return {
@@ -105,15 +105,15 @@ describe('getNeeruEarnPositions', () => {
     _resetHooksApiNeeruCacheForTests()
   })
 
-  const trancheReturns = [
-    trancheTuple({ r0: RATE_A, r1: 0n, r2: 100_000n * 10n ** 18n }),
-    trancheTuple({ r0: RATE_B, r1: BigInt(7 * 86_400), r2: 200_000n * 10n ** 18n }),
-    trancheTuple({ r0: RATE_C, r1: BigInt(14 * 86_400), r2: 300_000n * 10n ** 18n }),
-    trancheTuple({ r0: RATE_D, r1: BigInt(21 * 86_400), r2: 400_000n * 10n ** 18n }),
+  const catReadReturns = [
+    catReadTuple({ r0: RATE_A, r1: 0n, r2: 100_000n * 10n ** 18n }),
+    catReadTuple({ r0: RATE_B, r1: BigInt(7 * 86_400), r2: 200_000n * 10n ** 18n }),
+    catReadTuple({ r0: RATE_C, r1: BigInt(14 * 86_400), r2: 300_000n * 10n ** 18n }),
+    catReadTuple({ r0: RATE_D, r1: BigInt(21 * 86_400), r2: 400_000n * 10n ** 18n }),
   ] as const
 
   it('returns 4 EarnPositions with balance="0" when no address provided', async () => {
-    const { rpc, multicallCalls } = buildFakeRpc({ trancheReturns })
+    const { rpc, multicallCalls } = buildFakeRpc({ catReadReturns })
     const { db } = buildFakeDb([])
 
     const positions = await getNeeruEarnPositions({
@@ -145,22 +145,22 @@ describe('getNeeruEarnPositions', () => {
     )
 
     expect(positions[1]?.shortcutTriggerArgs).toEqual({
-      deposit: { trancheId: 1 },
-      withdraw: { trancheId: 1 },
+      deposit: { categoryId: 1 },
+      withdraw: { categoryId: 1 },
     })
 
     expect(multicallCalls).toHaveLength(1)
     expect(multicallCalls[0]?.contracts[0]?.functionName).toBe('tranches')
   })
 
-  it('aggregates principal + previewAccruedInterest per category for a user', async () => {
+  it('aggregates amount + previewAccruedInterest per category for a user', async () => {
     const accrued = new Map<string, bigint>([
       ['100', 5n * 10n ** 18n],
       ['101', 3n * 10n ** 18n],
       ['200', 1n * 10n ** 18n],
     ])
     const { rpc, multicallCalls } = buildFakeRpc({
-      trancheReturns,
+      catReadReturns,
       accruedById: accrued,
     })
 
@@ -168,17 +168,17 @@ describe('getNeeruEarnPositions', () => {
       {
         position_id: '100',
         category: 1,
-        principal: (50n * 10n ** 18n).toString(),
+        amount: (50n * 10n ** 18n).toString(),
       },
       {
         position_id: '101',
         category: 1,
-        principal: (30n * 10n ** 18n).toString(),
+        amount: (30n * 10n ** 18n).toString(),
       },
       {
         position_id: '200',
         category: 2,
-        principal: (10n * 10n ** 18n).toString(),
+        amount: (10n * 10n ** 18n).toString(),
       },
     ])
 
@@ -202,7 +202,7 @@ describe('getNeeruEarnPositions', () => {
   })
 
   it('caches the catalogue snapshot for 30s', async () => {
-    const { rpc, multicallCalls } = buildFakeRpc({ trancheReturns })
+    const { rpc, multicallCalls } = buildFakeRpc({ catReadReturns })
     const { db } = buildFakeDb([])
 
     let nowMs = 1_700_000_000_000
@@ -219,7 +219,7 @@ describe('getNeeruEarnPositions', () => {
   })
 
   it('computes dailyYieldRatePercentage from on-chain rate and monthly compound from it', async () => {
-    const { rpc } = buildFakeRpc({ trancheReturns })
+    const { rpc } = buildFakeRpc({ catReadReturns })
     const { db } = buildFakeDb([])
 
     const positions = await getNeeruEarnPositions({
@@ -236,9 +236,9 @@ describe('getNeeruEarnPositions', () => {
 
   it('emits exactly zero yields when on-chain rate equals RAY (no-yield case)', async () => {
     const RAY_LITERAL = 10n ** 27n
-    const noYield = trancheTuple({ r0: RAY_LITERAL, r1: 0n, r2: 0n })
+    const noYield = catReadTuple({ r0: RAY_LITERAL, r1: 0n, r2: 0n })
     const { rpc } = buildFakeRpc({
-      trancheReturns: [noYield, noYield, noYield, noYield],
+      catReadReturns: [noYield, noYield, noYield, noYield],
     })
     const { db } = buildFakeDb([])
 
@@ -251,13 +251,13 @@ describe('getNeeruEarnPositions', () => {
   })
 
   it('returns byte-identical yields across repeated calls (no IEEE 754 drift)', async () => {
-    const { rpc: rpc1 } = buildFakeRpc({ trancheReturns })
+    const { rpc: rpc1 } = buildFakeRpc({ catReadReturns })
     const { db: db1 } = buildFakeDb([])
     const positions1 = await getNeeruEarnPositions({ db: db1 as never, rpc: rpc1 })
 
     _resetHooksApiNeeruCacheForTests()
 
-    const { rpc: rpc2 } = buildFakeRpc({ trancheReturns })
+    const { rpc: rpc2 } = buildFakeRpc({ catReadReturns })
     const { db: db2 } = buildFakeDb([])
     const positions2 = await getNeeruEarnPositions({ db: db2 as never, rpc: rpc2 })
 
@@ -270,7 +270,7 @@ describe('getNeeruEarnPositions', () => {
   })
 
   it('emits TVL as decimal string scaled by token decimals', async () => {
-    const { rpc } = buildFakeRpc({ trancheReturns })
+    const { rpc } = buildFakeRpc({ catReadReturns })
     const { db } = buildFakeDb([])
 
     const positions = await getNeeruEarnPositions({
@@ -282,7 +282,7 @@ describe('getNeeruEarnPositions', () => {
   })
 
   it('emits safety, manageUrl, termsUrl, contractCreatedAt from config', async () => {
-    const { rpc } = buildFakeRpc({ trancheReturns })
+    const { rpc } = buildFakeRpc({ catReadReturns })
     const { db } = buildFakeDb([])
 
     const positions = await getNeeruEarnPositions({
@@ -298,8 +298,8 @@ describe('getNeeruEarnPositions', () => {
     expect(dp.safety?.risks).toHaveLength(2)
   })
 
-  it('positionId is celo-mainnet:<contract>:tranche-N (lowercase)', async () => {
-    const { rpc } = buildFakeRpc({ trancheReturns })
+  it('positionId is celo-mainnet:<contract>:category-N (lowercase)', async () => {
+    const { rpc } = buildFakeRpc({ catReadReturns })
     const { db } = buildFakeDb([])
 
     const positions = await getNeeruEarnPositions({
@@ -308,9 +308,9 @@ describe('getNeeruEarnPositions', () => {
     })
     for (let i = 0; i < 4; i++) {
       expect(positions[i]?.positionId).toMatch(
-        /^celo-mainnet:0x[a-f0-9]{40}:tranche-[0-3]$/,
+        /^celo-mainnet:0x[a-f0-9]{40}:category-[0-3]$/,
       )
-      expect(positions[i]?.positionId.endsWith(`:tranche-${i}`)).toBe(true)
+      expect(positions[i]?.positionId.endsWith(`:category-${i}`)).toBe(true)
     }
   })
 })
@@ -321,22 +321,22 @@ describe('getNeeruHeldPositions', () => {
   })
 
   it('only returns positions with non-zero balance', async () => {
-    const trancheReturns = [
-      trancheTuple({ r0: RATE_A, r1: 0n, r2: 0n }),
-      trancheTuple({ r0: RATE_B, r1: BigInt(7 * 86_400), r2: 0n }),
-      trancheTuple({ r0: RATE_C, r1: BigInt(14 * 86_400), r2: 0n }),
-      trancheTuple({ r0: RATE_D, r1: BigInt(21 * 86_400), r2: 0n }),
+    const catReadReturns = [
+      catReadTuple({ r0: RATE_A, r1: 0n, r2: 0n }),
+      catReadTuple({ r0: RATE_B, r1: BigInt(7 * 86_400), r2: 0n }),
+      catReadTuple({ r0: RATE_C, r1: BigInt(14 * 86_400), r2: 0n }),
+      catReadTuple({ r0: RATE_D, r1: BigInt(21 * 86_400), r2: 0n }),
     ] as const
 
     const { rpc } = buildFakeRpc({
-      trancheReturns,
+      catReadReturns,
       accruedById: new Map([['100', 0n]]),
     })
     const { db } = buildFakeDb([
       {
         position_id: '100',
         category: 2,
-        principal: (7n * 10n ** 18n).toString(),
+        amount: (7n * 10n ** 18n).toString(),
       },
     ])
 
@@ -346,7 +346,7 @@ describe('getNeeruHeldPositions', () => {
       rpc,
     })
     expect(positions).toHaveLength(1)
-    expect(positions[0]?.positionId.endsWith(':tranche-2')).toBe(true)
+    expect(positions[0]?.positionId.endsWith(':category-2')).toBe(true)
     expect(positions[0]?.balance).toBe('7')
   })
 })

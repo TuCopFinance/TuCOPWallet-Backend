@@ -23,7 +23,7 @@ function buildFakeDb(opts: {
   const stateRow = opts.stateRow === undefined
     ? {
         id: 1,
-        last_scanned_block: '70876543',
+        last_scanned_block: '1234567',
         last_scan_at: new Date('2026-07-05T00:00:00Z'),
         last_error: null,
         last_error_at: null,
@@ -58,7 +58,7 @@ describe('getTimelockState', () => {
     const state = await getTimelockState(db as never)
     expect(state).not.toBeNull()
     expect(state?.id).toBe(1)
-    expect(state?.lastScannedBlock).toBe(70876543n)
+    expect(state?.lastScannedBlock).toBe(1234567n)
     expect(state?.lastError).toBeNull()
   })
 
@@ -71,25 +71,25 @@ describe('getTimelockState', () => {
 describe('ensureTimelockStateSeed', () => {
   it('inserts the seed with ON CONFLICT DO NOTHING', async () => {
     const { db, queries } = buildFakeDb()
-    await ensureTimelockStateSeed(db as never, 70876543n)
+    await ensureTimelockStateSeed(db as never, 1234567n)
     const insert = queries.find((q) =>
       q.sql.trim().toUpperCase().startsWith('INSERT INTO NEERU_TIMELOCK_STATE'),
     )
     expect(insert).toBeDefined()
     expect(insert?.sql).toMatch(/ON CONFLICT \(id\) DO NOTHING/)
-    expect(insert?.params).toEqual(['70876543'])
+    expect(insert?.params).toEqual(['1234567'])
   })
 })
 
 describe('setLastScannedBlock', () => {
   it('updates the cursor row on the supplied client', async () => {
     const { client, queries } = buildFakeDb()
-    await setLastScannedBlock(client as never, 70942000n)
+    await setLastScannedBlock(client as never, 1234700n)
     const update = queries.find((q) =>
       q.sql.trim().toUpperCase().startsWith('UPDATE NEERU_TIMELOCK_STATE'),
     )
     expect(update).toBeDefined()
-    expect(update?.params).toEqual(['70942000'])
+    expect(update?.params).toEqual(['1234700'])
   })
 })
 

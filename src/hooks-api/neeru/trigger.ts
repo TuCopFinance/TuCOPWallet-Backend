@@ -28,7 +28,7 @@ import type { NetworkId } from './types'
 const NETWORK_ID: NetworkId = 'celo-mainnet'
 const RAY = 10n ** 27n
 const TOKEN_INFO_TTL_MS = 30_000
-const VALID_TRANCHES: ReadonlySet<number> = new Set([0, 1, 2, 3])
+const VALID_CATEGORIES: ReadonlySet<number> = new Set([0, 1, 2, 3])
 const POSITION_ID_RE = /^\d+$/
 
 export interface ShortcutTransaction {
@@ -52,8 +52,8 @@ const DEPOSIT_GAS_LIMIT = '260000'
 const DEPOSIT_GAS_ESTIMATED = '210000'
 const WITHDRAW_GAS_LIMIT = '230000'
 const WITHDRAW_GAS_ESTIMATED = '180000'
-const WITHDRAW_PRINCIPAL_ONLY_GAS_LIMIT = '170000'
-const WITHDRAW_PRINCIPAL_ONLY_GAS_ESTIMATED = '130000'
+const WITHDRAW_AMOUNT_ONLY_GAS_LIMIT = '170000'
+const WITHDRAW_AMOUNT_ONLY_GAS_ESTIMATED = '130000'
 
 interface TokenInfoSnapshot {
   fetchedAtMs: number
@@ -125,7 +125,7 @@ function tx(
 
 export interface BuildDepositTxsArgs {
   address: string
-  trancheId: number
+  categoryId: number
   amount: string
   rpc: NeeruIndexerRpcClient
   now?: () => number
@@ -135,11 +135,11 @@ export async function buildDepositTxs(
   args: BuildDepositTxsArgs,
 ): Promise<{ transactions: ShortcutTransaction[] }> {
   assertConfigured()
-  const { address, trancheId, amount, rpc } = args
+  const { address, categoryId, amount, rpc } = args
   const now = args.now ?? (() => Date.now())
 
-  if (!VALID_TRANCHES.has(trancheId)) {
-    throw new Error('INVALID_TRANCHE')
+  if (!VALID_CATEGORIES.has(categoryId)) {
+    throw new Error('INVALID_CATEGORY')
   }
   if (!POSITION_ID_RE.test(amount)) {
     throw new Error('INVALID_AMOUNT')
@@ -176,7 +176,7 @@ export async function buildDepositTxs(
       address: CONTRACT_ADDRESS,
       abi: HOOKS_READ_ABI as unknown as readonly unknown[],
       functionName: 'tranches',
-      args: [trancheId] as const,
+      args: [categoryId] as const,
     },
     {
       address: CONTRACT_ADDRESS,
@@ -210,12 +210,12 @@ export async function buildDepositTxs(
     throw new Error('GLOBAL_CAP_EXCEEDED')
   }
 
-  const trancheTuple = results[3] as readonly unknown[]
-  const r0 = BigInt(trancheTuple[0] as bigint | number | string)
-  const r2 = BigInt(trancheTuple[2] as bigint | number | string)
-  const r3 = BigInt(trancheTuple[3] as bigint | number | string)
+  const catReadTuple = results[3] as readonly unknown[]
+  const r0 = BigInt(catReadTuple[0] as bigint | number | string)
+  const r2 = BigInt(catReadTuple[2] as bigint | number | string)
+  const r3 = BigInt(catReadTuple[3] as bigint | number | string)
   if (r2 + amountWei > r3) {
-    throw new Error('TRANCHE_CAP_EXCEEDED')
+    throw new Error('CATEGORY_CAP_EXCEEDED')
   }
   if (r0 < RAY) {
     throw new Error('RATE_NOT_SET')
@@ -246,7 +246,7 @@ export async function buildDepositTxs(
   const depositData = encodeFunctionData({
     abi: HOOKS_WRITE_ABI,
     functionName: 'deposit',
-    args: [amountWei, trancheId],
+    args: [amountWei, categoryId],
   })
   out.push(
     tx(CONTRACT_ADDRESS, depositData, {
@@ -331,7 +331,7 @@ export async function buildWithdrawTxs(
   }
 }
 
-export async function buildWithdrawPrincipalOnlyTxs(
+export async function buildWithdrawAmountOnlyTxs(
   args: BuildWithdrawTxsArgs,
 ): Promise<{ transactions: ShortcutTransaction[] }> {
   const { positionIdBn } = await preflightWithdraw(args)
@@ -343,8 +343,8 @@ export async function buildWithdrawPrincipalOnlyTxs(
   return {
     transactions: [
       tx(CONTRACT_ADDRESS, data, {
-        gas: WITHDRAW_PRINCIPAL_ONLY_GAS_LIMIT,
-        estimatedGasUse: WITHDRAW_PRINCIPAL_ONLY_GAS_ESTIMATED,
+        gas: WITHDRAW_AMOUNT_ONLY_GAS_LIMIT,
+        estimatedGasUse: WITHDRAW_AMOUNT_ONLY_GAS_ESTIMATED,
       }),
     ],
   }

@@ -34,7 +34,7 @@ const neeruBuildWithdrawPrincipalOnlyTxsMock = jest.fn()
 jest.mock('./neeru/trigger', () => ({
   buildDepositTxs: (args: unknown) => neeruBuildDepositTxsMock(args),
   buildWithdrawTxs: (args: unknown) => neeruBuildWithdrawTxsMock(args),
-  buildWithdrawPrincipalOnlyTxs: (args: unknown) =>
+  buildWithdrawAmountOnlyTxs: (args: unknown) =>
     neeruBuildWithdrawPrincipalOnlyTxsMock(args),
 }))
 
@@ -73,7 +73,7 @@ function buildAllbridgeApp(positionId: string) {
 function buildNeeruApp(category: number, balance = '0') {
   return {
     type: 'app-token',
-    positionId: `celo-mainnet:0x000000000000000000000000000000000000beef:tranche-${category}`,
+    positionId: `celo-mainnet:0x000000000000000000000000000000000000beef:category-${category}`,
     address: '0x000000000000000000000000000000000000beef',
     networkId: 'celo-mainnet',
     appId: 'neeru-vaults',
@@ -88,8 +88,8 @@ function buildNeeruApp(category: number, balance = '0') {
     tokens: [],
     availableShortcutIds: ['deposit', 'withdraw'],
     shortcutTriggerArgs: {
-      deposit: { trancheId: category },
-      withdraw: { trancheId: category },
+      deposit: { categoryId: category },
+      withdraw: { categoryId: category },
     },
     symbol: 'COPm',
     decimals: 18,
@@ -210,7 +210,7 @@ describe('GET /hooks-api/getEarnPositions', () => {
       buildNeeruApp(3),
     ])
     const targetId =
-      'celo-mainnet:0x000000000000000000000000000000000000beef:tranche-2'
+      'celo-mainnet:0x000000000000000000000000000000000000beef:category-2'
     const res = await request(app).get(
       `/hooks-api/getEarnPositions?supportedAppIds=neeru-vaults&supportedPools=${encodeURIComponent(targetId)}`,
     )
@@ -280,7 +280,7 @@ describe('GET /hooks-api/v2/getShortcuts', () => {
     expect(ids).toContain('allbridge:deposit')
     expect(ids).toContain('neeru-vaults:deposit')
     expect(ids).toContain('neeru-vaults:withdraw')
-    expect(ids).toContain('neeru-vaults:withdraw-principal-only')
+    expect(ids).toContain('neeru-vaults:withdraw-amount-only')
   })
 
   it('400s on unsupported networkIds', async () => {
@@ -374,7 +374,7 @@ describe('POST /hooks-api/triggerShortcut', () => {
         appId: 'neeru-vaults',
         networkId: 'celo-mainnet',
         shortcutId: 'deposit',
-        trancheId: 1,
+        categoryId: 1,
         tokens: [
           {
             tokenId: 'celo-mainnet:0x000000000000000000000000000000000000c0fe',
@@ -388,7 +388,7 @@ describe('POST /hooks-api/triggerShortcut', () => {
     expect(neeruBuildDepositTxsMock).toHaveBeenCalledTimes(1)
     const args = neeruBuildDepositTxsMock.mock.calls[0]?.[0]
     expect(args?.address).toBe(USER)
-    expect(args?.trancheId).toBe(1)
+    expect(args?.categoryId).toBe(1)
     expect(args?.amount).toBe('500')
   })
 
@@ -410,7 +410,7 @@ describe('POST /hooks-api/triggerShortcut', () => {
     expect(neeruBuildWithdrawTxsMock).toHaveBeenCalledTimes(1)
   })
 
-  it('happy-path Neeru withdraw-principal-only returns the single tx', async () => {
+  it('happy-path Neeru withdraw-amount-only returns the single tx', async () => {
     neeruBuildWithdrawPrincipalOnlyTxsMock.mockResolvedValueOnce({
       transactions: [SAMPLE_TX],
     })
@@ -420,7 +420,7 @@ describe('POST /hooks-api/triggerShortcut', () => {
         address: USER,
         appId: 'neeru-vaults',
         networkId: 'celo-mainnet',
-        shortcutId: 'withdraw-principal-only',
+        shortcutId: 'withdraw-amount-only',
         positionId: '42',
       })
     expect(res.status).toBe(200)
@@ -430,7 +430,7 @@ describe('POST /hooks-api/triggerShortcut', () => {
 
   it('maps documented Neeru error codes to 400 with the code in the body', async () => {
     neeruBuildDepositTxsMock.mockRejectedValueOnce(
-      new Error('TRANCHE_CAP_EXCEEDED'),
+      new Error('CATEGORY_CAP_EXCEEDED'),
     )
     const res = await request(app)
       .post('/hooks-api/triggerShortcut')
@@ -439,11 +439,11 @@ describe('POST /hooks-api/triggerShortcut', () => {
         appId: 'neeru-vaults',
         networkId: 'celo-mainnet',
         shortcutId: 'deposit',
-        trancheId: 1,
+        categoryId: 1,
         tokens: [{ tokenId: 'x', amount: '500' }],
       })
     expect(res.status).toBe(400)
-    expect(res.body.error).toBe('TRANCHE_CAP_EXCEEDED')
+    expect(res.body.error).toBe('CATEGORY_CAP_EXCEEDED')
   })
 
   it('maps a generic error to 502 with a non-leaking message', async () => {
@@ -457,7 +457,7 @@ describe('POST /hooks-api/triggerShortcut', () => {
         appId: 'neeru-vaults',
         networkId: 'celo-mainnet',
         shortcutId: 'deposit',
-        trancheId: 1,
+        categoryId: 1,
         tokens: [{ tokenId: 'x', amount: '500' }],
       })
     expect(res.status).toBe(502)
@@ -506,7 +506,7 @@ describe('POST /hooks-api/triggerShortcut', () => {
         appId: 'neeru-vaults',
         networkId: 'celo-mainnet',
         shortcutId: 'deposit',
-        trancheId: 1,
+        categoryId: 1,
       })
     expect(res.status).toBe(400)
     expect(res.body.error).toMatch(/tokens/i)

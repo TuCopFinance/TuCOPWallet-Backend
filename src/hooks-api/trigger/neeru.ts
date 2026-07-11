@@ -3,13 +3,13 @@ import type { NeeruIndexerRpcClient } from '../../neeru-indexer/rpc'
 import { hooksApiConfigured } from '../config'
 import {
   buildDepositTxs,
-  buildWithdrawPrincipalOnlyTxs,
+  buildWithdrawAmountOnlyTxs,
   buildWithdrawTxs,
 } from '../neeru/trigger'
 import type { DispatchResult } from './allbridge'
 
 export interface NeeruTriggerBody {
-  trancheId?: unknown
+  categoryId?: unknown
   tokens?: unknown
   positionId?: unknown
   [key: string]: unknown
@@ -43,10 +43,10 @@ export async function dispatchNeeru(
   }
 
   if (shortcutId === 'deposit') {
-    const trancheId = body.trancheId
+    const categoryId = body.categoryId
     const tokens = body.tokens
-    if (!isPositiveInt(trancheId)) {
-      return { ok: false, status: 400, error: 'invalid trancheId' }
+    if (!isPositiveInt(categoryId)) {
+      return { ok: false, status: 400, error: 'invalid categoryId' }
     }
     if (
       !Array.isArray(tokens) ||
@@ -62,14 +62,14 @@ export async function dispatchNeeru(
     }
     const result = await buildDepositTxs({
       address,
-      trancheId,
+      categoryId,
       amount: first.amount,
       rpc: deps.rpc,
     })
     return { ok: true, payload: result }
   }
 
-  if (shortcutId === 'withdraw' || shortcutId === 'withdraw-principal-only') {
+  if (shortcutId === 'withdraw' || shortcutId === 'withdraw-amount-only') {
     const positionId = body.positionId
     if (!isDigitString(positionId)) {
       return { ok: false, status: 400, error: 'invalid positionId' }
@@ -86,7 +86,7 @@ export async function dispatchNeeru(
             rpc: deps.rpc,
             db,
           })
-        : await buildWithdrawPrincipalOnlyTxs({
+        : await buildWithdrawAmountOnlyTxs({
             address,
             positionId,
             rpc: deps.rpc,

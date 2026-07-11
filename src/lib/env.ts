@@ -234,7 +234,7 @@ const envSchema = z.object({
 
   // Neeru hooks-api / wallet surfaces (optional)
   NEERU_DEPOSIT_TOKEN_ADDRESS: zHexAddress.optional(),
-  NEERU_TRANCHE_IMAGE_URL_TEMPLATE: z.string().optional().default(''),
+  NEERU_CATEGORY_IMAGE_URL_TEMPLATE: z.string().optional().default(''),
   NEERU_MANAGE_URL: z.string().optional().default(''),
   NEERU_TERMS_URL: z.string().optional().default(''),
   NEERU_CONTRACT_CREATED_AT_ISO: z.string().datetime().optional(),

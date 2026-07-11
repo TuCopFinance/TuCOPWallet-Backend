@@ -19,10 +19,10 @@ const log = createLogger('neeru-indexer:persistence')
 // Module-scope cache for per-category read values used by handleKindD.
 // Reads are stable for the lifetime of the process, so caching avoids a
 // redundant multicall per tick.
-const lockSecondsCache: Map<NeeruCategory, bigint> = new Map()
+const secsCache: Map<NeeruCategory, bigint> = new Map()
 
-export function _resetLockSecondsCacheForTests(): void {
-  lockSecondsCache.clear()
+export function _resetSecsCacheForTests(): void {
+  secsCache.clear()
 }
 
 export async function buildOnchainContext(
@@ -32,7 +32,7 @@ export async function buildOnchainContext(
   const ctx: NeeruOnchainBatchContext = {
     positionCategory: new Map(),
     blockTimestamps: new Map(),
-    lockSecondsByCategory: new Map(),
+    secsByCategory: new Map(),
   }
 
   if (events.length === 0) return ctx
@@ -81,41 +81,41 @@ export async function buildOnchainContext(
     const cachedCats: NeeruCategory[] = []
     const uncachedCats: NeeruCategory[] = []
     for (const cat of uniqueCats) {
-      if (lockSecondsCache.has(cat)) {
+      if (secsCache.has(cat)) {
         cachedCats.push(cat)
       } else {
         uncachedCats.push(cat)
       }
     }
     for (const cat of cachedCats) {
-      ctx.lockSecondsByCategory.set(cat, lockSecondsCache.get(cat)!)
+      ctx.secsByCategory.set(cat, secsCache.get(cat)!)
     }
 
     if (uncachedCats.length > 0) {
-      type TrancheCall = {
+      type CategoryReadCall = {
         address: `0x${string}`
         abi: typeof READ_ABI
         functionName: 'tranches'
         args: readonly [NeeruCategory]
       }
-      const trancheCalls: TrancheCall[] = uncachedCats.map((cat) => ({
+      const catCalls: CategoryReadCall[] = uncachedCats.map((cat) => ({
         address: CONTRACT_ADDRESS,
         abi: READ_ABI,
         functionName: 'tranches',
         args: [cat] as const,
       }))
-      const trancheResults = await rpc.multicall({
-        contracts: trancheCalls as unknown as Parameters<
+      const catResults = await rpc.multicall({
+        contracts: catCalls as unknown as Parameters<
           NeeruIndexerRpcClient['multicall']
         >[0]['contracts'],
         allowFailure: false,
       })
       for (let i = 0; i < uncachedCats.length; i++) {
         const cat = uncachedCats[i]!
-        const raw = trancheResults[i] as readonly unknown[]
-        const lockSecs = BigInt(raw[1] as bigint | number | string)
-        lockSecondsCache.set(cat, lockSecs)
-        ctx.lockSecondsByCategory.set(cat, lockSecs)
+        const raw = catResults[i] as readonly unknown[]
+        const secs = BigInt(raw[1] as bigint | number | string)
+        secsCache.set(cat, secs)
+        ctx.secsByCategory.set(cat, secs)
       }
     }
   }
@@ -301,10 +301,10 @@ export async function handleKindD(
 
   // startTs derived from the per-category cached value when available,
   // block timestamp fallback otherwise so the row always inserts.
-  const lockSecs = ctx.lockSecondsByCategory.get(cat)
+  const secs = ctx.secsByCategory.get(cat)
   const startTs =
-    lockSecs != null && lockSecs > 0n && args.endTs >= lockSecs
-      ? args.endTs - lockSecs
+    secs != null && secs > 0n && args.endTs >= secs
+      ? args.endTs - secs
       : args.blockTimestamp
 
   await insertRow(

@@ -81,7 +81,7 @@ Railway env vars. The annotated source of truth is `.env.example` (every variabl
 ### Neeru hooks-api / wallet surfaces
 
 - `NEERU_DEPOSIT_TOKEN_ADDRESS` -- required for the Neeru slice of `/hooks-api/*` and `/api/earn/neeru/*`. When unset, the Neeru side is a no-op; Allbridge results still flow through.
-- `NEERU_TRANCHE_IMAGE_URL_TEMPLATE` -- optional; template with `{N}` placeholder, e.g. `https://cdn.tucop.xyz/neeru/tranche-{N}.png`.
+- `NEERU_CATEGORY_IMAGE_URL_TEMPLATE` -- optional; template with `{N}` placeholder, e.g. `https://cdn.tucop.xyz/neeru/category-{N}.png`.
 - `NEERU_MANAGE_URL` -- optional; surface link the wallet shows under "manage your position".
 - `NEERU_TERMS_URL` -- optional; surface link the wallet shows under "terms".
 - `NEERU_CONTRACT_CREATED_AT_ISO` -- optional; ISO 8601 timestamp the partner contract was deployed. Surfaced in `dataProps.contractCreatedAt`.

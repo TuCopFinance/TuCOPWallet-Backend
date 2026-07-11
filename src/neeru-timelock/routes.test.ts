@@ -5,7 +5,7 @@ process.env.NEERU_TIMELOCK_ADDRESS =
   '0xe8358c9cfa4f7af8acd6ff86e012d828527497bf'
 process.env.NEERU_CONTRACT_ADDRESS =
   '0x988af5977201a0e988f2c75ea952532f6beb5082'
-process.env.NEERU_TIMELOCK_GENESIS_BLOCK = '70876544'
+process.env.NEERU_TIMELOCK_GENESIS_BLOCK = '1234568'
 process.env.NEERU_TIMELOCK_EVENT_SCHEDULED_TOPIC0 =
   '0x4cf4410cc57040e44862ef0f45f3dd5a5e02db8eb8add648d4b0e236f1d07dca'
 process.env.NEERU_TIMELOCK_EVENT_EXECUTED_TOPIC0 =
@@ -21,7 +21,7 @@ const dbRows: {
 } = {
   state: {
     id: 1,
-    last_scanned_block: '70942000',
+    last_scanned_block: '1234700',
     last_scan_at: new Date('2026-07-05T12:00:00Z'),
     last_error: null,
     last_error_at: null,
@@ -62,7 +62,7 @@ describe('GET /api/earn/neeru/upgrade-schedule', () => {
   beforeEach(() => {
     dbRows.state = {
       id: 1,
-      last_scanned_block: '70942000',
+      last_scanned_block: '1234700',
       last_scan_at: new Date('2026-07-05T12:00:00Z'),
       last_error: null,
       last_error_at: null,
@@ -77,7 +77,7 @@ describe('GET /api/earn/neeru/upgrade-schedule', () => {
     expect(res.body.data.pending).toEqual([])
     expect(res.body.data.executed).toEqual([])
     expect(res.body.data.cancelled).toEqual([])
-    expect(res.body.data.lastSyncedBlock).toBe('70942000')
+    expect(res.body.data.lastSyncedBlock).toBe('1234700')
     expect(res.body.data.lastError).toBeNull()
   })
 
@@ -93,7 +93,7 @@ describe('GET /api/earn/neeru/upgrade-schedule', () => {
         predecessor: `0x${'00'.repeat(32)}`,
         delay: '172800',
         ready_ts: '1783432800',
-        block_number: '70942000',
+        block_number: '1234700',
         block_timestamp: '1783260000',
         tx_hash: '0xaaa',
         log_index: 0,
@@ -109,7 +109,7 @@ describe('GET /api/earn/neeru/upgrade-schedule', () => {
         predecessor: null,
         delay: null,
         ready_ts: null,
-        block_number: '70950000',
+        block_number: '1234900',
         block_timestamp: '1783300000',
         tx_hash: '0xbbb',
         log_index: 0,
@@ -138,7 +138,7 @@ describe('GET /api/earn/neeru/upgrade-schedule', () => {
         predecessor: `0x${'00'.repeat(32)}`,
         delay: '172800',
         ready_ts: '1783432800',
-        block_number: '70942000',
+        block_number: '1234700',
         block_timestamp: '1783260000',
         tx_hash: '0xaaa',
         log_index: 0,
@@ -154,7 +154,7 @@ describe('GET /api/earn/neeru/upgrade-schedule', () => {
         predecessor: null,
         delay: null,
         ready_ts: null,
-        block_number: '70945000',
+        block_number: '1234800',
         block_timestamp: '1783280000',
         tx_hash: '0xccc',
         log_index: 0,
@@ -182,7 +182,7 @@ describe('GET /api/earn/neeru/upgrade-schedule', () => {
         predecessor: `0x${'00'.repeat(32)}`,
         delay: '172800',
         ready_ts: '1783432800',
-        block_number: '70942000',
+        block_number: '1234700',
         block_timestamp: '1783260000',
         tx_hash: '0xaaa',
         log_index: 0,

@@ -23,7 +23,7 @@ jest.mock('./positions', () => ({
 jest.mock('./trigger', () => ({
   buildDepositTxs: jest.fn(),
   buildWithdrawTxs: jest.fn(),
-  buildWithdrawPrincipalOnlyTxs: jest.fn(),
+  buildWithdrawAmountOnlyTxs: jest.fn(),
 }))
 jest.mock('../../apps/allbridge', () => ({
   getPositions: jest.fn(async () => []),
@@ -48,9 +48,9 @@ describe('GET /api/earn/neeru/positions', () => {
       positions: [
         {
           positionId: '100',
-          tranche: 1,
-          trancheLabel: '7 dias',
-          principal: '10000',
+          category: 1,
+          categoryLabel: '7 dias',
+          amount: '10000',
           accruedInterest: '82.5',
           monthlyRatePercentage: 1.0,
           startTs: 1700000000,
@@ -59,7 +59,7 @@ describe('GET /api/earn/neeru/positions', () => {
           depositTxHash: TX_HASH_1,
           renewedFromPositionId: null,
           currentPayoutIfClosed: {
-            principal: '10000',
+            amount: '10000',
             interest: '82.5',
             penaltyBps: 2000,
             interestAfterPenalty: '66',

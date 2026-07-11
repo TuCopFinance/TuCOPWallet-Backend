@@ -2,7 +2,7 @@ process.env.NEERU_TIMELOCK_ADDRESS =
   '0xe8358c9cfa4f7af8acd6ff86e012d828527497bf'
 process.env.NEERU_CONTRACT_ADDRESS =
   '0x988af5977201a0e988f2c75ea952532f6beb5082'
-process.env.NEERU_TIMELOCK_GENESIS_BLOCK = '70876544'
+process.env.NEERU_TIMELOCK_GENESIS_BLOCK = '1234568'
 process.env.NEERU_TIMELOCK_EVENT_SCHEDULED_TOPIC0 =
   '0x4cf4410cc57040e44862ef0f45f3dd5a5e02db8eb8add648d4b0e236f1d07dca'
 process.env.NEERU_TIMELOCK_EVENT_EXECUTED_TOPIC0 =
@@ -33,9 +33,9 @@ interface BuildFakeOpts {
 
 function buildFakes(opts: BuildFakeOpts = {}) {
   const state = opts.state === undefined
-    ? { lastScannedBlock: 70876543n }
+    ? { lastScannedBlock: 1234567n }
     : opts.state
-  const tip = opts.tip ?? 70877000n
+  const tip = opts.tip ?? 1234900n
   const logs = opts.logs ?? []
   const blockTimestamp = opts.blockTimestamp ?? 1783260000n
   const scheduledExists = opts.scheduledExists ?? false
@@ -119,8 +119,8 @@ describe('runTick', () => {
 
   it('no-ops when cursor is at or beyond safeTip', async () => {
     const { db, rpc } = buildFakes({
-      state: { lastScannedBlock: 70877000n },
-      tip: 70877003n,
+      state: { lastScannedBlock: 1234900n },
+      tip: 1234901n,
     })
     const result = await runTick({ db: db as never, rpc: rpc as never })
     expect(result.scanned).toBe(false)
@@ -128,8 +128,8 @@ describe('runTick', () => {
 
   it('scans an empty block range successfully', async () => {
     const { db, rpc, queries } = buildFakes({
-      state: { lastScannedBlock: 70876543n },
-      tip: 70876800n,
+      state: { lastScannedBlock: 1234567n },
+      tip: 1234860n,
       logs: [],
     })
     const result = await runTick({ db: db as never, rpc: rpc as never })
@@ -168,13 +168,13 @@ describe('runTick', () => {
         `0x${'00'.repeat(32)}` as `0x${string}`,
       ],
       data,
-      blockNumber: 70876800n,
+      blockNumber: 1234860n,
       transactionHash: '0x1234' as `0x${string}`,
       logIndex: 0,
     }
     const { db, rpc, queries } = buildFakes({
-      state: { lastScannedBlock: 70876543n },
-      tip: 70876900n,
+      state: { lastScannedBlock: 1234567n },
+      tip: 1234870n,
       logs: [log],
       blockTimestamp: 1783260000n,
     })

@@ -8,8 +8,8 @@ export const NEERU_DEPOSIT_TOKEN_ADDRESS = readEnvAddress(
   { lowercase: true },
 )
 
-export const NEERU_TRANCHE_IMAGE_URL_TEMPLATE =
-  process.env.NEERU_TRANCHE_IMAGE_URL_TEMPLATE ?? ''
+export const NEERU_CATEGORY_IMAGE_URL_TEMPLATE =
+  process.env.NEERU_CATEGORY_IMAGE_URL_TEMPLATE ?? ''
 
 export const NEERU_MANAGE_URL = process.env.NEERU_MANAGE_URL ?? ''
 
@@ -26,8 +26,8 @@ export function assertHooksApiConfig(): void {
   if (!hooksApiConfigured()) {
     throw new Error('NEERU_DEPOSIT_TOKEN_ADDRESS not set')
   }
-  if (!NEERU_TRANCHE_IMAGE_URL_TEMPLATE) {
-    log.warn('NEERU_TRANCHE_IMAGE_URL_TEMPLATE not set; imageUrl will be empty')
+  if (!NEERU_CATEGORY_IMAGE_URL_TEMPLATE) {
+    log.warn('NEERU_CATEGORY_IMAGE_URL_TEMPLATE not set; imageUrl will be empty')
   }
   if (!NEERU_MANAGE_URL) {
     log.warn('NEERU_MANAGE_URL not set; manageUrl will be empty')
@@ -42,7 +42,7 @@ export function assertHooksApiConfig(): void {
   }
 }
 
-export function trancheImageUrl(category: 0 | 1 | 2 | 3): string {
-  if (!NEERU_TRANCHE_IMAGE_URL_TEMPLATE) return ''
-  return NEERU_TRANCHE_IMAGE_URL_TEMPLATE.replace('{N}', String(category))
+export function categoryImageUrl(category: 0 | 1 | 2 | 3): string {
+  if (!NEERU_CATEGORY_IMAGE_URL_TEMPLATE) return ''
+  return NEERU_CATEGORY_IMAGE_URL_TEMPLATE.replace('{N}', String(category))
 }

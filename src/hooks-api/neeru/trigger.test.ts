@@ -3,7 +3,7 @@ import type { NeeruIndexerRpcClient } from '../../neeru-indexer/rpc'
 import {
   _resetHooksApiNeeruTriggerCacheForTests,
   buildDepositTxs,
-  buildWithdrawPrincipalOnlyTxs,
+  buildWithdrawAmountOnlyTxs,
   buildWithdrawTxs,
 } from './trigger'
 
@@ -23,9 +23,9 @@ interface PreflightReads {
   depositsPaused?: boolean
   globalTvl?: bigint
   globalCap?: bigint
-  trancheR0?: bigint
-  trancheR2?: bigint
-  trancheR3?: bigint
+  catR0?: bigint
+  catR2?: bigint
+  catR3?: bigint
   minDeposit?: bigint
   allowance?: bigint
 }
@@ -39,9 +39,9 @@ function buildDepositRpc(opts: {
     depositsPaused: false,
     globalTvl: 0n,
     globalCap: 10n ** 30n,
-    trancheR0: RAY,
-    trancheR2: 0n,
-    trancheR3: 10n ** 30n,
+    catR0: RAY,
+    catR2: 0n,
+    catR3: 10n ** 30n,
     minDeposit: 1n,
     allowance: 10n ** 30n,
     ...opts.preflight,
@@ -67,7 +67,7 @@ function buildDepositRpc(opts: {
           reads.depositsPaused,
           reads.globalTvl,
           reads.globalCap,
-          [reads.trancheR0, 0n, reads.trancheR2, reads.trancheR3],
+          [reads.catR0, 0n, reads.catR2, reads.catR3],
           reads.minDeposit,
           reads.allowance,
         ]
@@ -126,7 +126,7 @@ describe('buildDepositTxs', () => {
     })
     const result = await buildDepositTxs({
       address: USER,
-      trancheId: 1,
+      categoryId: 1,
       amount: '100',
       rpc,
     })
@@ -145,7 +145,7 @@ describe('buildDepositTxs', () => {
     const rpc = buildDepositRpc({ preflight: { allowance: 0n } })
     const result = await buildDepositTxs({
       address: USER,
-      trancheId: 2,
+      categoryId: 2,
       amount: '50',
       rpc,
     })
@@ -159,16 +159,16 @@ describe('buildDepositTxs', () => {
     expect(depositTx!.estimatedGasUse).toBe('210000')
   })
 
-  it('rejects an invalid trancheId', async () => {
+  it('rejects an invalid categoryId', async () => {
     const rpc = buildDepositRpc({ preflight: {} })
     await expect(
       buildDepositTxs({
         address: USER,
-        trancheId: 4,
+        categoryId: 4,
         amount: '10',
         rpc,
       }),
-    ).rejects.toThrow('INVALID_TRANCHE')
+    ).rejects.toThrow('INVALID_CATEGORY')
   })
 
   it('throws DEPOSITS_PAUSED when the contract reports a paused state', async () => {
@@ -176,7 +176,7 @@ describe('buildDepositTxs', () => {
     await expect(
       buildDepositTxs({
         address: USER,
-        trancheId: 0,
+        categoryId: 0,
         amount: '10',
         rpc,
       }),
@@ -193,38 +193,38 @@ describe('buildDepositTxs', () => {
     await expect(
       buildDepositTxs({
         address: USER,
-        trancheId: 0,
+        categoryId: 0,
         amount: '1',
         rpc,
       }),
     ).rejects.toThrow('GLOBAL_CAP_EXCEEDED')
   })
 
-  it('throws TRANCHE_CAP_EXCEEDED when tranche tvl + amount > tranche cap', async () => {
+  it('throws CATEGORY_CAP_EXCEEDED when cat tvl + amount > cat cap', async () => {
     const rpc = buildDepositRpc({
       preflight: {
-        trancheR2: 5n * 10n ** 18n,
-        trancheR3: 5n * 10n ** 18n,
+        catR2: 5n * 10n ** 18n,
+        catR3: 5n * 10n ** 18n,
       },
     })
     await expect(
       buildDepositTxs({
         address: USER,
-        trancheId: 1,
+        categoryId: 1,
         amount: '1',
         rpc,
       }),
-    ).rejects.toThrow('TRANCHE_CAP_EXCEEDED')
+    ).rejects.toThrow('CATEGORY_CAP_EXCEEDED')
   })
 
   it('throws RATE_NOT_SET when r0 < RAY', async () => {
     const rpc = buildDepositRpc({
-      preflight: { trancheR0: RAY - 1n },
+      preflight: { catR0: RAY - 1n },
     })
     await expect(
       buildDepositTxs({
         address: USER,
-        trancheId: 1,
+        categoryId: 1,
         amount: '10',
         rpc,
       }),
@@ -238,7 +238,7 @@ describe('buildDepositTxs', () => {
     await expect(
       buildDepositTxs({
         address: USER,
-        trancheId: 1,
+        categoryId: 1,
         amount: '10',
         rpc,
       }),
@@ -250,7 +250,7 @@ describe('buildDepositTxs', () => {
     await expect(
       buildDepositTxs({
         address: USER,
-        trancheId: 0,
+        categoryId: 0,
         amount: '12.5',
         rpc,
       }),
@@ -330,11 +330,11 @@ describe('buildWithdrawTxs', () => {
   })
 })
 
-describe('buildWithdrawPrincipalOnlyTxs', () => {
+describe('buildWithdrawAmountOnlyTxs', () => {
   it('emits a single closePositionPrincipalOnly tx on the happy path', async () => {
     const rpc = buildWithdrawRpc({})
     const { db } = buildDb([{ position_id: '42' }])
-    const result = await buildWithdrawPrincipalOnlyTxs({
+    const result = await buildWithdrawAmountOnlyTxs({
       address: USER,
       positionId: '42',
       rpc,
@@ -351,7 +351,7 @@ describe('buildWithdrawPrincipalOnlyTxs', () => {
     const rpc = buildWithdrawRpc({})
     const { db } = buildDb([])
     await expect(
-      buildWithdrawPrincipalOnlyTxs({
+      buildWithdrawAmountOnlyTxs({
         address: USER,
         positionId: '99',
         rpc,
@@ -366,7 +366,7 @@ describe('buildWithdrawPrincipalOnlyTxs', () => {
     })
     const { db } = buildDb([{ position_id: '42' }])
     await expect(
-      buildWithdrawPrincipalOnlyTxs({
+      buildWithdrawAmountOnlyTxs({
         address: USER,
         positionId: '42',
         rpc,
@@ -379,7 +379,7 @@ describe('buildWithdrawPrincipalOnlyTxs', () => {
     const rpc = buildWithdrawRpc({ closed: true })
     const { db } = buildDb([{ position_id: '42' }])
     await expect(
-      buildWithdrawPrincipalOnlyTxs({
+      buildWithdrawAmountOnlyTxs({
         address: USER,
         positionId: '42',
         rpc,
