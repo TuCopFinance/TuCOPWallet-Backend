@@ -135,6 +135,10 @@ describe('buildDepositTxs', () => {
     expect(depositTx!.networkId).toBe('celo-mainnet')
     expect(depositTx!.value).toBe('0')
     expect(depositTx!.data.slice(0, 10)).toBe(DEPOSIT_SELECTOR)
+    // Gas hints let the wallet bypass eth_estimateGas which would
+    // revert-simulate against LATEST state on the batched flow.
+    expect(depositTx!.gas).toBe('260000')
+    expect(depositTx!.estimatedGasUse).toBe('210000')
   })
 
   it('prepends an approve tx when allowance is insufficient', async () => {
@@ -148,7 +152,11 @@ describe('buildDepositTxs', () => {
     expect(result.transactions).toHaveLength(2)
     const [approveTx, depositTx] = result.transactions
     expect(approveTx!.data.slice(0, 10)).toBe(APPROVE_SELECTOR)
+    expect(approveTx!.gas).toBe('65000')
+    expect(approveTx!.estimatedGasUse).toBe('47000')
     expect(depositTx!.data.slice(0, 10)).toBe(DEPOSIT_SELECTOR)
+    expect(depositTx!.gas).toBe('260000')
+    expect(depositTx!.estimatedGasUse).toBe('210000')
   })
 
   it('rejects an invalid trancheId', async () => {
@@ -261,9 +269,10 @@ describe('buildWithdrawTxs', () => {
       db,
     })
     expect(result.transactions).toHaveLength(1)
-    expect(result.transactions[0]!.data.slice(0, 10)).toBe(
-      CLOSE_POSITION_SELECTOR,
-    )
+    const [withdrawTx] = result.transactions
+    expect(withdrawTx!.data.slice(0, 10)).toBe(CLOSE_POSITION_SELECTOR)
+    expect(withdrawTx!.gas).toBe('230000')
+    expect(withdrawTx!.estimatedGasUse).toBe('180000')
   })
 
   it('throws POSITION_NOT_FOUND when DB returns zero rows', async () => {
@@ -332,9 +341,10 @@ describe('buildWithdrawPrincipalOnlyTxs', () => {
       db,
     })
     expect(result.transactions).toHaveLength(1)
-    expect(result.transactions[0]!.data.slice(0, 10)).toBe(
-      CLOSE_POSITION_PO_SELECTOR,
-    )
+    const [tx0] = result.transactions
+    expect(tx0!.data.slice(0, 10)).toBe(CLOSE_POSITION_PO_SELECTOR)
+    expect(tx0!.gas).toBe('170000')
+    expect(tx0!.estimatedGasUse).toBe('130000')
   })
 
   it('throws POSITION_NOT_FOUND when DB returns zero rows', async () => {
