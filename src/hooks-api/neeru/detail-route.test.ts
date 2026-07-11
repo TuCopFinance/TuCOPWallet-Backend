@@ -23,7 +23,7 @@ jest.mock('./positions', () => ({
 jest.mock('./trigger', () => ({
   buildDepositTxs: jest.fn(),
   buildWithdrawTxs: jest.fn(),
-  buildWithdrawPrincipalOnlyTxs: jest.fn(),
+  buildWithdrawAmountOnlyTxs: jest.fn(),
 }))
 jest.mock('../../apps/allbridge', () => ({
   getPositions: jest.fn(async () => []),

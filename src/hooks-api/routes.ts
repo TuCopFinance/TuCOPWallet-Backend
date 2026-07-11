@@ -262,11 +262,11 @@ router.get(
 // 400. Anything else is treated as an upstream / infra failure and the
 // underlying message is logged but never echoed.
 const TRIGGER_USER_ERROR_CODES: ReadonlySet<string> = new Set([
-  'INVALID_TRANCHE',
+  'INVALID_CATEGORY',
   'INVALID_AMOUNT',
   'DEPOSITS_PAUSED',
   'GLOBAL_CAP_EXCEEDED',
-  'TRANCHE_CAP_EXCEEDED',
+  'CATEGORY_CAP_EXCEEDED',
   'RATE_NOT_SET',
   'AMOUNT_BELOW_MIN',
   'POSITION_NOT_FOUND',

@@ -11,7 +11,7 @@ import {
   EARLY_CLAIM_PENALTY_BPS_FN_ABI,
   ERC20_READ_ABI,
   PREVIEW_ACCRUED_INTEREST_FN_ABI,
-  TRANCHES_FN_ABI,
+  CATEGORY_READ_FN_ABI,
 } from '../neeru-abi'
 import { NEERU_DEPOSIT_TOKEN_ADDRESS } from '../config'
 import { monthlyYieldPercent } from './positions'
@@ -185,14 +185,14 @@ export async function getNeeruPositionDetail(
     })
   }
 
-  const tranchesRange: [number, number] = [
+  const catReadRange: [number, number] = [
     calls.length,
     calls.length + uncachedCategories.length,
   ]
   for (const c of uncachedCategories) {
     calls.push({
       address: CONTRACT_ADDRESS,
-      abi: [TRANCHES_FN_ABI] as unknown as readonly unknown[],
+      abi: [CATEGORY_READ_FN_ABI] as unknown as readonly unknown[],
       functionName: 'tranches',
       args: [c] as const,
     })
@@ -240,7 +240,7 @@ export async function getNeeruPositionDetail(
     allowFailure: true,
   })) as ReadonlyArray<MulticallResult>
 
-  // Fold cached + fresh tranches into a single lookup.
+  // Fold cached + fresh per-category values into a single lookup.
   const secsByCategory = new Map<number, bigint>()
   for (const c of distinctCategories) {
     const cached = secsCache.get(c)
@@ -250,9 +250,9 @@ export async function getNeeruPositionDetail(
   }
   for (let i = 0; i < uncachedCategories.length; i++) {
     const c = uncachedCategories[i]!
-    const r = results[tranchesRange[0] + i]
+    const r = results[catReadRange[0] + i]
     if (!r || r.status !== 'success') {
-      log.warn(`tranches(${c}) read failed - defaulting to 0`)
+      log.warn(`cat read (${c}) failed - defaulting to 0`)
       secsByCategory.set(c, 0n)
       continue
     }

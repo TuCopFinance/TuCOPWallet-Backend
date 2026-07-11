@@ -66,7 +66,7 @@ function buildFakeRpc(opts: FakeRpcOpts = {}): {
         if (call.functionName === 'tranches') {
           const c = call.args[0] as number
           const lock = secsMap.get(c) ?? 0n
-          // tranche tuple: [r0, r1, r2, r3]; assembler only reads r1.
+          // category-read tuple: [r0, r1, r2, r3]; assembler only reads r1.
           return {
             status: 'success',
             result: [0n, lock, 0n, 0n] as readonly bigint[],
@@ -196,7 +196,7 @@ describe('getNeeruPositionDetail', () => {
     expect(res.lastSyncedAt).toBeNull()
   })
 
-  it('builds a single flexible-tranche position (isEarly=false, no penalty)', async () => {
+  it('builds a single flexible-category position (isEarly=false, no penalty)', async () => {
     const { rpc, callsLog } = buildFakeRpc({
       penaltyBps: 2000n,
       secsByCategory: new Map([[0, 0n]]),
@@ -243,7 +243,7 @@ describe('getNeeruPositionDetail', () => {
     const monthly = ((1.0001) ** 30 - 1) * 100
     expect(p.monthlyRatePercentage).toBeCloseTo(monthly, 6)
 
-    // Flexible tranche -> never early -> interestAfterPenalty == accrued.
+    // Flexible category -> never early -> interestAfterPenalty == accrued.
     expect(p.currentPayoutIfClosed.isEarly).toBe(false)
     expect(p.currentPayoutIfClosed.penaltyBps).toBe(2000)
     expect(p.currentPayoutIfClosed.amount).toBe('10000')
@@ -255,7 +255,7 @@ describe('getNeeruPositionDetail', () => {
     expect(callsLog).toHaveLength(1)
   })
 
-  it('handles multi-position multi-tranche with mixed isEarly branches', async () => {
+  it('handles multi-position multi-category with mixed isEarly branches', async () => {
     const secsMap = new Map<number, bigint>([
       [0, 0n],
       [1, BigInt(7 * 86_400)],
@@ -368,9 +368,9 @@ describe('getNeeruPositionDetail', () => {
     expect(res.positions[3]!.currentPayoutIfClosed.isEarly).toBe(false)
     expect(res.positions[3]!.currentPayoutIfClosed.total).toBe('5025')
 
-    // One batch only, even with 4 positions across 3 distinct tranches.
+    // One batch only, even with 4 positions across 3 distinct categories.
     expect(callsLog).toHaveLength(1)
-    // 4 accrued + 3 tranches (distinct cats) + 4 positions + 1 penalty + 1 decimals = 13
+    // 4 accrued + 3 category reads + 4 positions + 1 penalty + 1 decimals = 13
     expect(callsLog[0]!.contracts).toHaveLength(13)
   })
 
@@ -454,7 +454,7 @@ describe('getNeeruPositionDetail', () => {
     expect(p.currentPayoutIfClosed.total).toBe('500')
   })
 
-  it('caches earlyClaimPenaltyBps and tranches across calls within TTL', async () => {
+  it('caches earlyClaimPenaltyBps and per-category reads across calls within TTL', async () => {
     const { rpc, callsLog } = buildFakeRpc({
       penaltyBps: 2000n,
       secsByCategory: new Map([[1, BigInt(7 * 86_400)]]),
@@ -485,7 +485,7 @@ describe('getNeeruPositionDetail', () => {
       now,
       nowSeconds: () => Math.floor(nowMs / 1000),
     })
-    // First call: 1 accrued + 1 tranches + 1 positions + 1 penalty + 1 decimals
+    // First call: 1 accrued + 1 cat read + 1 positions + 1 penalty + 1 decimals
     expect(callsLog[0]!.contracts).toHaveLength(5)
 
     nowMs += 10_000
@@ -496,7 +496,7 @@ describe('getNeeruPositionDetail', () => {
       now,
       nowSeconds: () => Math.floor(nowMs / 1000),
     })
-    // Within TTL: tranches + penalty + decimals all cached. Per-user reads
+    // Within TTL: cat read + penalty + decimals all cached. Per-user reads
     // remain: 1 accrued + 1 positions = 2.
     expect(callsLog[1]!.contracts).toHaveLength(2)
 
@@ -508,7 +508,7 @@ describe('getNeeruPositionDetail', () => {
       now,
       nowSeconds: () => Math.floor(nowMs / 1000),
     })
-    // Past TTL: tranches + penalty + decimals re-fetched -> 5 again.
+    // Past TTL: cat read + penalty + decimals re-fetched -> 5 again.
     expect(callsLog[2]!.contracts).toHaveLength(5)
   })
 })

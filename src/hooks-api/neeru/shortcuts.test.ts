@@ -5,7 +5,7 @@ describe('getNeeruShortcuts', () => {
     const shortcuts = getNeeruShortcuts()
     expect(shortcuts).toHaveLength(3)
     const ids = shortcuts.map((s) => s.id).sort()
-    expect(ids).toEqual(['deposit', 'withdraw', 'withdraw-principal-only'])
+    expect(ids).toEqual(['deposit', 'withdraw', 'withdraw-amount-only'])
     for (const s of shortcuts) {
       expect(s.appId).toBe(NEERU_APP_ID)
       expect(s.networkIds).toEqual(['celo-mainnet'])
@@ -17,7 +17,7 @@ describe('getNeeruShortcuts', () => {
     const byId = Object.fromEntries(shortcuts.map((s) => [s.id, s]))
     expect(byId.deposit?.category).toBe('deposit')
     expect(byId.withdraw?.category).toBe('withdraw')
-    expect(byId['withdraw-principal-only']?.category).toBe('withdraw')
+    expect(byId['withdraw-amount-only']?.category).toBe('withdraw')
   })
 
   it('returns a fresh array each call (no shared mutable state)', () => {

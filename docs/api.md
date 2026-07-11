@@ -472,13 +472,13 @@ Runs a daily reconciliation job at 03:00 UTC.
 
 ### Hooks API
 
-Drop-in replacement for Valora's `hooks-api`. Surfaces the catalogue of Earn products the wallet renders in the Earn tab. Two apps are wired today: the Allbridge native port (LP positions + reward claims) and the Neeru Vaults partner integration (4 tranches keyed off the indexer above). The contract address and tranche metadata are read from env + on-chain at request time; no Neeru-specific constants are baked into source.
+Drop-in replacement for Valora's `hooks-api`. Surfaces the catalogue of Earn products the wallet renders in the Earn tab. Two apps are wired today: the Allbridge native port (LP positions + reward claims) and the Neeru Vaults partner integration (4 categories keyed off the indexer above). The contract address and per-category metadata are read from env + on-chain at request time; no Neeru-specific constants are baked into source.
 
-Each endpoint returns `{ "data": [...] }` with a discriminated union of `app-token` / `contract-position` entries. Tranche metadata (TVL, daily rate, lock seconds, deposit-token decimals/symbol) is fetched via one Multicall3 call and cached in-process for 30 s; per-user balances are read from `neeru_positions` (Postgres) plus a per-batch Multicall3 for `previewAccruedInterest`. Allbridge calls are wrapped in try/catch and never fail the whole response - if upstream times out the wallet still sees the Neeru side.
+Each endpoint returns `{ "data": [...] }` with a discriminated union of `app-token` / `contract-position` entries. Per-category metadata (TVL, per-category rate, per-category secs, deposit-token decimals/symbol) is fetched via one Multicall3 call and cached in-process for 30 s; per-user balances are read from `neeru_positions` (Postgres) plus a per-batch Multicall3 read. Allbridge calls are wrapped in try/catch and never fail the whole response - if upstream times out the wallet still sees the Neeru side.
 
 #### `GET /hooks-api/getPositions`
 
-Returns positions the user already holds (Allbridge LPs with non-zero balance + Neeru tranches with non-zero principal-plus-accrued).
+Returns positions the user already holds (Allbridge LPs with non-zero balance + Neeru categories with non-zero amount-plus-accrued).
 
 | Param | Required | Notes |
 |------|----------|-------|
@@ -489,7 +489,7 @@ Returns `{ "data": Position[] }`. 400 on invalid `address` or unsupported `netwo
 
 #### `GET /hooks-api/getEarnPositions`
 
-Returns the full catalogue (4 Neeru tranches + Allbridge LPs) regardless of holdings. When `address` is omitted, every entry has `balance: "0"`.
+Returns the full catalogue (4 Neeru categories + Allbridge LPs) regardless of holdings. When `address` is omitted, every entry has `balance: "0"`.
 
 | Param | Required | Notes |
 |------|----------|-------|
@@ -500,7 +500,7 @@ Returns the full catalogue (4 Neeru tranches + Allbridge LPs) regardless of hold
 
 #### `GET /hooks-api/v2/getShortcuts`
 
-Returns the merged shortcut catalogue (Allbridge `deposit` / `withdraw` / `claim-rewards` / `swap-deposit`, Neeru `deposit` / `withdraw` / `withdraw-principal-only`).
+Returns the merged shortcut catalogue (Allbridge `deposit` / `withdraw` / `claim-rewards` / `swap-deposit`, Neeru `deposit` / `withdraw` / `withdraw-amount-only`).
 
 | Param | Required | Notes |
 |------|----------|-------|
@@ -509,7 +509,7 @@ Returns the merged shortcut catalogue (Allbridge `deposit` / `withdraw` / `claim
 
 #### `GET /api/earn/neeru/positions`
 
-Per-position detail surface for the wallet's "your positions" screen. Returns one entry per OPEN row in `neeru_positions`, enriched with live on-chain reads from the partner contract via a single batched Multicall3 request. Read responses (per-tranche metadata, deposit-token decimals, and any global view fields) are cached in-process for 30 s.
+Per-position detail surface for the wallet's "your positions" screen. Returns one entry per OPEN row in `neeru_positions`, enriched with live on-chain reads from the partner contract via a single batched Multicall3 request. Read responses (per-category metadata, deposit-token decimals, and any global view fields) are cached in-process for 30 s.
 
 | Param | Required | Notes |
 |------|----------|-------|
@@ -526,9 +526,9 @@ Any other query key returns `400 { "error": "unknown param" }` (strict allowlist
     "positions": [
       {
         "positionId": "<opaque>",
-        "tranche": 1,
-        "trancheLabel": "<derived from on-chain tranche metadata>",
-        "principal": "<decimal-formatted>",
+        "category": 1,
+        "categoryLabel": "<derived from on-chain per-category metadata>",
+        "amount": "<decimal-formatted>",
         "accruedInterest": "<decimal-formatted>",
         "monthlyRatePercentage": "<numeric>",
         "startTs": 1700000000,
@@ -537,7 +537,7 @@ Any other query key returns `400 { "error": "unknown param" }` (strict allowlist
         "depositTxHash": "0x...",
         "renewedFromPositionId": null,
         "currentPayoutIfClosed": {
-          "principal": "<decimal-formatted>",
+          "amount": "<decimal-formatted>",
           "interest": "<decimal-formatted>",
           "penaltyBps": "<numeric>",
           "interestAfterPenalty": "<decimal-formatted>",
@@ -554,8 +554,8 @@ Any other query key returns `400 { "error": "unknown param" }` (strict allowlist
 
 Notes:
 
-- `trancheLabel` is `Flexible` for the flexible-tranche category; otherwise a `<days> dias` label derived from the on-chain tranche metadata.
-- `monthlyRatePercentage` is computed from the per-position frozen-rate field stored on chain at deposit time, not from the live tranche rate, so quotes do not drift after a tranche-rate update.
+- `categoryLabel` is `Flexible` for the flexible category; otherwise a `<days> dias` label derived from the on-chain per-category metadata.
+- `monthlyRatePercentage` is computed from the per-position frozen-rate field stored on chain at deposit time, not from the live per-category rate, so quotes do not drift after a per-category rate update.
 - `currentPayoutIfClosed.isEarly` is `true` only when the position is locked AND `now < endTs`. The early-claim penalty math runs in wei (bigint floor division) before the value is formatted.
 - `renewedFromPositionId` is always `null`; the indexer schema does not track renewal chains.
 - `lastSyncedBlock` / `lastSyncedAt` come from `neeru_indexer_state` so the wallet can warn if the partner indexer is stale.
@@ -600,9 +600,9 @@ Common fields:
   - `shortcutId: "withdraw"`: `{ positionAddress, tokenDecimals, tokens: [{ amount }] }`
   - `shortcutId: "claim-rewards"`: `{ positionAddress }`
 - `appId: "neeru-vaults"`:
-  - `shortcutId: "deposit"`: `{ trancheId, tokens: [{ tokenId, amount }] }`. `trancheId` is `0..3`, `amount` is a decimal integer in whole units (the backend reads the deposit-token decimals from chain and scales to wei).
+  - `shortcutId: "deposit"`: `{ categoryId, tokens: [{ tokenId, amount }] }`. `categoryId` is `0..3`, `amount` is a decimal integer in whole units (the backend reads the deposit-token decimals from chain and scales to wei).
   - `shortcutId: "withdraw"`: `{ positionId }`. `positionId` is a decimal integer string.
-  - `shortcutId: "withdraw-principal-only"`: `{ positionId }`.
+  - `shortcutId: "withdraw-amount-only"`: `{ positionId }`.
 
 **Success response:**
 
@@ -630,7 +630,7 @@ Each transaction is JSON-safe: `value` is a string (`"0"` for non-payable calls)
 #### Env vars
 
 - `NEERU_DEPOSIT_TOKEN_ADDRESS` (required for the Neeru catalogue; `0x` + 40 hex). The Neeru side of every endpoint is a no-op when unset: requests still succeed but return only the Allbridge slice.
-- `NEERU_TRANCHE_IMAGE_URL_TEMPLATE` (optional). Template with `{N}` placeholder, e.g. `https://cdn.tucop.xyz/neeru/tranche-{N}.png`. Empty string when unset.
+- `NEERU_CATEGORY_IMAGE_URL_TEMPLATE` (optional). Template with `{N}` placeholder, e.g. `https://cdn.tucop.xyz/neeru/category-{N}.png`. Empty string when unset.
 - `NEERU_MANAGE_URL` (optional). Surfaced in `displayProps.manageUrl` and `dataProps.manageUrl`. Empty string when unset.
 - `NEERU_TERMS_URL` (optional). Surfaced in `dataProps.termsUrl`. Empty string when unset.
 - `NEERU_CONTRACT_CREATED_AT_ISO` (optional). ISO 8601 string. Surfaced in `dataProps.contractCreatedAt`. `null` when unset.

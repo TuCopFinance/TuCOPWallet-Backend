@@ -41,9 +41,9 @@ process.env.NEERU_DEPOSIT_TOKEN_ADDRESS =
   process.env.NEERU_DEPOSIT_TOKEN_ADDRESS ??
   '0x000000000000000000000000000000000000c0fe'
 
-process.env.NEERU_TRANCHE_IMAGE_URL_TEMPLATE =
-  process.env.NEERU_TRANCHE_IMAGE_URL_TEMPLATE ??
-  'https://cdn.example.test/neeru/tranche-{N}.png'
+process.env.NEERU_CATEGORY_IMAGE_URL_TEMPLATE =
+  process.env.NEERU_CATEGORY_IMAGE_URL_TEMPLATE ??
+  'https://cdn.example.test/neeru/category-{N}.png'
 
 process.env.NEERU_MANAGE_URL =
   process.env.NEERU_MANAGE_URL ?? 'https://neerufinance.test/'

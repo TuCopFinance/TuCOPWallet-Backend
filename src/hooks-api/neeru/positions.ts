@@ -14,7 +14,7 @@ import {
   NEERU_MANAGE_URL,
   NEERU_TERMS_URL,
   hooksApiConfigured,
-  trancheImageUrl,
+  categoryImageUrl,
 } from '../config'
 import { NEERU_APP_ID } from './shortcuts'
 import type { EarnPosition, NetworkId } from './types'
@@ -66,7 +66,7 @@ export function _resetHooksApiNeeruCacheForTests(): void {
 // system via the existing function signatures that wrap it.
 
 function positionIdFor(category: Category): string {
-  return `${NETWORK_ID}:${CONTRACT_ADDRESS.toLowerCase()}:tranche-${category}`
+  return `${NETWORK_ID}:${CONTRACT_ADDRESS.toLowerCase()}:category-${category}`
 }
 
 function depositTokenId(): string {
@@ -292,7 +292,7 @@ function buildEarnPosition(args: BuildArgs): EarnPosition {
     displayProps: {
       title,
       description: `Genera intereses bloqueando tus Pesos por ${title}`,
-      imageUrl: trancheImageUrl(category),
+      imageUrl: categoryImageUrl(category),
       manageUrl: NEERU_MANAGE_URL,
     },
     dataProps: {
@@ -342,8 +342,8 @@ function buildEarnPosition(args: BuildArgs): EarnPosition {
     ],
     availableShortcutIds: ['deposit', 'withdraw'],
     shortcutTriggerArgs: {
-      deposit: { trancheId: category },
-      withdraw: { trancheId: category },
+      deposit: { categoryId: category },
+      withdraw: { categoryId: category },
     },
     symbol,
     decimals,

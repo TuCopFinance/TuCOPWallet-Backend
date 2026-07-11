@@ -9,7 +9,7 @@ const SHORTCUTS: ShortcutDefinition[] = [
     id: 'deposit',
     appId: NEERU_APP_ID,
     name: 'Deposit',
-    description: 'Deposit COPm into a Neeru Vault tranche',
+    description: 'Deposit COPm into a Neeru Vault category',
     networkIds: [NETWORK_ID],
     category: 'deposit',
   },
@@ -22,11 +22,11 @@ const SHORTCUTS: ShortcutDefinition[] = [
     category: 'withdraw',
   },
   {
-    id: 'withdraw-principal-only',
+    id: 'withdraw-amount-only',
     appId: NEERU_APP_ID,
     name: 'Emergency withdraw',
     description:
-      'Close a position recovering only principal (no interest)',
+      'Close a position recovering only the deposit amount (no interest)',
     networkIds: [NETWORK_ID],
     category: 'withdraw',
   },
