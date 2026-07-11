@@ -66,7 +66,7 @@ function buildFakeRpc(opts: FakeRpcOpts = {}): {
         if (call.functionName === 'categories') {
           const c = call.args[0] as number
           const lock = secsMap.get(c) ?? 0n
-          // category tuple: [r0, r1, r2, r3]; assembler only reads r1.
+          // category-read tuple: [r0, r1, r2, r3]; assembler only reads r1.
           return {
             status: 'success',
             result: [0n, lock, 0n, 0n] as readonly bigint[],
@@ -232,7 +232,7 @@ describe('getNeeruPositionDetail', () => {
     const p = res.positions[0]!
     expect(p.positionId).toBe('100')
     expect(p.category).toBe(0)
-    expect(p.categoryLabelFor).toBe('Flexible')
+    expect(p.categoryLabel).toBe('Flexible')
     expect(p.amount).toBe('10000')
     expect(p.accruedInterest).toBe('82.5')
     expect(p.startTs).toBe(1700000000)
@@ -346,10 +346,10 @@ describe('getNeeruPositionDetail', () => {
       '50',
     )
     expect(res.positions[0]!.currentPayoutIfClosed.total).toBe('1050')
-    expect(res.positions[0]!.categoryLabelFor).toBe('Flexible')
+    expect(res.positions[0]!.categoryLabel).toBe('Flexible')
 
     // 30d, isEarly=true. accrued=100, penalty=2000bps -> after = 80, total = 2080.
-    expect(res.positions[1]!.categoryLabelFor).toBe('7 dias')
+    expect(res.positions[1]!.categoryLabel).toBe('7 dias')
     expect(res.positions[1]!.currentPayoutIfClosed.isEarly).toBe(true)
     expect(res.positions[1]!.currentPayoutIfClosed.interestAfterPenalty).toBe(
       '80',
@@ -364,13 +364,13 @@ describe('getNeeruPositionDetail', () => {
     expect(res.positions[2]!.currentPayoutIfClosed.total).toBe('3040')
 
     // 90d, endTs == now -> not strictly < endTs -> isEarly=false
-    expect(res.positions[3]!.categoryLabelFor).toBe('21 dias')
+    expect(res.positions[3]!.categoryLabel).toBe('21 dias')
     expect(res.positions[3]!.currentPayoutIfClosed.isEarly).toBe(false)
     expect(res.positions[3]!.currentPayoutIfClosed.total).toBe('5025')
 
     // One batch only, even with 4 positions across 3 distinct categories.
     expect(callsLog).toHaveLength(1)
-    // 4 accrued + 3 categories (distinct cats) + 4 positions + 1 penalty + 1 decimals = 13
+    // 4 accrued + 3 category reads + 4 positions + 1 penalty + 1 decimals = 13
     expect(callsLog[0]!.contracts).toHaveLength(13)
   })
 
@@ -454,7 +454,7 @@ describe('getNeeruPositionDetail', () => {
     expect(p.currentPayoutIfClosed.total).toBe('500')
   })
 
-  it('caches earlyClaimPenaltyBps and categories across calls within TTL', async () => {
+  it('caches earlyClaimPenaltyBps and per-category reads across calls within TTL', async () => {
     const { rpc, callsLog } = buildFakeRpc({
       penaltyBps: 2000n,
       secsByCategory: new Map([[1, BigInt(7 * 86_400)]]),
@@ -485,7 +485,7 @@ describe('getNeeruPositionDetail', () => {
       now,
       nowSeconds: () => Math.floor(nowMs / 1000),
     })
-    // First call: 1 accrued + 1 categories + 1 positions + 1 penalty + 1 decimals
+    // First call: 1 accrued + 1 cat read + 1 positions + 1 penalty + 1 decimals
     expect(callsLog[0]!.contracts).toHaveLength(5)
 
     nowMs += 10_000
@@ -496,7 +496,7 @@ describe('getNeeruPositionDetail', () => {
       now,
       nowSeconds: () => Math.floor(nowMs / 1000),
     })
-    // Within TTL: categories + penalty + decimals all cached. Per-user reads
+    // Within TTL: cat read + penalty + decimals all cached. Per-user reads
     // remain: 1 accrued + 1 positions = 2.
     expect(callsLog[1]!.contracts).toHaveLength(2)
 
@@ -508,7 +508,7 @@ describe('getNeeruPositionDetail', () => {
       now,
       nowSeconds: () => Math.floor(nowMs / 1000),
     })
-    // Past TTL: categories + penalty + decimals re-fetched -> 5 again.
+    // Past TTL: cat read + penalty + decimals re-fetched -> 5 again.
     expect(callsLog[2]!.contracts).toHaveLength(5)
   })
 })

@@ -21,6 +21,6 @@ export type {
 
 // EarnPosition is the catalogue-style entry that the wallet expects from
 // `/hooks-api/getEarnPositions`. For Neeru every entry is an
-// AppTokenPosition (a category behaves like a single supply position).
+// AppTokenPosition (a per-category slot behaves like a single supply position).
 import type { AppTokenPosition } from '../../apps/allbridge/types'
 export type EarnPosition = AppTokenPosition

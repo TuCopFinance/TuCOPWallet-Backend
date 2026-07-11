@@ -26,7 +26,7 @@ const SHORTCUTS: ShortcutDefinition[] = [
     appId: NEERU_APP_ID,
     name: 'Emergency withdraw',
     description:
-      'Close a position recovering only amount (no interest)',
+      'Close a position recovering only the deposit amount (no interest)',
     networkIds: [NETWORK_ID],
     category: 'withdraw',
   },

@@ -474,7 +474,7 @@ Runs a daily reconciliation job at 03:00 UTC.
 
 Drop-in replacement for Valora's `hooks-api`. Surfaces the catalogue of Earn products the wallet renders in the Earn tab. Two apps are wired today: the Allbridge native port (LP positions + reward claims) and the Neeru Vaults partner integration (4 categories keyed off the indexer above). The contract address and per-category metadata are read from env + on-chain at request time; no Neeru-specific constants are baked into source.
 
-Each endpoint returns `{ "data": [...] }` with a discriminated union of `app-token` / `contract-position` entries. Tranche metadata (TVL, daily rate, lock seconds, deposit-token decimals/symbol) is fetched via one Multicall3 call and cached in-process for 30 s; per-user balances are read from `neeru_positions` (Postgres) plus a per-batch Multicall3 for `previewAccruedInterest`. Allbridge calls are wrapped in try/catch and never fail the whole response - if upstream times out the wallet still sees the Neeru side.
+Each endpoint returns `{ "data": [...] }` with a discriminated union of `app-token` / `contract-position` entries. Per-category metadata (TVL, per-category rate, per-category secs, deposit-token decimals/symbol) is fetched via one Multicall3 call and cached in-process for 30 s; per-user balances are read from `neeru_positions` (Postgres) plus a per-batch Multicall3 read. Allbridge calls are wrapped in try/catch and never fail the whole response - if upstream times out the wallet still sees the Neeru side.
 
 #### `GET /hooks-api/getPositions`
 
@@ -554,8 +554,8 @@ Any other query key returns `400 { "error": "unknown param" }` (strict allowlist
 
 Notes:
 
-- `categoryLabelFor` is `Flexible` for the flexible-category category; otherwise a `<days> dias` label derived from the on-chain per-category metadata.
-- `monthlyRatePercentage` is computed from the per-position frozen-rate field stored on chain at deposit time, not from the live per-category rate, so quotes do not drift after a per-category-rate update.
+- `categoryLabel` is `Flexible` for the flexible category; otherwise a `<days> dias` label derived from the on-chain per-category metadata.
+- `monthlyRatePercentage` is computed from the per-position frozen-rate field stored on chain at deposit time, not from the live per-category rate, so quotes do not drift after a per-category rate update.
 - `currentPayoutIfClosed.isEarly` is `true` only when the position is locked AND `now < endTs`. The early-claim penalty math runs in wei (bigint floor division) before the value is formatted.
 - `renewedFromPositionId` is always `null`; the indexer schema does not track renewal chains.
 - `lastSyncedBlock` / `lastSyncedAt` come from `neeru_indexer_state` so the wallet can warn if the partner indexer is stale.
