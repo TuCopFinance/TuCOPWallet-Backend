@@ -619,7 +619,7 @@ describe('handleKindD', () => {
     return {
       positionCategory: new Map([[newId.toString(), 1]]),
       blockTimestamps: new Map([['1350000', blockTimestamp]]),
-      lockSecondsByCategory: new Map([[1, secondaryCatWindowSecs]]),
+      secsByCategory: new Map([[1, secondaryCatWindowSecs]]),
     }
   }
 
@@ -649,12 +649,12 @@ describe('handleKindD', () => {
     ])
   })
 
-  it('falls back to blockTimestamp when lockSeconds is missing for the category', async () => {
+  it('falls back to blockTimestamp when secs is missing for the category', async () => {
     const { client, queries } = stubClient()
     const ctxWithoutLock: NeeruOnchainBatchContext = {
       positionCategory: new Map([[newId.toString(), 1]]),
       blockTimestamps: new Map([['1350000', blockTimestamp]]),
-      lockSecondsByCategory: new Map(),
+      secsByCategory: new Map(),
     }
     await handleKindD(client as never, makeArgs(), ctxWithoutLock)
 
@@ -662,12 +662,12 @@ describe('handleKindD', () => {
     expect(queries[1]?.params?.[4]).toEqual(blockTimestamp.toString())
   })
 
-  it('falls back to blockTimestamp when lockSeconds is zero (non-locked tranche)', async () => {
+  it('falls back to blockTimestamp when secs is zero (flexible category)', async () => {
     const { client, queries } = stubClient()
     const ctxFlex: NeeruOnchainBatchContext = {
       positionCategory: new Map([[newId.toString(), 0]]),
       blockTimestamps: new Map([['1350000', blockTimestamp]]),
-      lockSecondsByCategory: new Map([[0, 0n]]),
+      secsByCategory: new Map([[0, 0n]]),
     }
     await handleKindD(client as never, makeArgs(), ctxFlex)
 
@@ -679,7 +679,7 @@ describe('handleKindD', () => {
     const emptyCtx: NeeruOnchainBatchContext = {
       positionCategory: new Map(),
       blockTimestamps: new Map([['1350000', blockTimestamp]]),
-      lockSecondsByCategory: new Map(),
+      secsByCategory: new Map(),
     }
     await expect(
       handleKindD(client as never, makeArgs(), emptyCtx),
@@ -738,7 +738,7 @@ describe('dispatchNeeruEvent', () => {
     const ctx: NeeruOnchainBatchContext = {
       positionCategory: new Map(),
       blockTimestamps: new Map(),
-      lockSecondsByCategory: new Map(),
+      secsByCategory: new Map(),
     }
     await dispatchNeeruEvent(
       client as never,

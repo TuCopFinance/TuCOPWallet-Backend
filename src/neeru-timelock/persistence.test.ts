@@ -5,7 +5,7 @@ process.env.NEERU_TIMELOCK_ADDRESS =
   '0xe8358c9cfa4f7af8acd6ff86e012d828527497bf'
 process.env.NEERU_CONTRACT_ADDRESS =
   '0x988af5977201a0e988f2c75ea952532f6beb5082'
-process.env.NEERU_TIMELOCK_GENESIS_BLOCK = '70876544'
+process.env.NEERU_TIMELOCK_GENESIS_BLOCK = '1234568'
 process.env.NEERU_TIMELOCK_EVENT_SCHEDULED_TOPIC0 =
   '0x4cf4410cc57040e44862ef0f45f3dd5a5e02db8eb8add648d4b0e236f1d07dca'
 process.env.NEERU_TIMELOCK_EVENT_EXECUTED_TOPIC0 =
@@ -67,7 +67,7 @@ describe('insertScheduled', () => {
       calldata: CALLDATA,
       predecessor: PREDECESSOR,
       delay: 172800n,
-      blockNumber: 70942000n,
+      blockNumber: 1234700n,
       blockTimestamp: 1783260000n,
       txHash: '0xdead',
       logIndex: 2,
@@ -85,7 +85,7 @@ describe('insertScheduled', () => {
       PREDECESSOR,
       '172800',
       (1783260000n + 172800n).toString(),
-      '70942000',
+      '1234700',
       '1783260000',
       '0xdead',
       2,
@@ -101,7 +101,7 @@ describe('insertExecuted', () => {
       target: CONTRACT_ADDRESS,
       value: 0n,
       calldata: CALLDATA,
-      blockNumber: 70950000n,
+      blockNumber: 1234900n,
       blockTimestamp: 1783300000n,
       txHash: '0xbeef',
       logIndex: 1,
@@ -116,7 +116,7 @@ describe('insertCancelled', () => {
     const { client, queries } = buildFakeClient()
     await insertCancelled(client as never, {
       operationId: OP_ID,
-      blockNumber: 70945000n,
+      blockNumber: 1234800n,
       blockTimestamp: 1783280000n,
       txHash: '0xcafe',
       logIndex: 0,
@@ -139,7 +139,7 @@ describe('dispatchTimelockEvent', () => {
         calldata: CALLDATA,
         predecessor: PREDECESSOR,
         delay: 172800n,
-        blockNumber: 70942000n,
+        blockNumber: 1234700n,
         txHash: '0xdead' as `0x${string}`,
         logIndex: 2,
       },
@@ -160,7 +160,7 @@ describe('dispatchTimelockEvent', () => {
         calldata: CALLDATA,
         predecessor: PREDECESSOR,
         delay: 172800n,
-        blockNumber: 70942000n,
+        blockNumber: 1234700n,
         txHash: '0xdead' as `0x${string}`,
         logIndex: 2,
       },
@@ -179,7 +179,7 @@ describe('dispatchTimelockEvent', () => {
         target: OTHER_ADDRESS,
         value: 0n,
         calldata: CALLDATA,
-        blockNumber: 70950000n,
+        blockNumber: 1234900n,
         txHash: '0xbeef' as `0x${string}`,
         logIndex: 1,
       },
@@ -198,7 +198,7 @@ describe('dispatchTimelockEvent', () => {
         target: OTHER_ADDRESS,
         value: 0n,
         calldata: CALLDATA,
-        blockNumber: 70950000n,
+        blockNumber: 1234900n,
         txHash: '0xbeef' as `0x${string}`,
         logIndex: 1,
       },
@@ -217,7 +217,7 @@ describe('dispatchTimelockEvent', () => {
       event: {
         kind: 'cancelled',
         operationId: OP_ID,
-        blockNumber: 70945000n,
+        blockNumber: 1234800n,
         txHash: '0xcafe' as `0x${string}`,
         logIndex: 0,
       },

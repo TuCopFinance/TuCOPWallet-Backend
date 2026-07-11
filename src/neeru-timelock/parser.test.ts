@@ -15,7 +15,7 @@ const OTHER_ADDRESS = '0x1234567890123456789012345678901234567890'
 
 process.env.NEERU_TIMELOCK_ADDRESS = TIMELOCK_ADDRESS
 process.env.NEERU_CONTRACT_ADDRESS = CONTRACT_ADDRESS
-process.env.NEERU_TIMELOCK_GENESIS_BLOCK = '70876544'
+process.env.NEERU_TIMELOCK_GENESIS_BLOCK = '1234568'
 process.env.NEERU_TIMELOCK_EVENT_SCHEDULED_TOPIC0 = SCHEDULED_TOPIC0
 process.env.NEERU_TIMELOCK_EVENT_EXECUTED_TOPIC0 = EXECUTED_TOPIC0
 process.env.NEERU_TIMELOCK_EVENT_CANCELLED_TOPIC0 = CANCELLED_TOPIC0
@@ -58,7 +58,7 @@ function scheduledLog(target: string): RawLog {
       INDEX_TOPIC as `0x${string}`,
     ],
     data,
-    blockNumber: 70942000n,
+    blockNumber: 1234700n,
     transactionHash:
       '0x1111111111111111111111111111111111111111111111111111111111111111' as `0x${string}`,
     logIndex: 3,
@@ -82,7 +82,7 @@ function executedLog(target: string): RawLog {
       INDEX_TOPIC as `0x${string}`,
     ],
     data,
-    blockNumber: 70950000n,
+    blockNumber: 1234900n,
     transactionHash:
       '0x2222222222222222222222222222222222222222222222222222222222222222' as `0x${string}`,
     logIndex: 1,
@@ -94,7 +94,7 @@ function cancelledLog(): RawLog {
     address: TIMELOCK_ADDRESS as `0x${string}`,
     topics: [CANCELLED_TOPIC0 as `0x${string}`, OP_ID as `0x${string}`],
     data: '0x' as `0x${string}`,
-    blockNumber: 70945000n,
+    blockNumber: 1234800n,
     transactionHash:
       '0x3333333333333333333333333333333333333333333333333333333333333333' as `0x${string}`,
     logIndex: 0,
@@ -112,7 +112,7 @@ describe('parseTimelockLog', () => {
     expect(event.calldata.toLowerCase()).toBe(UPGRADE_CALLDATA.toLowerCase())
     expect(event.predecessor).toBe(PREDECESSOR.toLowerCase())
     expect(event.delay).toBe(172800n)
-    expect(event.blockNumber).toBe(70942000n)
+    expect(event.blockNumber).toBe(1234700n)
     expect(event.logIndex).toBe(3)
   })
 
