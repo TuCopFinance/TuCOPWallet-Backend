@@ -1,9 +1,7 @@
 // Failure-mode test pack covering paths that only execute when something
-// breaks (DB pool error, WRI in-memory cap saturated, etc.). Closes Fase 3
-// PR 21 from `tasks/plans/full-audit-remediation.md`.
-//
-// Kept in a single file because each case is small and focused; splitting
-// per-lib would be more noise than structure.
+// breaks (DB pool error, WRI in-memory cap saturated, etc.). Kept in a
+// single file because each case is small and focused; splitting per-lib
+// would be more noise than structure.
 
 import {
   _resetInMemoryStoreForTests,

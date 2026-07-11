@@ -16,9 +16,9 @@ import type {
 
 const log = createLogger('neeru-indexer:persistence')
 
-// Per-category lock seconds are immutable for the lifetime of a contract
-// impl, so cache them once across ticks. A tick that contains kind=d
-// renewals can read from cache instead of re-fetching categories(cat).
+// Module-scope cache for per-category read values used by handleKindD.
+// Reads are stable for the lifetime of the process, so caching avoids a
+// redundant multicall per tick.
 const secsCache: Map<NeeruCategory, bigint> = new Map()
 
 export function _resetSecsCacheForTests(): void {
@@ -299,10 +299,8 @@ export async function handleKindD(
     )
   }
 
-  // For locked categories the new row's start is the old row's end (the
-  // event carries that end). For non-locked categories or any case where
-  // the per-category lock window is not available, fall back to the block
-  // timestamp so the row still inserts cleanly.
+  // startTs derived from the per-category cached value when available,
+  // block timestamp fallback otherwise so the row always inserts.
   const secs = ctx.secsByCategory.get(cat)
   const startTs =
     secs != null && secs > 0n && args.endTs >= secs
