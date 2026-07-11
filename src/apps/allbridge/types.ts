@@ -143,8 +143,7 @@ export interface TriggerResult {
 }
 
 // Argument shapes the wallet sends with `triggerShortcut`. The names
-// match the upstream `shortcutTriggerArgs` keys to preserve parity (see
-// section 7 of tasks/plans/tucop-hooks-api-neeru-vaults.md).
+// match the upstream `shortcutTriggerArgs` keys to preserve parity.
 export interface DepositTriggerArgs {
   address: string
   networkId: NetworkId

@@ -4,8 +4,7 @@
 // from Valora's getWalletTransactions, with one extension for EIP-7702
 // atomic batches: SwapTransaction may carry `fromTokenAmounts[]` in addition
 // to the legacy `outAmount`, so the wallet can render the full set of
-// "sold" tokens without losing precision. See
-// `tasks/plans/wri-transaction-feed-indexer.md` for the rationale.
+// "sold" tokens without losing precision.
 
 export type NetworkId = 'celo-mainnet'
 
