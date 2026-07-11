@@ -200,7 +200,7 @@ describe('buildDepositTxs', () => {
     ).rejects.toThrow('GLOBAL_CAP_EXCEEDED')
   })
 
-  it('throws CATEGORY_CAP_EXCEEDED when category tvl + amount > category cap', async () => {
+  it('throws CATEGORY_CAP_EXCEEDED when cat tvl + amount > cat cap', async () => {
     const rpc = buildDepositRpc({
       preflight: {
         catR2: 5n * 10n ** 18n,

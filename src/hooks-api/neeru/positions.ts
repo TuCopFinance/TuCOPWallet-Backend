@@ -21,16 +21,6 @@ import type { EarnPosition, NetworkId } from './types'
 
 const log = createLogger('hooks-api:neeru:positions')
 
-// Wallet-shape compatibility note:
-// JSON fields `amount` and `categories` on the objects returned by
-// `getEarnPositions` mirror partner-contract semantic terms. Kept as
-// a controlled exception because the wallet already reads these names
-// in the released app; renaming requires a coordinated wallet update.
-// Internal variables named `amount*` in this file are named to
-// match the API surface for readability but are not part of the
-// exception scope. See the `feedback_cero_exposicion_neeru` project
-// memory for the general rule and its exceptions list.
-
 const NETWORK_ID: NetworkId = 'celo-mainnet'
 const APP_NAME = 'Neeru Vaults'
 const SECONDS_PER_DAY = 86_400
@@ -133,7 +123,7 @@ async function fetchCatalogue(
     functionName: string
     args: readonly unknown[]
   }
-  const catCalls: AnyCall[] = CATEGORIES.map((c) => ({
+  const categoryCalls: AnyCall[] = CATEGORIES.map((c) => ({
     address: CONTRACT_ADDRESS,
     abi: HOOKS_READ_ABI as unknown as readonly unknown[],
     functionName: 'categories',
@@ -154,7 +144,7 @@ async function fetchCatalogue(
     },
   ]
 
-  const calls = [...catCalls, ...tokenCalls]
+  const calls = [...categoryCalls, ...tokenCalls]
   const results = (await deps.rpc.multicall({
     contracts: calls as unknown as Parameters<
       NeeruIndexerRpcClient['multicall']
@@ -185,7 +175,7 @@ async function fetchCatalogue(
 
 interface UserAggregate {
   // sum of amount (from DB) per category
-  amount: Map<Category, bigint>
+  amountByCategory: Map<Category, bigint>
   // open positionIds per category (used to fetch previewAccruedInterest)
   openIdsByCategory: Map<Category, bigint[]>
 }
@@ -197,27 +187,27 @@ async function loadOpenRows(
   const { rows } = await db.query<OpenRow>(
     `SELECT position_id::text AS position_id,
             category,
-            amount::text AS amount
+            amount::text
        FROM neeru_positions
       WHERE user_address = $1
         AND closed = FALSE`,
     [address.toLowerCase()],
   )
 
-  const amount = new Map<Category, bigint>()
+  const amountByCategory = new Map<Category, bigint>()
   const openIdsByCategory = new Map<Category, bigint[]>()
   for (const c of CATEGORIES) {
-    amount.set(c, 0n)
+    amountByCategory.set(c, 0n)
     openIdsByCategory.set(c, [])
   }
   for (const row of rows) {
     const cat = row.category as Category
     if (cat !== 0 && cat !== 1 && cat !== 2 && cat !== 3) continue
     const amountBn = BigInt(row.amount)
-    amount.set(cat, (amount.get(cat) ?? 0n) + amountBn)
+    amountByCategory.set(cat, (amountByCategory.get(cat) ?? 0n) + amountBn)
     openIdsByCategory.get(cat)!.push(BigInt(row.position_id))
   }
-  return { amount, openIdsByCategory }
+  return { amountByCategory, openIdsByCategory }
 }
 
 async function fetchAccruedInterest(
@@ -280,15 +270,15 @@ interface BuildArgs {
 
 function buildEarnPosition(args: BuildArgs): EarnPosition {
   const { category, snapshot } = args
-  const category = snapshot.categories[category]!
+  const categoryRead = snapshot.categories[category]!
   const decimals = snapshot.token.decimals
   const symbol = snapshot.token.symbol
 
-  const title = categoryTitle(category.r1)
-  const dailyPct = dailyYieldPercent(category.r0)
-  const monthlyPct = monthlyYieldPercent(category.r0)
+  const title = categoryTitle(categoryRead.r1)
+  const dailyPct = dailyYieldPercent(categoryRead.r0)
+  const monthlyPct = monthlyYieldPercent(categoryRead.r0)
   const balance = decimalString(args.balanceWei, decimals)
-  const tvl = decimalString(category.r2, decimals)
+  const tvl = decimalString(categoryRead.r2, decimals)
   const tokenId = depositTokenId()
 
   return {
@@ -385,7 +375,7 @@ export async function getNeeruEarnPositions(
     const aggregate = await loadOpenRows(args.db, args.address)
     const accrued = await fetchAccruedInterest(args.rpc, aggregate)
     for (const c of CATEGORIES) {
-      const amount = aggregate.amount.get(c) ?? 0n
+      const amount = aggregate.amountByCategory.get(c) ?? 0n
       const interest = accrued.get(c) ?? 0n
       balances.set(c, amount + interest)
     }

@@ -49,7 +49,7 @@ describe('GET /api/earn/neeru/positions', () => {
         {
           positionId: '100',
           category: 1,
-          categoryLabelFor: '7 dias',
+          categoryLabel: '7 dias',
           amount: '10000',
           accruedInterest: '82.5',
           monthlyRatePercentage: 1.0,

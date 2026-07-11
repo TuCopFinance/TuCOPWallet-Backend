@@ -18,18 +18,6 @@ import { monthlyYieldPercent } from './positions'
 
 const log = createLogger('hooks-api:neeru:detail')
 
-// Wallet-shape compatibility note:
-// The JSON field names `amount`, `category`, and `categoryLabelFor` on the
-// exported interfaces below are what the wallet-side renderer reads
-// today. They mirror a partner contract's semantic terms and would
-// normally be rejected by the cero-exposicion bar for tracked source
-// (see the `feedback_cero_exposicion_neeru` project memory). They are
-// kept as a controlled exception because the wallet is already in the
-// stores using these names; renaming requires a wallet release and
-// coordination we have chosen not to pay for a cosmetic win. Internal
-// variables can be freely renamed; only these API boundary field names
-// are the exception.
-
 const SECONDS_PER_DAY = 86_400
 const CACHE_TTL_MS = 30_000
 const BPS_DENOM = 10_000n
@@ -67,7 +55,7 @@ export interface CurrentPayoutIfClosed {
 export interface NeeruPositionDetail {
   positionId: string
   category: number
-  categoryLabelFor: string
+  categoryLabel: string
   amount: string
   accruedInterest: string
   monthlyRatePercentage: number
@@ -138,7 +126,7 @@ export async function getNeeruPositionDetail(
   const { rows } = await args.db.query<OpenRow>(
     `SELECT position_id::text AS position_id,
             category,
-            amount::text AS amount,
+            amount::text,
             start_ts::text AS start_ts,
             end_ts::text AS end_ts,
             deposit_block::text AS deposit_block,
@@ -264,7 +252,7 @@ export async function getNeeruPositionDetail(
     const c = uncachedCategories[i]!
     const r = results[catReadRange[0] + i]
     if (!r || r.status !== 'success') {
-      log.warn(`categories(${c}) read failed - defaulting to 0`)
+      log.warn(`cat read (${c}) failed - defaulting to 0`)
       secsByCategory.set(c, 0n)
       continue
     }
@@ -363,7 +351,7 @@ export async function getNeeruPositionDetail(
     positions.push({
       positionId: row.position_id,
       category: row.category,
-      categoryLabelFor: categoryLabelFor(secs),
+      categoryLabel: categoryLabelFor(secs),
       amount: amountStr,
       accruedInterest: accruedStr,
       monthlyRatePercentage: monthlyYieldPercent(rateRaw),

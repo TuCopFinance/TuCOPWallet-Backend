@@ -662,7 +662,7 @@ describe('handleKindD', () => {
     expect(queries[1]?.params?.[4]).toEqual(blockTimestamp.toString())
   })
 
-  it('falls back to blockTimestamp when secs is zero (non-locked category)', async () => {
+  it('falls back to blockTimestamp when secs is zero (flexible category)', async () => {
     const { client, queries } = stubClient()
     const ctxFlex: NeeruOnchainBatchContext = {
       positionCategory: new Map([[newId.toString(), 0]]),
