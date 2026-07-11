@@ -1,6 +1,6 @@
 // Ported from valora-inc/hooks (Apache-2.0).
 // Original: https://github.com/valora-inc/hooks/blob/main/src/apps/allbridge/positions.ts
-// License: Apache-2.0 - see LICENSE-ALLBRIDGE.md at repo root.
+// License: Apache-2.0 - see LICENSES/allbridge.md at repo root.
 //
 // Upstream encodes app identity as the directory name + the value
 // returned by `PositionsHook.getInfo()`. We surface both explicitly here

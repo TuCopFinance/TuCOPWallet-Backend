@@ -1,5 +1,4 @@
--- Transaction Feed Indexer schema (WRI Track C, Phase 1)
--- Mirrors `tasks/plans/wri-transaction-feed-indexer.md`.
+-- Transaction Feed Indexer schema (WRI Track C, Phase 1).
 
 CREATE TABLE IF NOT EXISTS indexer_state (
   network_id   text PRIMARY KEY,

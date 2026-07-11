@@ -1,6 +1,6 @@
 // Ported from valora-inc/hooks (Apache-2.0).
 // Original: https://github.com/valora-inc/hooks/tree/main/src/apps/allbridge
-// License: Apache-2.0 - see LICENSE-ALLBRIDGE.md at repo root.
+// License: Apache-2.0 - see LICENSES/allbridge.md at repo root.
 //
 // Public surface for the Allbridge app port. The HTTP layer added in PR 4
 // imports from here only.
