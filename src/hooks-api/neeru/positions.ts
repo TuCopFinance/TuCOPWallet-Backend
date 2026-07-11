@@ -21,6 +21,16 @@ import type { EarnPosition, NetworkId } from './types'
 
 const log = createLogger('hooks-api:neeru:positions')
 
+// Wallet-shape compatibility note:
+// JSON fields `principal` and `tranches` on the objects returned by
+// `getEarnPositions` mirror partner-contract semantic terms. Kept as
+// a controlled exception because the wallet already reads these names
+// in the released app; renaming requires a coordinated wallet update.
+// Internal variables named `principal*` in this file are named to
+// match the API surface for readability but are not part of the
+// exception scope. See the `feedback_cero_exposicion_neeru` project
+// memory for the general rule and its exceptions list.
+
 const NETWORK_ID: NetworkId = 'celo-mainnet'
 const APP_NAME = 'Neeru Vaults'
 const SECONDS_PER_DAY = 86_400

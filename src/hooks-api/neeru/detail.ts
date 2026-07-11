@@ -18,6 +18,18 @@ import { monthlyYieldPercent } from './positions'
 
 const log = createLogger('hooks-api:neeru:detail')
 
+// Wallet-shape compatibility note:
+// The JSON field names `principal`, `tranche`, and `trancheLabel` on the
+// exported interfaces below are what the wallet-side renderer reads
+// today. They mirror a partner contract's semantic terms and would
+// normally be rejected by the cero-exposicion bar for tracked source
+// (see the `feedback_cero_exposicion_neeru` project memory). They are
+// kept as a controlled exception because the wallet is already in the
+// stores using these names; renaming requires a wallet release and
+// coordination we have chosen not to pay for a cosmetic win. Internal
+// variables can be freely renamed; only these API boundary field names
+// are the exception.
+
 const SECONDS_PER_DAY = 86_400
 const CACHE_TTL_MS = 30_000
 const BPS_DENOM = 10_000n

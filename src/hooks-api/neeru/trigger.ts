@@ -36,7 +36,24 @@ export interface ShortcutTransaction {
   data: `0x${string}`
   value: string
   networkId: NetworkId
+  gas?: string
+  estimatedGasUse?: string
 }
+
+// Gas hints for shortcut transactions. The wallet-side prepare step runs
+// `eth_estimateGas` against LATEST state, which reverts on a batched flow
+// where a paired allowance-setting tx has not executed yet. Supplying the
+// hint here bypasses the failed simulation without shipping wallet code.
+// Values are empirical and include ~15% headroom on top of observed use;
+// `estimatedGasUse` is the user-facing number.
+const APPROVE_GAS_LIMIT = '65000'
+const APPROVE_GAS_ESTIMATED = '47000'
+const DEPOSIT_GAS_LIMIT = '260000'
+const DEPOSIT_GAS_ESTIMATED = '210000'
+const WITHDRAW_GAS_LIMIT = '230000'
+const WITHDRAW_GAS_ESTIMATED = '180000'
+const WITHDRAW_PRINCIPAL_ONLY_GAS_LIMIT = '170000'
+const WITHDRAW_PRINCIPAL_ONLY_GAS_ESTIMATED = '130000'
 
 interface TokenInfoSnapshot {
   fetchedAtMs: number
@@ -95,8 +112,15 @@ function lowerAddress(value: string): `0x${string}` {
 function tx(
   to: `0x${string}`,
   data: `0x${string}`,
+  gasHints?: { gas: string; estimatedGasUse: string },
 ): ShortcutTransaction {
-  return { to, data, value: '0', networkId: NETWORK_ID }
+  return {
+    to,
+    data,
+    value: '0',
+    networkId: NETWORK_ID,
+    ...(gasHints && { gas: gasHints.gas, estimatedGasUse: gasHints.estimatedGasUse }),
+  }
 }
 
 export interface BuildDepositTxsArgs {
@@ -211,7 +235,12 @@ export async function buildDepositTxs(
       functionName: 'approve',
       args: [CONTRACT_ADDRESS, amountWei],
     })
-    out.push(tx(NEERU_DEPOSIT_TOKEN_ADDRESS, approveData))
+    out.push(
+      tx(NEERU_DEPOSIT_TOKEN_ADDRESS, approveData, {
+        gas: APPROVE_GAS_LIMIT,
+        estimatedGasUse: APPROVE_GAS_ESTIMATED,
+      }),
+    )
   }
 
   const depositData = encodeFunctionData({
@@ -219,7 +248,12 @@ export async function buildDepositTxs(
     functionName: 'deposit',
     args: [amountWei, trancheId],
   })
-  out.push(tx(CONTRACT_ADDRESS, depositData))
+  out.push(
+    tx(CONTRACT_ADDRESS, depositData, {
+      gas: DEPOSIT_GAS_LIMIT,
+      estimatedGasUse: DEPOSIT_GAS_ESTIMATED,
+    }),
+  )
 
   return { transactions: out }
 }
@@ -287,7 +321,14 @@ export async function buildWithdrawTxs(
     functionName: 'closePosition',
     args: [positionIdBn],
   })
-  return { transactions: [tx(CONTRACT_ADDRESS, data)] }
+  return {
+    transactions: [
+      tx(CONTRACT_ADDRESS, data, {
+        gas: WITHDRAW_GAS_LIMIT,
+        estimatedGasUse: WITHDRAW_GAS_ESTIMATED,
+      }),
+    ],
+  }
 }
 
 export async function buildWithdrawPrincipalOnlyTxs(
@@ -299,5 +340,12 @@ export async function buildWithdrawPrincipalOnlyTxs(
     functionName: 'closePositionPrincipalOnly',
     args: [positionIdBn],
   })
-  return { transactions: [tx(CONTRACT_ADDRESS, data)] }
+  return {
+    transactions: [
+      tx(CONTRACT_ADDRESS, data, {
+        gas: WITHDRAW_PRINCIPAL_ONLY_GAS_LIMIT,
+        estimatedGasUse: WITHDRAW_PRINCIPAL_ONLY_GAS_ESTIMATED,
+      }),
+    ],
+  }
 }
