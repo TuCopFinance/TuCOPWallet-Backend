@@ -1,6 +1,6 @@
 // Ported from valora-inc/hooks (Apache-2.0).
 // Inspired by https://github.com/valora-inc/hooks/blob/main/src/apps/allbridge/positions.e2e.ts
-// License: Apache-2.0 - see LICENSE-ALLBRIDGE.md at repo root.
+// License: Apache-2.0 - see LICENSES/allbridge.md at repo root.
 //
 // Tests use a hand-built mock viem PublicClient injected via
 // `__setCeloPublicClientForTests`. The Allbridge REST API is mocked at
