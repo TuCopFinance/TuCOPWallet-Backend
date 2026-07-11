@@ -1,5 +1,5 @@
 // Ported from valora-inc/hooks (Apache-2.0).
-// License: Apache-2.0 - see LICENSE-ALLBRIDGE.md at repo root.
+// License: Apache-2.0 - see LICENSES/allbridge.md at repo root.
 //
 // Selector decoding uses viem's `toFunctionSelector` to derive the
 // expected 4-byte signature for each function name and compares against
