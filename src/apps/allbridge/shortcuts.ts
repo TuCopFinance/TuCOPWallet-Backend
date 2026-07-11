@@ -1,6 +1,6 @@
 // Ported from valora-inc/hooks (Apache-2.0).
 // Original: https://github.com/valora-inc/hooks/blob/main/src/apps/allbridge/shortcuts.ts
-// License: Apache-2.0 - see LICENSE-ALLBRIDGE.md at repo root.
+// License: Apache-2.0 - see LICENSES/allbridge.md at repo root.
 //
 // Differences vs upstream:
 //

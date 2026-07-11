@@ -1,6 +1,6 @@
 // Ported from valora-inc/hooks (Apache-2.0).
 // Original: https://github.com/valora-inc/hooks/blob/main/src/types/positions.ts
-// License: Apache-2.0 - see LICENSE-ALLBRIDGE.md at repo root.
+// License: Apache-2.0 - see LICENSES/allbridge.md at repo root.
 //
 // Subset of upstream's position/token types, narrowed to what this port
 // emits. We keep field names and JSON shape compatible so the wallet's

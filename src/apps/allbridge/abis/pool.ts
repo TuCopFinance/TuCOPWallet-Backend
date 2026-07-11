@@ -1,6 +1,6 @@
 // Ported from valora-inc/hooks (Apache-2.0).
 // Original: https://github.com/valora-inc/hooks/blob/main/src/apps/allbridge/abis/pool.ts
-// License: Apache-2.0 - see LICENSE-ALLBRIDGE.md at repo root.
+// License: Apache-2.0 - see LICENSES/allbridge.md at repo root.
 //
 // https://docs-core.allbridge.io/product/how-does-allbridge-core-work/allbridge-core-contracts
 // https://celoscan.io/address/0xfb2C7c10e731EBe96Dabdf4A96D656Bfe8e2b5Af#code

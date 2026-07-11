@@ -728,6 +728,14 @@ curl 'http://localhost:8080/events?address=0x947c6db1569edc9fd37b017b791ca0f008a
 
 Hosted on Railway in the TuCop Wallet project, environment `production`. Auto-deploys on every push to `main` via the `.github/workflows/deploy-railway.yml` GitHub Action, which fires after the `CI` workflow succeeds and calls Railway's `serviceInstanceDeployV2` GraphQL mutation with the head SHA. Requires `RAILWAY_API_TOKEN`, `RAILWAY_SERVICE_ID`, `RAILWAY_ENVIRONMENT_ID` in the repo's GitHub Actions secrets. The Railway-managed GitHub integration is no longer relied on for deploy triggering.
 
+### Rollback
+
+Manual rollback path via `.github/workflows/rollback-railway.yml` (`workflow_dispatch`): GitHub Actions tab -> "Rollback Railway" -> Run workflow. Inputs: `commit_sha` (full or short; must already exist in the repo) and `reason` (one-line audit trail).
+
+The workflow calls the SAME `serviceInstanceDeployV2` mutation as the auto-deploy but with the operator-supplied SHA instead of the latest `main` HEAD. Railway rebuilds from source at that SHA, so this is a true rollback (or roll-forward to an arbitrary committed SHA), not a container snapshot recall. Median end-to-end: same 3-4 min budget as a forward deploy (CI is skipped on this path since the workflow only redeploys an already-built commit).
+
+Use when a bad deploy is live and the standard forward path (revert commit -> merge to main -> auto-deploy) is too slow. For non-emergency reversion prefer the revert-commit path so `main` history reflects the state.
+
 Railway env vars. The annotated source of truth is `.env.example` (every variable carries a REQUIRED / OPTIONAL marker and the behaviour on absence).
 
 ### Upstream providers
