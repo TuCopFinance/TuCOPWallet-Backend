@@ -6,7 +6,7 @@ import type { AbiFunction } from 'viem'
 
 export const CATEGORY_READ_FN_ABI = {
   type: 'function',
-  name: 'categories',
+  name: 'tranches',
   stateMutability: 'view',
   inputs: [{ name: '', type: 'uint8' }],
   outputs: [

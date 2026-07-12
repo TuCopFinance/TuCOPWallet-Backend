@@ -63,7 +63,7 @@ function buildFakeRpc(opts: FakeRpcOpts = {}): {
             result: accruedMap.get(id) ?? 0n,
           }
         }
-        if (call.functionName === 'categories') {
+        if (call.functionName === 'tranches') {
           const c = call.args[0] as number
           const lock = secsMap.get(c) ?? 0n
           // category-read tuple: [r0, r1, r2, r3]; assembler only reads r1.
