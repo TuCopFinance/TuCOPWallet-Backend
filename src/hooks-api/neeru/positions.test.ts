@@ -54,7 +54,7 @@ function buildFakeRpc(opts: FakeRpcOpts): {
       multicallCalls.push({ contracts: args.contracts })
       if (
         args.contracts.length === 6 &&
-        args.contracts[0]?.functionName === 'categories'
+        args.contracts[0]?.functionName === 'tranches'
       ) {
         return [
           opts.catReadReturns[0],
@@ -150,7 +150,7 @@ describe('getNeeruEarnPositions', () => {
     })
 
     expect(multicallCalls).toHaveLength(1)
-    expect(multicallCalls[0]?.contracts[0]?.functionName).toBe('categories')
+    expect(multicallCalls[0]?.contracts[0]?.functionName).toBe('tranches')
   })
 
   it('aggregates amount + previewAccruedInterest per category for a user', async () => {
