@@ -95,13 +95,13 @@ export async function buildOnchainContext(
       type CategoryReadCall = {
         address: `0x${string}`
         abi: typeof READ_ABI
-        functionName: 'categories'
+        functionName: 'tranches'
         args: readonly [NeeruCategory]
       }
       const catCalls: CategoryReadCall[] = uncachedCats.map((cat) => ({
         address: CONTRACT_ADDRESS,
         abi: READ_ABI,
-        functionName: 'categories',
+        functionName: 'tranches',
         args: [cat] as const,
       }))
       const catResults = await rpc.multicall({

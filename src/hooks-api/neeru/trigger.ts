@@ -175,7 +175,7 @@ export async function buildDepositTxs(
     {
       address: CONTRACT_ADDRESS,
       abi: HOOKS_READ_ABI as unknown as readonly unknown[],
-      functionName: 'categories',
+      functionName: 'tranches',
       args: [categoryId] as const,
     },
     {

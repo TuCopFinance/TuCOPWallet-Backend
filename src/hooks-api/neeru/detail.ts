@@ -193,7 +193,7 @@ export async function getNeeruPositionDetail(
     calls.push({
       address: CONTRACT_ADDRESS,
       abi: [CATEGORY_READ_FN_ABI] as unknown as readonly unknown[],
-      functionName: 'categories',
+      functionName: 'tranches',
       args: [c] as const,
     })
   }
