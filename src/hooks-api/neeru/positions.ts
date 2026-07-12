@@ -126,7 +126,7 @@ async function fetchCatalogue(
   const categoryCalls: AnyCall[] = CATEGORIES.map((c) => ({
     address: CONTRACT_ADDRESS,
     abi: HOOKS_READ_ABI as unknown as readonly unknown[],
-    functionName: 'categories',
+    functionName: 'tranches',
     args: [c] as const,
   }))
   const tokenCalls: AnyCall[] = [

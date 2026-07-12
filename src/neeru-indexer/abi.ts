@@ -43,7 +43,7 @@ export const POSITIONS_FN_ABI = {
 
 export const CATEGORY_READ_FN_ABI = {
   type: 'function',
-  name: 'categories',
+  name: 'tranches',
   stateMutability: 'view',
   inputs: [{ name: '', type: 'uint8' }],
   outputs: [
