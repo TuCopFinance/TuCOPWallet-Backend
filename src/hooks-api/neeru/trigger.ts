@@ -44,15 +44,20 @@ export interface ShortcutTransaction {
 // `eth_estimateGas` against LATEST state, which reverts on a batched flow
 // where a paired allowance-setting tx has not executed yet. Supplying the
 // hint here bypasses the failed simulation without shipping wallet code.
-// Values are empirical and include ~15% headroom on top of observed use;
-// `estimatedGasUse` is the user-facing number.
+//
+// Limits were bumped 2026-07-05 after a production OOG (deposit reverted
+// with 3.6k of margin: prior baseline 260k + wallet's 50k CIP-64 padding
+// vs 306k actual). New limits give ~30% headroom over the observed worst
+// case AND stack with the wallet's proportional 25% buffer for non-native
+// fee tokens. `estimatedGasUse` remains the user-facing number and is not
+// bumped; the wallet applies its own display logic on top.
 const APPROVE_GAS_LIMIT = '65000'
 const APPROVE_GAS_ESTIMATED = '47000'
-const DEPOSIT_GAS_LIMIT = '260000'
+const DEPOSIT_GAS_LIMIT = '400000'
 const DEPOSIT_GAS_ESTIMATED = '210000'
-const WITHDRAW_GAS_LIMIT = '230000'
+const WITHDRAW_GAS_LIMIT = '320000'
 const WITHDRAW_GAS_ESTIMATED = '180000'
-const WITHDRAW_AMOUNT_ONLY_GAS_LIMIT = '170000'
+const WITHDRAW_AMOUNT_ONLY_GAS_LIMIT = '240000'
 const WITHDRAW_AMOUNT_ONLY_GAS_ESTIMATED = '130000'
 
 interface TokenInfoSnapshot {
