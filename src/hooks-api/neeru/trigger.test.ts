@@ -137,7 +137,7 @@ describe('buildDepositTxs', () => {
     expect(depositTx!.data.slice(0, 10)).toBe(DEPOSIT_SELECTOR)
     // Gas hints let the wallet bypass eth_estimateGas which would
     // revert-simulate against LATEST state on the batched flow.
-    expect(depositTx!.gas).toBe('400000')
+    expect(depositTx!.gas).toBe('500000')
     expect(depositTx!.estimatedGasUse).toBe('210000')
   })
 
@@ -155,7 +155,7 @@ describe('buildDepositTxs', () => {
     expect(approveTx!.gas).toBe('65000')
     expect(approveTx!.estimatedGasUse).toBe('47000')
     expect(depositTx!.data.slice(0, 10)).toBe(DEPOSIT_SELECTOR)
-    expect(depositTx!.gas).toBe('400000')
+    expect(depositTx!.gas).toBe('500000')
     expect(depositTx!.estimatedGasUse).toBe('210000')
   })
 

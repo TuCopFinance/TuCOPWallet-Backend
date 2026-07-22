@@ -47,13 +47,16 @@ export interface ShortcutTransaction {
 //
 // Limits were bumped 2026-07-05 after a production OOG (deposit reverted
 // with 3.6k of margin: prior baseline 260k + wallet's 50k CIP-64 padding
-// vs 306k actual). New limits give ~30% headroom over the observed worst
-// case AND stack with the wallet's proportional 25% buffer for non-native
-// fee tokens. `estimatedGasUse` remains the user-facing number and is not
-// bumped; the wallet applies its own display logic on top.
+// vs 306k actual on-chain usage). Preventive bump 2026-07-20 raised the
+// deposit limit again from 400k to 500k after the wallet team flagged
+// that the CIP-64 path had ~80% headroom but the native-CELO fee path
+// only had ~30% headroom (400k vs 306k with no wallet-side padding).
+// New limit gives ~63% headroom on the native-CELO path and ~135% on
+// CIP-64. `estimatedGasUse` intentionally stays the user-facing number
+// and is not bumped; the wallet applies its own display logic on top.
 const APPROVE_GAS_LIMIT = '65000'
 const APPROVE_GAS_ESTIMATED = '47000'
-const DEPOSIT_GAS_LIMIT = '400000'
+const DEPOSIT_GAS_LIMIT = '500000'
 const DEPOSIT_GAS_ESTIMATED = '210000'
 const WITHDRAW_GAS_LIMIT = '320000'
 const WITHDRAW_GAS_ESTIMATED = '180000'
