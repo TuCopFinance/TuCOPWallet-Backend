@@ -94,6 +94,9 @@ function buildRpc(opts: {
     readContract: (async () => {
       throw new Error('readContract not used')
     }) as never,
+    call: (async () => {
+      throw new Error('call not used')
+    }) as never,
   }
   return { rpc, getLogsCalls }
 }

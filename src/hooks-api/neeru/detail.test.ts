@@ -106,6 +106,9 @@ function buildFakeRpc(opts: FakeRpcOpts = {}): {
     readContract: (async () => {
       throw new Error('readContract not used in detail assembler')
     }) as never,
+    call: (async () => {
+      throw new Error('call not used in detail assembler')
+    }) as never,
   }
   return { rpc, callsLog }
 }
