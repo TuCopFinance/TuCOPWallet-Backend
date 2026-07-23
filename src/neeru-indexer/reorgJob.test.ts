@@ -79,6 +79,9 @@ function buildRpc(opts: {
     readContract: (async () => {
       throw new Error('not used by reorg job')
     }) as never,
+    call: (async () => {
+      throw new Error('call not used by reorg job')
+    }) as never,
   }
   return { rpc, multicallCalls }
 }

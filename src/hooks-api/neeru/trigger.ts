@@ -11,7 +11,11 @@
 import { encodeFunctionData } from 'viem'
 import type { Pool } from 'pg'
 import { CONTRACT_ADDRESS, READ_ABI } from '../../neeru-indexer/abi'
-import type { NeeruIndexerRpcClient } from '../../neeru-indexer/rpc'
+import type {
+  NeeruCallOutcome,
+  NeeruIndexerRpcClient,
+} from '../../neeru-indexer/rpc'
+import { createLogger } from '../../lib/logger'
 import {
   ERC20_ALLOWANCE_ABI,
   ERC20_READ_ABI,
@@ -25,11 +29,68 @@ import {
 } from '../config'
 import type { NetworkId } from './types'
 
+const log = createLogger('hooks-api:neeru:trigger')
+
 const NETWORK_ID: NetworkId = 'celo-mainnet'
 const RAY = 10n ** 27n
 const TOKEN_INFO_TTL_MS = 30_000
 const VALID_CATEGORIES: ReadonlySet<number> = new Set([0, 1, 2, 3])
 const POSITION_ID_RE = /^\d+$/
+
+// Custom-error selectors that the earn-vault contract can revert with on
+// a close call. Values come from the deployed contract; the mapping to
+// human-readable `reason` strings lets the wallet branch UX without
+// having to import the partner-contract ABI. Any selector not in this
+// map propagates as `UNKNOWN` so the wallet still gets a hint that
+// simulation failed.
+type SimulationReason =
+  | 'INTEREST_POOL_LOW'
+  | 'ALREADY_CLOSED'
+  | 'NOT_OWNER'
+  | 'UNKNOWN'
+const REVERT_SELECTORS: Record<`0x${string}`, SimulationReason> = {
+  '0x2648b779': 'INTEREST_POOL_LOW',
+  '0x9acb7e52': 'ALREADY_CLOSED',
+  '0x30cd7471': 'NOT_OWNER',
+}
+
+export interface SimulationRevertInfo {
+  selector: `0x${string}` | null
+  reason: SimulationReason
+}
+
+export interface WithdrawFallbackInfo {
+  shortcutId: 'withdraw-amount-only'
+  transactions: ShortcutTransaction[]
+}
+
+// Neeru withdraw simulation happens against `latest` state via eth_call
+// through the same RPC pool the indexer uses. See rpc.ts:call. Fail-open
+// on RPC-level errors (network / timeout): the wallet-side receipt check
+// stays as safety net.
+async function simulateWithdrawCall(
+  rpc: NeeruIndexerRpcClient,
+  from: `0x${string}`,
+  data: `0x${string}`,
+): Promise<SimulationRevertInfo | null> {
+  let outcome: NeeruCallOutcome
+  try {
+    outcome = await rpc.call({ from, to: CONTRACT_ADDRESS, data })
+  } catch (err) {
+    log.warn(
+      `withdraw simulation RPC failed - falling through to real send: ${err instanceof Error ? err.message : String(err)}`,
+    )
+    return null
+  }
+  if (outcome.status === 'ok') return null
+  const raw = outcome.revertData
+  if (!raw || raw.length < 10) {
+    return { selector: raw, reason: 'UNKNOWN' }
+  }
+  const selector = raw.slice(0, 10).toLowerCase() as `0x${string}`
+  const reason = REVERT_SELECTORS[selector] ?? 'UNKNOWN'
+  return { selector, reason }
+}
 
 export interface ShortcutTransaction {
   to: `0x${string}`
@@ -320,40 +381,95 @@ async function preflightWithdraw(
   return { positionIdBn }
 }
 
-export async function buildWithdrawTxs(
-  args: BuildWithdrawTxsArgs,
-): Promise<{ transactions: ShortcutTransaction[] }> {
-  const { positionIdBn } = await preflightWithdraw(args)
-  const data = encodeFunctionData({
+// Building blocks shared between withdraw and withdraw-amount-only. The
+// preflight + calldata computation is the same; the differentiators are
+// which selector the tx targets and whether we want the fallback bundled.
+
+function encodeClosePosition(positionIdBn: bigint): `0x${string}` {
+  return encodeFunctionData({
     abi: HOOKS_WRITE_ABI,
     functionName: 'closePosition',
     args: [positionIdBn],
   })
-  return {
-    transactions: [
-      tx(CONTRACT_ADDRESS, data, {
-        gas: WITHDRAW_GAS_LIMIT,
-        estimatedGasUse: WITHDRAW_GAS_ESTIMATED,
-      }),
-    ],
-  }
 }
 
-export async function buildWithdrawAmountOnlyTxs(
-  args: BuildWithdrawTxsArgs,
-): Promise<{ transactions: ShortcutTransaction[] }> {
-  const { positionIdBn } = await preflightWithdraw(args)
-  const data = encodeFunctionData({
+function encodeClosePositionPrincipalOnly(positionIdBn: bigint): `0x${string}` {
+  return encodeFunctionData({
     abi: HOOKS_WRITE_ABI,
     functionName: 'closePositionPrincipalOnly',
     args: [positionIdBn],
   })
+}
+
+function withdrawTx(data: `0x${string}`): ShortcutTransaction {
+  return tx(CONTRACT_ADDRESS, data, {
+    gas: WITHDRAW_GAS_LIMIT,
+    estimatedGasUse: WITHDRAW_GAS_ESTIMATED,
+  })
+}
+
+function withdrawAmountOnlyTx(data: `0x${string}`): ShortcutTransaction {
+  return tx(CONTRACT_ADDRESS, data, {
+    gas: WITHDRAW_AMOUNT_ONLY_GAS_LIMIT,
+    estimatedGasUse: WITHDRAW_AMOUNT_ONLY_GAS_ESTIMATED,
+  })
+}
+
+export interface WithdrawBuildResult {
+  transactions: ShortcutTransaction[]
+  dataProps?: {
+    simulationRevert?: SimulationRevertInfo
+    fallback?: WithdrawFallbackInfo
+  }
+}
+
+export async function buildWithdrawTxs(
+  args: BuildWithdrawTxsArgs,
+): Promise<WithdrawBuildResult> {
+  const { positionIdBn } = await preflightWithdraw(args)
+  const from = lowerAddress(args.address)
+  const withdrawData = encodeClosePosition(positionIdBn)
+
+  const simulation = await simulateWithdrawCall(args.rpc, from, withdrawData)
+  if (!simulation) {
+    // Simulation OK (or RPC fail-open) - return the calldata as before.
+    return { transactions: [withdrawTx(withdrawData)] }
+  }
+
+  // Simulation revert. Build the fallback (amount-only) calldata inline so
+  // the wallet can skip a round-trip when we know INTEREST_POOL_LOW.
+  // ALREADY_CLOSED / NOT_OWNER would fail on the fallback path too, so we
+  // omit the fallback for those reasons and let the wallet render a
+  // terminal error.
+  const dataProps: WithdrawBuildResult['dataProps'] = {
+    simulationRevert: simulation,
+  }
+  if (simulation.reason === 'INTEREST_POOL_LOW') {
+    const fallbackData = encodeClosePositionPrincipalOnly(positionIdBn)
+    dataProps.fallback = {
+      shortcutId: 'withdraw-amount-only',
+      transactions: [withdrawAmountOnlyTx(fallbackData)],
+    }
+  }
+  return { transactions: [], dataProps }
+}
+
+export async function buildWithdrawAmountOnlyTxs(
+  args: BuildWithdrawTxsArgs,
+): Promise<WithdrawBuildResult> {
+  const { positionIdBn } = await preflightWithdraw(args)
+  const from = lowerAddress(args.address)
+  const data = encodeClosePositionPrincipalOnly(positionIdBn)
+
+  // Same simulation on the amount-only path. There is no further fallback
+  // (this IS the fallback); a revert here is terminal and surfaces to the
+  // wallet as `simulationRevert` with no `fallback` entry.
+  const simulation = await simulateWithdrawCall(args.rpc, from, data)
+  if (!simulation) {
+    return { transactions: [withdrawAmountOnlyTx(data)] }
+  }
   return {
-    transactions: [
-      tx(CONTRACT_ADDRESS, data, {
-        gas: WITHDRAW_AMOUNT_ONLY_GAS_LIMIT,
-        estimatedGasUse: WITHDRAW_AMOUNT_ONLY_GAS_ESTIMATED,
-      }),
-    ],
+    transactions: [],
+    dataProps: { simulationRevert: simulation },
   }
 }
