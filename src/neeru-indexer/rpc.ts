@@ -50,6 +50,16 @@ export interface NeeruBlockSummary {
   timestamp: bigint
 }
 
+export interface NeeruCallArgs {
+  from: `0x${string}`
+  to: `0x${string}`
+  data: `0x${string}`
+}
+
+export type NeeruCallOutcome =
+  | { status: 'ok'; data: `0x${string}` }
+  | { status: 'revert'; revertData: `0x${string}` | null }
+
 export interface NeeruIndexerRpcClient {
   getBlockNumber(): Promise<bigint>
   getBlock(args: { blockNumber: bigint }): Promise<NeeruBlockSummary>
@@ -67,6 +77,12 @@ export interface NeeruIndexerRpcClient {
   >(
     parameters: ReadContractParameters<abi, functionName, args>,
   ): Promise<ReadContractReturnType<abi, functionName, args>>
+  // Raw eth_call that surfaces contract-level reverts as `{status:'revert', revertData}`
+  // instead of throwing. RPC / network failures still throw (via withFallback).
+  // Used by hooks-api to simulate mutating shortcut txs before returning
+  // calldata to the wallet, so the wallet does not pay gas for a tx that will
+  // revert with a known custom error.
+  call(args: NeeruCallArgs): Promise<NeeruCallOutcome>
 }
 
 type EndpointName = 'primary' | 'forno' | 'ankr' | 'drpc'
@@ -257,5 +273,68 @@ export function createNeeruRpc(
         ),
       ) as ReturnType<NeeruIndexerRpcClient['readContract']>
     },
+
+    async call(args: NeeruCallArgs): Promise<NeeruCallOutcome> {
+      return withFallback('call', async (client): Promise<NeeruCallOutcome> => {
+        try {
+          const result = await client.call({
+            account: args.from,
+            to: args.to,
+            data: args.data,
+          })
+          // viem returns { data: '0x' | undefined } on a successful call.
+          return { status: 'ok', data: (result.data ?? '0x') as `0x${string}` }
+        } catch (err) {
+          // Contract-level revert: viem wraps as CallExecutionError with a
+          // RawContractError cause carrying `data`. We only shortcut the flow
+          // for contract reverts; RPC / network failures rethrow so
+          // withFallback rotates to the next endpoint.
+          const revertData = extractRevertData(err)
+          if (revertData !== undefined) {
+            return { status: 'revert', revertData }
+          }
+          throw err
+        }
+      })
+    },
   } as NeeruIndexerRpcClient
+}
+
+// Returns:
+//   - a Hex string (possibly '0x' for a reason-less revert) when the error
+//     is a contract-level revert, so callers can inspect the 4-byte selector
+//   - `null` when the underlying error looks like a revert but has no data
+//   - `undefined` when the error is not a contract revert (RPC / network
+//     failure); caller should treat as retryable and let withFallback rotate
+function extractRevertData(err: unknown): `0x${string}` | null | undefined {
+  // Walk the cause chain looking for a RawContractError (or anything with
+  // a `data` property matching viem's shape). We do not import viem's error
+  // classes directly because their identity changes across major versions;
+  // duck-typing on `.data` is safer.
+  let node: unknown = err
+  const seen = new Set<unknown>()
+  while (node && typeof node === 'object' && !seen.has(node)) {
+    seen.add(node)
+    const rec = node as { data?: unknown; cause?: unknown; name?: unknown }
+    if (typeof rec.data === 'string' && rec.data.startsWith('0x')) {
+      return rec.data as `0x${string}`
+    }
+    if (rec.data && typeof rec.data === 'object') {
+      const nested = (rec.data as { data?: unknown }).data
+      if (typeof nested === 'string' && nested.startsWith('0x')) {
+        return nested as `0x${string}`
+      }
+    }
+    // If it walks like a revert but has no data, tag as null so caller can
+    // still treat it as revert-without-selector.
+    if (typeof rec.name === 'string' && /revert|contract/i.test(rec.name)) {
+      // Continue walking; only return null if we exhaust the chain below.
+    }
+    node = rec.cause
+  }
+  // Fallback string match for providers that surface revert only in message.
+  if (err instanceof Error && /execution reverted|revert/i.test(err.message)) {
+    return null
+  }
+  return undefined
 }

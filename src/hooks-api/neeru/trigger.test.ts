@@ -1,5 +1,8 @@
 import { toFunctionSelector } from 'viem'
-import type { NeeruIndexerRpcClient } from '../../neeru-indexer/rpc'
+import type {
+  NeeruCallOutcome,
+  NeeruIndexerRpcClient,
+} from '../../neeru-indexer/rpc'
 import {
   _resetHooksApiNeeruTriggerCacheForTests,
   buildDepositTxs,
@@ -77,6 +80,9 @@ function buildDepositRpc(opts: {
     readContract: (async () => {
       throw new Error('readContract not expected in buildDepositTxs')
     }) as never,
+    call: (async () => {
+      throw new Error('call not expected in buildDepositTxs')
+    }) as never,
   }
   return rpc
 }
@@ -84,6 +90,7 @@ function buildDepositRpc(opts: {
 interface WithdrawRpcReads {
   owner?: string
   closed?: boolean
+  simulate?: (data: `0x${string}`) => Promise<NeeruCallOutcome>
 }
 
 function buildWithdrawRpc(reads: WithdrawRpcReads): NeeruIndexerRpcClient {
@@ -98,6 +105,12 @@ function buildWithdrawRpc(reads: WithdrawRpcReads): NeeruIndexerRpcClient {
     }) as never,
     readContract: (async () => {
       return [owner, 0, closed, 0n, 0n, 0n, 0n, 0n]
+    }) as never,
+    call: (async (
+      args: { from: `0x${string}`; to: `0x${string}`; data: `0x${string}` },
+    ) => {
+      if (reads.simulate) return reads.simulate(args.data)
+      return { status: 'ok', data: '0x' } as NeeruCallOutcome
     }) as never,
   }
 }
@@ -386,5 +399,165 @@ describe('buildWithdrawAmountOnlyTxs', () => {
         db,
       }),
     ).rejects.toThrow('POSITION_ALREADY_CLOSED')
+  })
+})
+
+describe('buildWithdrawTxs simulation', () => {
+  it('short-circuits with fallback calldata when simulation reverts INTEREST_POOL_LOW', async () => {
+    const rpc = buildWithdrawRpc({
+      simulate: async () => ({ status: 'revert', revertData: '0x2648b779' }),
+    })
+    const { db } = buildDb([{ position_id: '42' }])
+    const result = await buildWithdrawTxs({
+      address: USER,
+      positionId: '42',
+      rpc,
+      db,
+    })
+    // No transactions; wallet reads dataProps to branch UX.
+    expect(result.transactions).toHaveLength(0)
+    expect(result.dataProps?.simulationRevert).toEqual({
+      selector: '0x2648b779',
+      reason: 'INTEREST_POOL_LOW',
+    })
+    // Fallback pre-built so wallet can render emergency close without
+    // a second round-trip.
+    expect(result.dataProps?.fallback?.shortcutId).toBe('withdraw-amount-only')
+    expect(result.dataProps?.fallback?.transactions).toHaveLength(1)
+    const fallbackTx = result.dataProps!.fallback!.transactions[0]
+    expect(fallbackTx!.data.slice(0, 10)).toBe(CLOSE_POSITION_PO_SELECTOR)
+    expect(fallbackTx!.gas).toBe('240000')
+  })
+
+  it('surfaces ALREADY_CLOSED without a fallback (fallback would also revert)', async () => {
+    const rpc = buildWithdrawRpc({
+      simulate: async () => ({ status: 'revert', revertData: '0x9acb7e52' }),
+    })
+    const { db } = buildDb([{ position_id: '42' }])
+    const result = await buildWithdrawTxs({
+      address: USER,
+      positionId: '42',
+      rpc,
+      db,
+    })
+    expect(result.transactions).toHaveLength(0)
+    expect(result.dataProps?.simulationRevert).toEqual({
+      selector: '0x9acb7e52',
+      reason: 'ALREADY_CLOSED',
+    })
+    expect(result.dataProps?.fallback).toBeUndefined()
+  })
+
+  it('surfaces NOT_OWNER without a fallback', async () => {
+    const rpc = buildWithdrawRpc({
+      simulate: async () => ({ status: 'revert', revertData: '0x30cd7471' }),
+    })
+    const { db } = buildDb([{ position_id: '42' }])
+    const result = await buildWithdrawTxs({
+      address: USER,
+      positionId: '42',
+      rpc,
+      db,
+    })
+    expect(result.transactions).toHaveLength(0)
+    expect(result.dataProps?.simulationRevert).toEqual({
+      selector: '0x30cd7471',
+      reason: 'NOT_OWNER',
+    })
+    expect(result.dataProps?.fallback).toBeUndefined()
+  })
+
+  it('propagates UNKNOWN for an unrecognized selector (raw selector still on wire)', async () => {
+    const rpc = buildWithdrawRpc({
+      simulate: async () => ({ status: 'revert', revertData: '0xdeadbeef' }),
+    })
+    const { db } = buildDb([{ position_id: '42' }])
+    const result = await buildWithdrawTxs({
+      address: USER,
+      positionId: '42',
+      rpc,
+      db,
+    })
+    expect(result.transactions).toHaveLength(0)
+    expect(result.dataProps?.simulationRevert).toEqual({
+      selector: '0xdeadbeef',
+      reason: 'UNKNOWN',
+    })
+    expect(result.dataProps?.fallback).toBeUndefined()
+  })
+
+  it('propagates UNKNOWN with null selector for a reason-less revert', async () => {
+    const rpc = buildWithdrawRpc({
+      simulate: async () => ({ status: 'revert', revertData: null }),
+    })
+    const { db } = buildDb([{ position_id: '42' }])
+    const result = await buildWithdrawTxs({
+      address: USER,
+      positionId: '42',
+      rpc,
+      db,
+    })
+    expect(result.transactions).toHaveLength(0)
+    expect(result.dataProps?.simulationRevert).toEqual({
+      selector: null,
+      reason: 'UNKNOWN',
+    })
+  })
+
+  it('fails open when the RPC call itself throws (network / timeout)', async () => {
+    const rpc = buildWithdrawRpc({
+      simulate: async () => {
+        throw new Error('rpc timeout')
+      },
+    })
+    const { db } = buildDb([{ position_id: '42' }])
+    const result = await buildWithdrawTxs({
+      address: USER,
+      positionId: '42',
+      rpc,
+      db,
+    })
+    // Fail-open: return the withdraw calldata as if simulation had passed.
+    // Wallet-side receipt check remains the safety net.
+    expect(result.transactions).toHaveLength(1)
+    expect(result.transactions[0]!.data.slice(0, 10)).toBe(CLOSE_POSITION_SELECTOR)
+    expect(result.dataProps).toBeUndefined()
+  })
+
+  it('emits withdraw calldata when simulation returns ok', async () => {
+    const rpc = buildWithdrawRpc({
+      simulate: async () => ({ status: 'ok', data: '0x' }),
+    })
+    const { db } = buildDb([{ position_id: '42' }])
+    const result = await buildWithdrawTxs({
+      address: USER,
+      positionId: '42',
+      rpc,
+      db,
+    })
+    expect(result.transactions).toHaveLength(1)
+    expect(result.transactions[0]!.data.slice(0, 10)).toBe(CLOSE_POSITION_SELECTOR)
+    expect(result.dataProps).toBeUndefined()
+  })
+})
+
+describe('buildWithdrawAmountOnlyTxs simulation', () => {
+  it('surfaces ALREADY_CLOSED with no fallback (this IS the fallback path)', async () => {
+    const rpc = buildWithdrawRpc({
+      simulate: async () => ({ status: 'revert', revertData: '0x9acb7e52' }),
+    })
+    const { db } = buildDb([{ position_id: '42' }])
+    const result = await buildWithdrawAmountOnlyTxs({
+      address: USER,
+      positionId: '42',
+      rpc,
+      db,
+    })
+    expect(result.transactions).toHaveLength(0)
+    expect(result.dataProps?.simulationRevert).toEqual({
+      selector: '0x9acb7e52',
+      reason: 'ALREADY_CLOSED',
+    })
+    expect(result.dataProps?.fallback).toBeUndefined()
   })
 })

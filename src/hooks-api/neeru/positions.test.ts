@@ -79,6 +79,9 @@ function buildFakeRpc(opts: FakeRpcOpts): {
     readContract: (async () => {
       throw new Error('readContract not used in hooks-api positions')
     }) as never,
+    call: (async () => {
+      throw new Error('call not used in hooks-api positions')
+    }) as never,
   }
   return { rpc, multicallCalls }
 }
