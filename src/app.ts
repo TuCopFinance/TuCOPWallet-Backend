@@ -10,6 +10,7 @@ import { neeruTimelockRouter } from './neeru-timelock/routes'
 import blockscoutRouter from './routes/blockscout'
 import eventsRouter from './routes/events'
 import healthRouter from './routes/health'
+import metaContractsNeeruRouter from './routes/meta-contracts-neeru'
 import pricesRouter from './routes/prices'
 import swapRouter from './routes/swap'
 import wriRouter from './routes/wri'
@@ -103,6 +104,7 @@ app.use(
 app.use(healthRouter)
 app.use(eventsRouter)
 app.use(pricesRouter)
+app.use(metaContractsNeeruRouter)
 app.use(blockscoutRouter)
 app.use(swapRouter)
 app.use(wriRouter)
