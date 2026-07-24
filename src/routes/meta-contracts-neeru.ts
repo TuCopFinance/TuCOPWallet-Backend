@@ -30,10 +30,15 @@ router.get('/api/meta/contracts/neeru', (_req: Request, res: Response) => {
   // Data schema for the Deposit event's non-indexed args, positional to
   // match viem's decodeAbiParameters. Field names are intentionally
   // omitted (opaque per r0..rN convention) so the wallet consumes the
-  // types-only shape. Order matches the deployed event; wallet has the
-  // same shape hardcoded today via the corrected NEERU_DEPOSIT_TOPIC0.
+  // types-only shape. Verified against the deployed contract source
+  // (Neeru Vaults V1). Slot order:
+  //   0 -> tranche (uint8)
+  //   1 -> amount (uint256)
+  //   2 -> startTs (uint256)
+  //   3 -> maturityTs (uint256; 0 for the Flexible tranche)
   const depositDataSchema: ReadonlyArray<{ type: string }> = [
     { type: 'uint8' },
+    { type: 'uint256' },
     { type: 'uint256' },
     { type: 'uint256' },
   ]

@@ -3,8 +3,10 @@ import { buildProvisionalDeposit } from './notify'
 import { CONTRACT_ADDRESS } from '../../neeru-indexer/abi'
 
 const ORIGINAL_ENV = { ...process.env }
+// Real Deposit event topic0, verified against the deployed contract:
+// keccak256("Deposit(address,uint256,uint8,uint256,uint256,uint256)").
 const DEPOSIT_TOPIC0 =
-  '0x12ef563408f10ef4a1dde37b59a2538dcc75957c7e154bf71deea27089689653'
+  '0x8835c22a0c751188de86681e15904223c054bedd5c68ec8858945b7831290273'
 const USER = '0x8427e4409b73a31b9d4e0d210677c88877472ece'
 const TX = '0xaabbccddeeff11223344556677889900aabbccddeeff11223344556677889900'
 
@@ -15,16 +17,19 @@ afterAll(() => {
   process.env = { ...ORIGINAL_ENV }
 })
 
-// Encode {category=1, amount=1_000e18, rateValue=RAY+1} as the Deposit
-// event data (three non-indexed args). Layout matches the wallet's
-// DEPOSIT_EVENT_DATA_SCHEMA in PR #265.
+// Encode {tranche, amount, startTs, maturityTs} as the Deposit event's
+// non-indexed args. Layout verified against the deployed contract:
+//   event Deposit(user indexed, positionId indexed,
+//                 uint8 tranche, uint256 amount,
+//                 uint256 startTs, uint256 maturityTs)
 function encodeDepositData(
-  category: number,
+  tranche: number,
   amount: bigint,
-  rateValue: bigint,
+  startTs: bigint,
+  maturityTs: bigint,
 ): `0x${string}` {
   const hex = (v: bigint) => v.toString(16).padStart(64, '0')
-  return `0x${hex(BigInt(category))}${hex(amount)}${hex(rateValue)}` as `0x${string}`
+  return `0x${hex(BigInt(tranche))}${hex(amount)}${hex(startTs)}${hex(maturityTs)}` as `0x${string}`
 }
 
 function padAddress(addr: string): `0x${string}` {
@@ -65,7 +70,12 @@ const HAPPY_RECEIPT = {
         padAddress(USER),
         padPositionId(42n),
       ] as `0x${string}`[],
-      data: encodeDepositData(1, 1_000_000_000_000_000_000_000n, (10n ** 27n) + 1n),
+      data: encodeDepositData(
+        1,
+        1_000_000_000_000_000_000_000n,
+        1_700_000_000n,
+        1_700_000_000n + BigInt(7 * 86400),
+      ),
     },
   ],
 }
@@ -79,6 +89,7 @@ describe('buildProvisionalDeposit', () => {
       txHash: TX,
       client,
       categorySecs: (c) => (c === 1 ? BigInt(7 * 86400) : null),
+      categoryRateRay: () => 10n ** 27n,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('ok')
@@ -117,7 +128,7 @@ describe('buildProvisionalDeposit', () => {
             padAddress(USER),
             padPositionId(7n),
           ] as `0x${string}`[],
-          data: encodeDepositData(0, 500n * 10n ** 18n, 10n ** 27n),
+          data: encodeDepositData(0, 500n * 10n ** 18n, 1_700_000_000n, 0n),
         },
       ],
     }
@@ -127,6 +138,7 @@ describe('buildProvisionalDeposit', () => {
       txHash: TX,
       client,
       categorySecs: (c) => (c === 0 ? 0n : null),
+      categoryRateRay: () => 10n ** 27n,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('ok')
@@ -146,6 +158,7 @@ describe('buildProvisionalDeposit', () => {
       txHash: TX,
       client,
       categorySecs: () => null,
+      categoryRateRay: () => null,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('not_configured')
@@ -161,6 +174,7 @@ describe('buildProvisionalDeposit', () => {
       txHash: TX,
       client,
       categorySecs: () => null,
+      categoryRateRay: () => null,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('not_found')
@@ -173,6 +187,7 @@ describe('buildProvisionalDeposit', () => {
       txHash: TX,
       client,
       categorySecs: () => null,
+      categoryRateRay: () => null,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('rpc_error')
@@ -187,6 +202,7 @@ describe('buildProvisionalDeposit', () => {
       txHash: TX,
       client,
       categorySecs: () => null,
+      categoryRateRay: () => null,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('not_deposit')
@@ -202,6 +218,7 @@ describe('buildProvisionalDeposit', () => {
       txHash: TX,
       client,
       categorySecs: () => null,
+      categoryRateRay: () => null,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('not_deposit')
@@ -219,7 +236,7 @@ describe('buildProvisionalDeposit', () => {
             padAddress(other),
             padPositionId(1n),
           ] as `0x${string}`[],
-          data: encodeDepositData(1, 100n * 10n ** 18n, 10n ** 27n),
+          data: encodeDepositData(1, 100n * 10n ** 18n, 1_700_000_000n, 0n),
         },
       ],
     }
@@ -229,6 +246,7 @@ describe('buildProvisionalDeposit', () => {
       txHash: TX,
       client,
       categorySecs: () => 0n,
+      categoryRateRay: () => null,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('wrong_address')
