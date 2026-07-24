@@ -12,6 +12,7 @@ import eventsRouter from './routes/events'
 import healthRouter from './routes/health'
 import metaContractsNeeruRouter from './routes/meta-contracts-neeru'
 import pricesRouter from './routes/prices'
+import txStatusRouter from './routes/tx-status'
 import swapRouter from './routes/swap'
 import wriRouter from './routes/wri'
 import wriFeeBootstrapRouter from './routes/wri-fee-bootstrap'
@@ -123,6 +124,7 @@ app.use(healthRouter)
 app.use(eventsRouter)
 app.use(pricesRouter)
 app.use(metaContractsNeeruRouter)
+app.use(txStatusRouter)
 app.use(blockscoutRouter)
 app.use(swapRouter)
 app.use(wriRouter)
