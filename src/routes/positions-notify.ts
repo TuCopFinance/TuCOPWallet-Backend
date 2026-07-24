@@ -132,11 +132,8 @@ async function getCatalogue(
     return catalogueCache
   }
   // Reuse the indexer's CATEGORY_READ_FN_ABI so the ABI stays in one
-  // place. Layout per Tranche struct:
-  //   r0 = dailyRateRay
-  //   r1 = lockSeconds
-  //   r2 = tvl
-  //   r3 = cap
+  // place. The catalogue read returns four uint256 slots per category;
+  // we surface r0 (rate) and r1 (window secs) to the notify handler.
   const results = (await client.multicall({
     contracts: [0, 1, 2, 3].map((c) => ({
       address: CONTRACT_ADDRESS,
