@@ -238,6 +238,17 @@ const envSchema = z.object({
   NEERU_MANAGE_URL: z.string().optional().default(''),
   NEERU_TERMS_URL: z.string().optional().default(''),
   NEERU_CONTRACT_CREATED_AT_ISO: z.string().datetime().optional(),
+  // Topic0 of the on-chain Deposit event, surfaced by
+  // GET /api/meta/contracts/neeru so the wallet stops hardcoding it
+  // locally. Different from the four indexer NEERU_EVENT_*_TOPIC0 vars
+  // (those are the internal state-transition events the indexer watches;
+  // Deposit is the user-facing event the wallet parses for optimistic UI).
+  // Optional: endpoint returns events: {} when unset.
+  NEERU_DEPOSIT_EVENT_TOPIC0: zHexBytes32.optional(),
+  // Semantic version tag for the deployed proxy (e.g. "v2-2026-06-30").
+  // Free text, surfaced by GET /api/meta/contracts/neeru. Wallet reads it
+  // to detect proxy upgrades without polling the on-chain proxy admin.
+  NEERU_CONTRACT_VERSION: z.string().optional(),
 
   // Timelock monitor. Watches the admin Timelock that guards the Neeru fund
   // proxy for schedule / execute / cancel events targeting the proxy address.

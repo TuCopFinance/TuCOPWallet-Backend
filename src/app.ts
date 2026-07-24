@@ -10,7 +10,10 @@ import { neeruTimelockRouter } from './neeru-timelock/routes'
 import blockscoutRouter from './routes/blockscout'
 import eventsRouter from './routes/events'
 import healthRouter from './routes/health'
+import metaContractsNeeruRouter from './routes/meta-contracts-neeru'
+import positionsNotifyRouter from './routes/positions-notify'
 import pricesRouter from './routes/prices'
+import txStatusRouter from './routes/tx-status'
 import swapRouter from './routes/swap'
 import wriRouter from './routes/wri'
 import wriFeeBootstrapRouter from './routes/wri-fee-bootstrap'
@@ -68,6 +71,24 @@ app.use((req, _res, next) => {
   next()
 })
 
+// Retry-After on 503s. Wraps res.status so that when a handler down the
+// chain sets a 503 (dependency down, feature gated off, upstream 503
+// passthrough), the response carries `Retry-After: <RETRY_AFTER_SECONDS>`
+// automatically. Clients that respect the header back off before hammering.
+// Middleware runs BEFORE every route so all 503 emitters are covered; no
+// per-route touch needed.
+const RETRY_AFTER_SECONDS = 30
+app.use((_req, res, next) => {
+  const originalStatus = res.status.bind(res)
+  res.status = (code: number) => {
+    if (code === 503 && !res.getHeader('Retry-After')) {
+      res.setHeader('Retry-After', String(RETRY_AFTER_SECONDS))
+    }
+    return originalStatus(code)
+  }
+  next()
+})
+
 // HTTP duration histogram observed per request. The `route` label uses the
 // Express route template (e.g. `/api/v2/transactions/:hash`) rather than the
 // raw URL so high-cardinality IDs don't blow up the Prometheus series count.
@@ -103,6 +124,9 @@ app.use(
 app.use(healthRouter)
 app.use(eventsRouter)
 app.use(pricesRouter)
+app.use(metaContractsNeeruRouter)
+app.use(txStatusRouter)
+app.use(positionsNotifyRouter)
 app.use(blockscoutRouter)
 app.use(swapRouter)
 app.use(wriRouter)
