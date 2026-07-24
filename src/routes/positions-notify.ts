@@ -23,20 +23,21 @@ interface NotifyBody {
 const CATEGORY_SECS_TTL_MS = 5 * 60 * 1000
 const DECIMALS_TTL_MS = 5 * 60 * 1000
 
-interface CategorySecsSnapshot {
+interface CatalogueSnapshot {
   fetchedAtMs: number
   secs: Map<number, bigint>
+  rateRay: Map<number, bigint>
 }
 interface DecimalsSnapshot {
   fetchedAtMs: number
   decimals: number
 }
 
-let categorySecsCache: CategorySecsSnapshot | null = null
+let catalogueCache: CatalogueSnapshot | null = null
 let decimalsCache: DecimalsSnapshot | null = null
 
 export function _resetPositionsNotifyCacheForTests(): void {
-  categorySecsCache = null
+  catalogueCache = null
   decimalsCache = null
 }
 
@@ -69,15 +70,15 @@ router.post(
 
     const client = getCeloPublicClient()
 
-    // Preload category window secs and deposit decimals from cache or on
-    // demand. Both are cheap on-chain reads; caching keeps the notify
+    // Preload the tranches catalogue + deposit decimals from cache or
+    // on demand. Both are cheap on-chain reads; caching keeps the notify
     // path a single receipt read on the hot path.
-    let categorySecsMap: Map<number, bigint>
+    let catalogue: CatalogueSnapshot
     try {
-      categorySecsMap = await getCategorySecs(client)
+      catalogue = await getCatalogue(client)
     } catch (err) {
       log.warn(
-        `category secs preload failed: ${err instanceof Error ? err.message : String(err)}`,
+        `catalogue preload failed: ${err instanceof Error ? err.message : String(err)}`,
       )
       return res.status(502).json({ error: 'rpc unavailable' })
     }
@@ -95,7 +96,8 @@ router.post(
       address,
       txHash: tx,
       client,
-      categorySecs: (c) => categorySecsMap.get(c) ?? null,
+      categorySecs: (c) => catalogue.secs.get(c) ?? null,
+      categoryRateRay: (c) => catalogue.rateRay.get(c) ?? null,
       depositDecimals: decimals,
     })
 
@@ -119,18 +121,22 @@ router.post(
   },
 )
 
-async function getCategorySecs(
+async function getCatalogue(
   client: ReturnType<typeof getCeloPublicClient>,
-): Promise<Map<number, bigint>> {
+): Promise<CatalogueSnapshot> {
   const now = Date.now()
   if (
-    categorySecsCache &&
-    now - categorySecsCache.fetchedAtMs < CATEGORY_SECS_TTL_MS
+    catalogueCache &&
+    now - catalogueCache.fetchedAtMs < CATEGORY_SECS_TTL_MS
   ) {
-    return categorySecsCache.secs
+    return catalogueCache
   }
   // Reuse the indexer's CATEGORY_READ_FN_ABI so the ABI stays in one
-  // place. We only read output index 1 (window secs) per category.
+  // place. Layout per Tranche struct:
+  //   r0 = dailyRateRay
+  //   r1 = lockSeconds
+  //   r2 = tvl
+  //   r3 = cap
   const results = (await client.multicall({
     contracts: [0, 1, 2, 3].map((c) => ({
       address: CONTRACT_ADDRESS,
@@ -141,12 +147,14 @@ async function getCategorySecs(
     allowFailure: false,
   })) as unknown as ReadonlyArray<readonly [bigint, bigint, bigint, bigint]>
   const secs = new Map<number, bigint>()
+  const rateRay = new Map<number, bigint>()
   for (let i = 0; i < 4; i++) {
     const tuple = results[i]!
+    rateRay.set(i, tuple[0])
     secs.set(i, tuple[1])
   }
-  categorySecsCache = { fetchedAtMs: now, secs }
-  return secs
+  catalogueCache = { fetchedAtMs: now, secs, rateRay }
+  return catalogueCache
 }
 
 async function getDepositDecimals(

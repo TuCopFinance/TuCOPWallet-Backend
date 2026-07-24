@@ -17,12 +17,18 @@ import { monthlyYieldPercent } from './positions'
 
 const SECONDS_PER_DAY = 86_400
 
-// Non-indexed args on the deployed Deposit event, positional (types only,
-// no names) matching the wallet's own DEPOSIT_EVENT_DATA_SCHEMA from PR
-// #265. Order: (category, amount, rateValue). depositor + positionId
-// are the two indexed args (topics[1], topics[2]).
+// Non-indexed args on the deployed Deposit event, positional (types
+// only, no names). Verified against the deployed contract source
+// (Neeru Vaults V1). Two indexed args live in topics[1]/topics[2]
+// (depositor + positionId); the four non-indexed args below live in
+// log.data. Order matches the on-chain event exactly:
+//   slot 0 -> tranche (uint8)
+//   slot 1 -> amount (uint256)
+//   slot 2 -> startTs (uint256)
+//   slot 3 -> maturityTs (uint256; 0 for the Flexible tranche)
 const DEPOSIT_EVENT_DATA_SCHEMA = [
   { type: 'uint8' },
+  { type: 'uint256' },
   { type: 'uint256' },
   { type: 'uint256' },
 ] as const
@@ -46,6 +52,12 @@ export interface BuildProvisionalArgs {
   txHash: string
   client: PublicClient
   categorySecs: (category: number) => bigint | null
+  // Per-category daily rate as a RAY scalar, used only to compute the
+  // display-only monthlyRatePercentage on the provisional response.
+  // Returns null when the category is unknown; the response then emits
+  // monthlyRatePercentage: 0 and the wallet supersedes when the indexer
+  // surfaces the real per-position frozen rate.
+  categoryRateRay: (category: number) => bigint | null
   depositDecimals: number
 }
 
@@ -105,43 +117,40 @@ export async function buildProvisionalDeposit(
     }
   }
 
-  const [categoryRaw, amountRaw, rateRaw] = decodeAbiParameters(
-    DEPOSIT_EVENT_DATA_SCHEMA,
-    log.data,
-  )
+  const [categoryRaw, amountRaw, startTsRaw, maturityTsRaw] =
+    decodeAbiParameters(DEPOSIT_EVENT_DATA_SCHEMA, log.data)
   const category = Number(categoryRaw as number)
   const amountWei = amountRaw as bigint
-  const rateValue = rateRaw as bigint
+  const startTs = Number(startTsRaw as bigint)
+  const maturityTs = Number(maturityTsRaw as bigint)
 
   const positionIdBn = hexToBigInt(log.topics[2] as `0x${string}`)
   const positionId = positionIdBn.toString()
 
-  // Block timestamp comes from the block header; the receipt itself does
-  // not carry it. One extra RPC call, still cheap on the notify path.
-  let blockTimestamp: bigint
-  try {
-    const block = await args.client.getBlock({
-      blockNumber: receipt.blockNumber,
-      includeTransactions: false,
-    })
-    blockTimestamp = block.timestamp
-  } catch (err) {
-    return {
-      kind: 'rpc_error',
-      error: `getBlock failed: ${err instanceof Error ? err.message : String(err)}`,
-    }
-  }
+  // maturityTs == 0 signifies the flexible tranche (no lock window). Any
+  // fixed tranche carries a concrete maturity. Fall back to startTs for
+  // flexible so wallet renderers that expect endTs >= startTs stay happy.
+  const endTs = maturityTs > 0 ? maturityTs : startTs
 
-  const startTs = Number(blockTimestamp)
+  // Category window secs (from the cached catalogue) is used only for the
+  // human label ("Flexible" / "N dias"). Missing entry falls back to the
+  // maturity-derived duration; unknown category renders as an empty label.
   const secs = args.categorySecs(category)
-  // secs = 0n signifies the flexible category (no lock window). Any lock
-  // gives endTs = startTs + window secs; flexible stays at startTs.
-  const endTs =
-    secs != null && secs > 0n ? startTs + Number(secs) : startTs
-
+  const derivedSecs =
+    secs ?? (maturityTs > startTs ? BigInt(maturityTs - startTs) : 0n)
   const amountStr = decimalString(amountWei, args.depositDecimals)
-  const monthly = monthlyYieldPercent(rateValue)
-  const categoryLabel = secs === 0n ? 'Flexible' : `${Number((secs ?? 0n) / BigInt(SECONDS_PER_DAY))} dias`
+  const categoryLabel =
+    derivedSecs === 0n
+      ? 'Flexible'
+      : `${Number(derivedSecs / BigInt(SECONDS_PER_DAY))} dias`
+
+  // The Deposit event does not emit dailyRateRay, so we cannot compute
+  // the true monthly rate from the receipt alone. For the optimistic /
+  // provisional response we fall back to the current tranche rate via
+  // the categoryRate lookup; the wallet supersedes this with the real
+  // per-position frozen rate once the indexer surfaces the position.
+  const rateRay = args.categoryRateRay(category)
+  const monthly = rateRay != null ? monthlyYieldPercent(rateRay) : 0
 
   const payout: CurrentPayoutIfClosed = {
     amount: amountStr,
