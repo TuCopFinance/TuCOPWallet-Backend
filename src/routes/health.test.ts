@@ -33,6 +33,34 @@ describe('GET /health', () => {
   })
 })
 
+describe('GET /api/health (alias)', () => {
+  it('returns 200 with the same body as /health', async () => {
+    const res = await request(app).get('/api/health')
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, service: 'tucopwallet-backend' })
+  })
+})
+
+describe('GET /api/ready (alias)', () => {
+  beforeEach(() => {
+    mockQuery.mockReset()
+    mockPing.mockReset()
+    mockGetBlockNumber.mockReset()
+    dbStub = { query: mockQuery }
+    redisStub = { ping: mockPing }
+  })
+
+  it('mirrors /ready when all deps are healthy', async () => {
+    mockQuery.mockResolvedValue({ rows: [{ '?column?': 1 }] })
+    mockPing.mockResolvedValue('PONG')
+    mockGetBlockNumber.mockResolvedValue(123n)
+
+    const res = await request(app).get('/api/ready')
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+  })
+})
+
 describe('GET /ready', () => {
   beforeEach(() => {
     mockQuery.mockReset()
@@ -66,6 +94,9 @@ describe('GET /ready', () => {
     expect(res.body.checks.db).toMatch(/fail/)
     expect(res.body.checks.redis).toBe('ok')
     expect(res.body.checks.rpc).toBe('ok')
+    // Cross-cutting Retry-After middleware sets the backoff header on
+    // any 503 so clients respect the backpressure without per-route wiring.
+    expect(res.headers['retry-after']).toBe('30')
   })
 
   it('returns 503 when redis fails', async () => {

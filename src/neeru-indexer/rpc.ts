@@ -306,7 +306,7 @@ export function createNeeruRpc(
 //   - `null` when the underlying error looks like a revert but has no data
 //   - `undefined` when the error is not a contract revert (RPC / network
 //     failure); caller should treat as retryable and let withFallback rotate
-function extractRevertData(err: unknown): `0x${string}` | null | undefined {
+export function extractRevertData(err: unknown): `0x${string}` | null | undefined {
   // Walk the cause chain looking for a RawContractError (or anything with
   // a `data` property matching viem's shape). We do not import viem's error
   // classes directly because their identity changes across major versions;

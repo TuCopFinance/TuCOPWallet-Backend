@@ -2,6 +2,7 @@ import type { Pool } from 'pg'
 import { CONTRACT_ADDRESS } from '../../neeru-indexer/abi'
 import type { NeeruIndexerRpcClient } from '../../neeru-indexer/rpc'
 import { decimalString } from '../../lib/decimal'
+import { getCopmPriceUsd } from '../../lib/coinmarketcap'
 import { createLogger } from '../../lib/logger'
 import {
   ERC20_READ_ABI,
@@ -53,11 +54,45 @@ interface OpenRow {
 }
 
 const CATALOGUE_TTL_MS = 30_000
+// Price is cached longer than the catalogue since the COP/USD forex rate
+// moves on the order of hours, not seconds. The wallet gets a stale-but-
+// close estimate rather than a fresh RPC every request.
+const PRICE_TTL_MS = 60_000
 
 let catalogueCache: CatalogueSnapshot | null = null
 
+interface PriceSnapshot {
+  fetchedAtMs: number
+  priceUsd: string
+}
+let priceCache: PriceSnapshot | null = null
+
 export function _resetHooksApiNeeruCacheForTests(): void {
   catalogueCache = null
+  priceCache = null
+}
+
+// Fetches USD price of one COPm token. Fails soft to '0' so a downed CMC
+// or missing API key does not break the whole positions endpoint. When
+// the fallback fires, the wallet shows the "$ 0.00" state that existed
+// before this endpoint was priced, so behavior degrades gracefully.
+async function fetchCopmPriceCached(now: () => number): Promise<string> {
+  if (priceCache && now() - priceCache.fetchedAtMs < PRICE_TTL_MS) {
+    return priceCache.priceUsd
+  }
+  try {
+    const { priceUsd } = await getCopmPriceUsd()
+    // 10 decimal places is far more precision than COP/USD moves per
+    // minute; keeps the JSON compact vs full float toString.
+    const asStr = priceUsd.toFixed(10)
+    priceCache = { fetchedAtMs: now(), priceUsd: asStr }
+    return asStr
+  } catch (err) {
+    log.warn(
+      `copm price fetch failed - returning '0': ${err instanceof Error ? err.message : String(err)}`,
+    )
+    return '0'
+  }
 }
 
 // decimalString moved to src/lib/decimal.ts (Fase 4 PR 28). The local
@@ -266,6 +301,7 @@ interface BuildArgs {
   category: Category
   snapshot: CatalogueSnapshot
   balanceWei: bigint
+  priceUsd: string
 }
 
 function buildEarnPosition(args: BuildArgs): EarnPosition {
@@ -336,7 +372,7 @@ function buildEarnPosition(args: BuildArgs): EarnPosition {
         networkId: NETWORK_ID,
         symbol,
         decimals,
-        priceUsd: '0',
+        priceUsd: args.priceUsd,
         balance,
       },
     ],
@@ -347,7 +383,7 @@ function buildEarnPosition(args: BuildArgs): EarnPosition {
     },
     symbol,
     decimals,
-    priceUsd: '0',
+    priceUsd: args.priceUsd,
     balance,
     supply: balance,
     pricePerShare: ['1'],
@@ -366,7 +402,13 @@ export async function getNeeruEarnPositions(
 ): Promise<EarnPosition[]> {
   if (!hooksApiConfigured()) return []
 
-  const snapshot = await fetchCatalogue({ rpc: args.rpc, now: args.now })
+  const now = args.now ?? (() => Date.now())
+  // Snapshot + price in parallel so the price fetch does not add to
+  // the request's critical path when the catalogue read is a cache hit.
+  const [snapshot, priceUsd] = await Promise.all([
+    fetchCatalogue({ rpc: args.rpc, now: args.now }),
+    fetchCopmPriceCached(now),
+  ])
 
   const balances = new Map<Category, bigint>()
   for (const c of CATEGORIES) balances.set(c, 0n)
@@ -386,6 +428,7 @@ export async function getNeeruEarnPositions(
       category: c,
       snapshot,
       balanceWei: balances.get(c) ?? 0n,
+      priceUsd,
     }),
   )
 }

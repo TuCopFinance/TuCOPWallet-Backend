@@ -43,12 +43,14 @@ const POSITION_ID_RE = /^\d+$/
 // having to import the partner-contract ABI. Any selector not in this
 // map propagates as `UNKNOWN` so the wallet still gets a hint that
 // simulation failed.
-type SimulationReason =
+export type SimulationReason =
   | 'INTEREST_POOL_LOW'
   | 'ALREADY_CLOSED'
   | 'NOT_OWNER'
   | 'UNKNOWN'
-const REVERT_SELECTORS: Record<`0x${string}`, SimulationReason> = {
+export const REVERT_SELECTORS: Readonly<
+  Record<`0x${string}`, SimulationReason>
+> = {
   '0x2648b779': 'INTEREST_POOL_LOW',
   '0x9acb7e52': 'ALREADY_CLOSED',
   '0x30cd7471': 'NOT_OWNER',

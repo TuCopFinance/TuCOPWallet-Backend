@@ -62,14 +62,22 @@ async function probeRpc(): Promise<ProbeResult> {
 // Liveness probe. Used by Railway to decide whether the process is responsive.
 // Returns 200 as long as the process can handle a request - dependencies are
 // NOT checked here on purpose. Use /ready for dependency health.
-router.get('/health', (_req: Request, res: Response) => {
+//
+// Two paths: `/health` (canonical, kept for Railway healthcheckPath config)
+// and `/api/health` (alias, matches the `/api/*` convention wallets expect
+// for platform endpoints). Both share the same handler.
+function livenessHandler(_req: Request, res: Response): void {
   res.json({ ok: true, service: 'tucopwallet-backend', version: '0.1.0' })
-})
+}
+router.get('/health', livenessHandler)
+router.get('/api/health', livenessHandler)
 
 // Readiness probe. Checks every external dependency the routes depend on.
 // Returns 503 when any required dependency is down. Operator alerts should
-// page on /ready 503s, not /health.
-router.get('/ready', async (_req: Request, res: Response) => {
+// page on /ready 503s, not /health. Aliased at `/api/ready` for symmetry
+// with `/api/health`. When it 503s the response carries `Retry-After: 30`
+// via retryAfterMiddleware in app.ts so clients back off.
+async function readinessHandler(_req: Request, res: Response): Promise<void> {
   const [db, redis, rpc] = await Promise.all([probeDb(), probeRedis(), probeRpc()])
   const allOk = db.ok && redis.ok && rpc.ok
   res.status(allOk ? 200 : 503).json({
@@ -80,7 +88,9 @@ router.get('/ready', async (_req: Request, res: Response) => {
       rpc: rpc.ok ? 'ok' : `fail: ${rpc.error}`,
     },
   })
-})
+}
+router.get('/ready', readinessHandler)
+router.get('/api/ready', readinessHandler)
 
 // Relay hot-wallet health. Exposes the relay address + balance (without the
 // private key) so external monitors can alert on low balance without needing
