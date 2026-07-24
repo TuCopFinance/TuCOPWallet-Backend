@@ -11,6 +11,7 @@ import blockscoutRouter from './routes/blockscout'
 import eventsRouter from './routes/events'
 import healthRouter from './routes/health'
 import metaContractsNeeruRouter from './routes/meta-contracts-neeru'
+import positionsNotifyRouter from './routes/positions-notify'
 import pricesRouter from './routes/prices'
 import txStatusRouter from './routes/tx-status'
 import swapRouter from './routes/swap'
@@ -125,6 +126,7 @@ app.use(eventsRouter)
 app.use(pricesRouter)
 app.use(metaContractsNeeruRouter)
 app.use(txStatusRouter)
+app.use(positionsNotifyRouter)
 app.use(blockscoutRouter)
 app.use(swapRouter)
 app.use(wriRouter)
