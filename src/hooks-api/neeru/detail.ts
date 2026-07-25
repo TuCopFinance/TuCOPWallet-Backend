@@ -14,7 +14,7 @@ import {
   CATEGORY_READ_FN_ABI,
 } from '../neeru-abi'
 import { NEERU_DEPOSIT_TOKEN_ADDRESS } from '../config'
-import { monthlyYieldPercent } from './positions'
+import { annualEffectivePercent, monthlyYieldPercent } from './positions'
 
 const log = createLogger('hooks-api:neeru:detail')
 
@@ -59,6 +59,7 @@ export interface NeeruPositionDetail {
   amount: string
   accruedInterest: string
   monthlyRatePercentage: number
+  annualEffectivePercentage: number
   startTs: number
   endTs: number
   depositBlock: number
@@ -348,13 +349,16 @@ export async function getNeeruPositionDetail(
     }
     const totalWei = amountWei + interestAfterPenaltyWei
 
+    const monthlyPct = monthlyYieldPercent(rateRaw)
+
     positions.push({
       positionId: row.position_id,
       category: row.category,
       categoryLabel: categoryLabelFor(secs),
       amount: amountStr,
       accruedInterest: accruedStr,
-      monthlyRatePercentage: monthlyYieldPercent(rateRaw),
+      monthlyRatePercentage: monthlyPct,
+      annualEffectivePercentage: annualEffectivePercent(monthlyPct),
       startTs: Number(row.start_ts),
       endTs,
       depositBlock: Number(row.deposit_block),

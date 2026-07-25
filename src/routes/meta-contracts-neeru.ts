@@ -1,8 +1,11 @@
 import { Router, Request, Response } from 'express'
+import { celo } from 'viem/chains'
 import { env } from '../lib/env'
 import { REVERT_SELECTORS } from '../hooks-api/neeru/trigger'
 
 const router = Router()
+
+const NETWORK_ID = 'celo-mainnet'
 
 // GET /api/meta/contracts/neeru
 //
@@ -17,6 +20,7 @@ router.get('/api/meta/contracts/neeru', (_req: Request, res: Response) => {
   const proxyAddress = env.NEERU_CONTRACT_ADDRESS ?? null
   const depositTopic0 = env.NEERU_DEPOSIT_EVENT_TOPIC0 ?? null
   const version = env.NEERU_CONTRACT_VERSION ?? null
+  const depositTokenAddress = env.NEERU_DEPOSIT_TOKEN_ADDRESS ?? null
 
   // Types-only shape for the deposit event's non-indexed args in
   // log.data. Positional; the wallet indexes into r0..r3 by position
@@ -46,11 +50,26 @@ router.get('/api/meta/contracts/neeru', (_req: Request, res: Response) => {
     }
   }
 
+  // Deposit token is exposed as pure config (address + chain identifiers)
+  // so the wallet can drop its hardcoded copy. Decimals + symbol move
+  // through the on-chain /api/earn/neeru/catalogue endpoint since those
+  // require an RPC read; keeping the meta payload sync + fast is worth
+  // splitting the two.
+  const depositToken =
+    depositTokenAddress !== null
+      ? {
+          address: depositTokenAddress,
+          chainId: celo.id,
+          networkId: NETWORK_ID,
+        }
+      : null
+
   res.setHeader('Cache-Control', 'public, max-age=300')
   res.json({
     proxyAddress,
     events,
     errorSelectors,
+    depositToken,
     version,
   })
 })
