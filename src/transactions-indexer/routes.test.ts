@@ -435,16 +435,16 @@ describe('GET /api/transactions/indexer/health', () => {
   })
 
   it('returns full shape with lagBlocks when DB + RPC are healthy', async () => {
-    indexerStateRows = [{ last_block: '70513283' }]
+    indexerStateRows = [{ last_block: '1234500' }]
     watchedCountRows = [{ count: '42' }]
-    mockGetBlockNumber.mockResolvedValue(70513290n)
+    mockGetBlockNumber.mockResolvedValue(1234507n)
 
     const res = await request(app).get('/api/transactions/indexer/health')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
       networkId: 'celo-mainnet',
-      lastIndexedBlock: 70513283,
-      celoTipBlock: 70513290,
+      lastIndexedBlock: 1234500,
+      celoTipBlock: 1234507,
       lagBlocks: 7,
       watchedAddressCount: 42,
     })
@@ -463,13 +463,13 @@ describe('GET /api/transactions/indexer/health', () => {
   it('returns lastIndexedBlock=null when indexer_state is empty', async () => {
     indexerStateRows = []
     watchedCountRows = [{ count: '0' }]
-    mockGetBlockNumber.mockResolvedValue(70513290n)
+    mockGetBlockNumber.mockResolvedValue(1234507n)
 
     const res = await request(app).get('/api/transactions/indexer/health')
     expect(res.status).toBe(200)
     expect(res.body.lastIndexedBlock).toBeNull()
     expect(res.body.lagBlocks).toBeNull()
-    expect(res.body.celoTipBlock).toBe(70513290)
+    expect(res.body.celoTipBlock).toBe(1234507)
   })
 
   it('returns degraded shape (celoTipBlock=null, lagBlocks=null) when RPC fails', async () => {
@@ -487,7 +487,7 @@ describe('GET /api/transactions/indexer/health', () => {
 
   it('returns 500 when the indexer_state query throws', async () => {
     indexerStateThrows = true
-    mockGetBlockNumber.mockResolvedValue(70513290n)
+    mockGetBlockNumber.mockResolvedValue(1234507n)
     const res = await request(app).get('/api/transactions/indexer/health')
     expect(res.status).toBe(500)
   })

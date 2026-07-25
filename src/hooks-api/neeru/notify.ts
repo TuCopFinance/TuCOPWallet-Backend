@@ -17,12 +17,14 @@ import { monthlyYieldPercent } from './positions'
 
 const SECONDS_PER_DAY = 86_400
 
-// Non-indexed args on the deployed Deposit event, positional (types only,
-// no names) matching the wallet's own DEPOSIT_EVENT_DATA_SCHEMA from PR
-// #265. Order: (category, amount, rateValue). depositor + positionId
-// are the two indexed args (topics[1], topics[2]).
+// Non-indexed args on the deposit event's log.data, types-only. Two
+// indexed args live in topics[1]/topics[2] and are decoded separately
+// via hexToBigInt on the raw topic bytes. Four positional slots follow
+// the r0..r3 opaque convention used elsewhere in this repo; consumers
+// index by position, never by name.
 const DEPOSIT_EVENT_DATA_SCHEMA = [
   { type: 'uint8' },
+  { type: 'uint256' },
   { type: 'uint256' },
   { type: 'uint256' },
 ] as const
@@ -46,6 +48,12 @@ export interface BuildProvisionalArgs {
   txHash: string
   client: PublicClient
   categorySecs: (category: number) => bigint | null
+  // Per-category daily rate as a RAY scalar, used only to compute the
+  // display-only monthlyRatePercentage on the provisional response.
+  // Returns null when the category is unknown; the response then emits
+  // monthlyRatePercentage: 0 and the wallet supersedes when the indexer
+  // surfaces the real per-position frozen value.
+  categoryRateRay: (category: number) => bigint | null
   depositDecimals: number
 }
 
@@ -56,8 +64,8 @@ export async function buildProvisionalDeposit(
   // so tests can flip the value at runtime. The value is validated as a
   // 66-char 0x-prefixed hex string when set on Railway; here we only
   // check presence + the topic0 length used for log.topic[0] matching.
-  const depositTopic0 = process.env.NEERU_DEPOSIT_EVENT_TOPIC0
-  if (!depositTopic0) {
+  const eventTopic0 = process.env.NEERU_DEPOSIT_EVENT_TOPIC0
+  if (!eventTopic0) {
     return {
       kind: 'not_configured',
       error: 'NEERU_DEPOSIT_EVENT_TOPIC0 not set',
@@ -85,63 +93,60 @@ export async function buildProvisionalDeposit(
   const log = receipt.logs.find(
     (l) =>
       l.address.toLowerCase() === contractAddressLower &&
-      l.topics[0]?.toLowerCase() === depositTopic0.toLowerCase(),
+      l.topics[0]?.toLowerCase() === eventTopic0.toLowerCase(),
   )
   if (!log || !log.topics[1] || !log.topics[2]) {
     return {
       kind: 'not_deposit',
-      error: 'no Deposit event on the earn-vault contract',
+      error: 'no matching event on the configured contract',
     }
   }
 
-  // topics[1] = depositor (indexed address), zero-padded to 32 bytes.
-  // Verify it matches the caller so the wallet cannot notify about a tx
-  // that belongs to someone else.
+  // topics[1] = indexed depositor address, zero-padded to 32 bytes.
+  // Verify it matches the caller so the wallet cannot notify about a
+  // tx that belongs to someone else.
   const eventDepositor = ('0x' + log.topics[1].slice(-40)).toLowerCase()
   if (eventDepositor !== args.address.toLowerCase()) {
     return {
       kind: 'wrong_address',
-      error: 'address does not match Deposit event depositor',
+      error: 'address does not match event depositor',
     }
   }
 
-  const [categoryRaw, amountRaw, rateRaw] = decodeAbiParameters(
+  const [r0, r1, r2, r3] = decodeAbiParameters(
     DEPOSIT_EVENT_DATA_SCHEMA,
     log.data,
   )
-  const category = Number(categoryRaw as number)
-  const amountWei = amountRaw as bigint
-  const rateValue = rateRaw as bigint
+  const category = Number(r0 as number)
+  const amountWei = r1 as bigint
+  const startTs = Number(r2 as bigint)
+  const endTsRaw = Number(r3 as bigint)
 
   const positionIdBn = hexToBigInt(log.topics[2] as `0x${string}`)
   const positionId = positionIdBn.toString()
 
-  // Block timestamp comes from the block header; the receipt itself does
-  // not carry it. One extra RPC call, still cheap on the notify path.
-  let blockTimestamp: bigint
-  try {
-    const block = await args.client.getBlock({
-      blockNumber: receipt.blockNumber,
-      includeTransactions: false,
-    })
-    blockTimestamp = block.timestamp
-  } catch (err) {
-    return {
-      kind: 'rpc_error',
-      error: `getBlock failed: ${err instanceof Error ? err.message : String(err)}`,
-    }
-  }
+  // r3 == 0 signifies no lock window; fall back to startTs so wallet
+  // renderers that expect endTs >= startTs stay happy.
+  const endTs = endTsRaw > 0 ? endTsRaw : startTs
 
-  const startTs = Number(blockTimestamp)
+  // Category window secs (from the cached catalogue) is used only for
+  // the human label ("Flexible" / "N dias"). Missing entry falls back
+  // to the r3-derived duration; unknown category renders as flexible.
   const secs = args.categorySecs(category)
-  // secs = 0n signifies the flexible category (no lock window). Any lock
-  // gives endTs = startTs + window secs; flexible stays at startTs.
-  const endTs =
-    secs != null && secs > 0n ? startTs + Number(secs) : startTs
-
+  const derivedSecs =
+    secs ?? (endTsRaw > startTs ? BigInt(endTsRaw - startTs) : 0n)
   const amountStr = decimalString(amountWei, args.depositDecimals)
-  const monthly = monthlyYieldPercent(rateValue)
-  const categoryLabel = secs === 0n ? 'Flexible' : `${Number((secs ?? 0n) / BigInt(SECONDS_PER_DAY))} dias`
+  const categoryLabel =
+    derivedSecs === 0n
+      ? 'Flexible'
+      : `${Number(derivedSecs / BigInt(SECONDS_PER_DAY))} dias`
+
+  // The event does not carry the per-position frozen rate, so we fall
+  // back to the current per-category rate from the cached catalogue for
+  // the display-only monthlyRatePercentage on the provisional response.
+  // The wallet supersedes this once the indexer surfaces the real value.
+  const rateRay = args.categoryRateRay(category)
+  const monthly = rateRay != null ? monthlyYieldPercent(rateRay) : 0
 
   const payout: CurrentPayoutIfClosed = {
     amount: amountStr,

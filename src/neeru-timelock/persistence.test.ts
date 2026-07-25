@@ -4,7 +4,7 @@
 process.env.NEERU_TIMELOCK_ADDRESS =
   '0xe8358c9cfa4f7af8acd6ff86e012d828527497bf'
 process.env.NEERU_CONTRACT_ADDRESS =
-  '0x988af5977201a0e988f2c75ea952532f6beb5082'
+  '0x1234567890abcdef1234567890abcdef12345678'
 process.env.NEERU_TIMELOCK_GENESIS_BLOCK = '1234568'
 process.env.NEERU_TIMELOCK_EVENT_SCHEDULED_TOPIC0 =
   '0x4cf4410cc57040e44862ef0f45f3dd5a5e02db8eb8add648d4b0e236f1d07dca'
@@ -25,7 +25,7 @@ import {
 import type { TimelockEventWithTimestamp } from './types'
 
 const CONTRACT_ADDRESS =
-  '0x988af5977201a0e988f2c75ea952532f6beb5082' as `0x${string}`
+  '0x1234567890abcdef1234567890abcdef12345678' as `0x${string}`
 const OTHER_ADDRESS =
   '0x1234567890123456789012345678901234567890' as `0x${string}`
 const OP_ID =

@@ -4,7 +4,7 @@
 process.env.NEERU_TIMELOCK_ADDRESS =
   '0xe8358c9cfa4f7af8acd6ff86e012d828527497bf'
 process.env.NEERU_CONTRACT_ADDRESS =
-  '0x988af5977201a0e988f2c75ea952532f6beb5082'
+  '0x1234567890abcdef1234567890abcdef12345678'
 process.env.NEERU_TIMELOCK_GENESIS_BLOCK = '1234568'
 process.env.NEERU_TIMELOCK_EVENT_SCHEDULED_TOPIC0 =
   '0x4cf4410cc57040e44862ef0f45f3dd5a5e02db8eb8add648d4b0e236f1d07dca'
@@ -87,7 +87,7 @@ describe('GET /api/earn/neeru/upgrade-schedule', () => {
         event_id: '1',
         kind: 'scheduled',
         operation_id: OP_1,
-        target: '0x988af5977201a0e988f2c75ea952532f6beb5082',
+        target: '0x1234567890abcdef1234567890abcdef12345678',
         value: '0',
         calldata: '0xdead',
         predecessor: `0x${'00'.repeat(32)}`,
@@ -103,7 +103,7 @@ describe('GET /api/earn/neeru/upgrade-schedule', () => {
         event_id: '2',
         kind: 'executed',
         operation_id: OP_1,
-        target: '0x988af5977201a0e988f2c75ea952532f6beb5082',
+        target: '0x1234567890abcdef1234567890abcdef12345678',
         value: '0',
         calldata: '0xdead',
         predecessor: null,
@@ -132,7 +132,7 @@ describe('GET /api/earn/neeru/upgrade-schedule', () => {
         event_id: '1',
         kind: 'scheduled',
         operation_id: OP_2,
-        target: '0x988af5977201a0e988f2c75ea952532f6beb5082',
+        target: '0x1234567890abcdef1234567890abcdef12345678',
         value: '0',
         calldata: '0xdead',
         predecessor: `0x${'00'.repeat(32)}`,
@@ -176,7 +176,7 @@ describe('GET /api/earn/neeru/upgrade-schedule', () => {
         event_id: '1',
         kind: 'scheduled',
         operation_id: OP_3,
-        target: '0x988af5977201a0e988f2c75ea952532f6beb5082',
+        target: '0x1234567890abcdef1234567890abcdef12345678',
         value: '0',
         calldata: '0xdead',
         predecessor: `0x${'00'.repeat(32)}`,
