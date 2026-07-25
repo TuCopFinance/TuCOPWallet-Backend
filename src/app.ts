@@ -8,6 +8,7 @@ import { httpRequestDurationSeconds } from './lib/metrics'
 import { Sentry } from './lib/sentry'
 import { neeruTimelockRouter } from './neeru-timelock/routes'
 import blockscoutRouter from './routes/blockscout'
+import earnNeeruCatalogueRouter from './routes/earn-neeru-catalogue'
 import eventsRouter from './routes/events'
 import healthRouter from './routes/health'
 import metaContractsNeeruRouter from './routes/meta-contracts-neeru'
@@ -125,6 +126,7 @@ app.use(healthRouter)
 app.use(eventsRouter)
 app.use(pricesRouter)
 app.use(metaContractsNeeruRouter)
+app.use(earnNeeruCatalogueRouter)
 app.use(txStatusRouter)
 app.use(positionsNotifyRouter)
 app.use(blockscoutRouter)
