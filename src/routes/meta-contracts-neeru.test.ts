@@ -23,6 +23,7 @@ afterAll(() => {
 })
 
 const CONTRACT = '0x988af5977201a0e988f2c75ea952532f6beb5082'
+const DEPOSIT_TOKEN = '0x8a567e2ae79ca692bd748ab832081c45de4041ea'
 const DEPOSIT_TOPIC0 =
   '0x12ef563408f10ef4a1dde37b59a2538dcc75957c7e154bf71deea27089689653'
 
@@ -30,6 +31,7 @@ describe('GET /api/meta/contracts/neeru', () => {
   it('returns the full envelope when all env vars are set', async () => {
     const app = loadFreshApp({
       NEERU_CONTRACT_ADDRESS: CONTRACT,
+      NEERU_DEPOSIT_TOKEN_ADDRESS: DEPOSIT_TOKEN,
       NEERU_DEPOSIT_EVENT_TOPIC0: DEPOSIT_TOPIC0,
       NEERU_CONTRACT_VERSION: 'v2-2026-06-30',
     })
@@ -52,6 +54,11 @@ describe('GET /api/meta/contracts/neeru', () => {
         INTEREST_POOL_LOW: '0x2648b779',
         ALREADY_CLOSED: '0x9acb7e52',
         NOT_OWNER: '0x30cd7471',
+      },
+      depositToken: {
+        address: DEPOSIT_TOKEN,
+        chainId: 42220,
+        networkId: 'celo-mainnet',
       },
       version: 'v2-2026-06-30',
     })
@@ -76,6 +83,20 @@ describe('GET /api/meta/contracts/neeru', () => {
       NOT_OWNER: '0x30cd7471',
     })
     expect(res.body.version).toBeNull()
+  })
+
+  it('returns null depositToken when NEERU_DEPOSIT_TOKEN_ADDRESS is unset', async () => {
+    const app = loadFreshApp({
+      NEERU_CONTRACT_ADDRESS: CONTRACT,
+      NEERU_DEPOSIT_TOKEN_ADDRESS: undefined,
+      NEERU_DEPOSIT_EVENT_TOPIC0: DEPOSIT_TOPIC0,
+    })
+    const res = await request(app).get('/api/meta/contracts/neeru')
+    expect(res.status).toBe(200)
+    expect(res.body.depositToken).toBeNull()
+    // Other fields still present.
+    expect(res.body.proxyAddress).toBe(CONTRACT)
+    expect(res.body.events.Deposit).toBeDefined()
   })
 
   it('returns null proxyAddress when NEERU_CONTRACT_ADDRESS is unset', async () => {

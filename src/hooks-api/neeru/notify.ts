@@ -13,7 +13,7 @@ import type {
   CurrentPayoutIfClosed,
   NeeruPositionDetail,
 } from './detail'
-import { monthlyYieldPercent } from './positions'
+import { annualEffectivePercent, monthlyYieldPercent } from './positions'
 
 const SECONDS_PER_DAY = 86_400
 
@@ -147,6 +147,7 @@ export async function buildProvisionalDeposit(
   // The wallet supersedes this once the indexer surfaces the real value.
   const rateRay = args.categoryRateRay(category)
   const monthly = rateRay != null ? monthlyYieldPercent(rateRay) : 0
+  const annual = annualEffectivePercent(monthly)
 
   const payout: CurrentPayoutIfClosed = {
     amount: amountStr,
@@ -164,6 +165,7 @@ export async function buildProvisionalDeposit(
     amount: amountStr,
     accruedInterest: '0',
     monthlyRatePercentage: monthly,
+    annualEffectivePercentage: annual,
     startTs,
     endTs,
     depositBlock: Number(receipt.blockNumber),
