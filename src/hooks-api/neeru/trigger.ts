@@ -37,12 +37,11 @@ const TOKEN_INFO_TTL_MS = 30_000
 const VALID_CATEGORIES: ReadonlySet<number> = new Set([0, 1, 2, 3])
 const POSITION_ID_RE = /^\d+$/
 
-// Custom-error selectors that the earn-vault contract can revert with on
-// a close call. Values come from the deployed contract; the mapping to
-// human-readable `reason` strings lets the wallet branch UX without
-// having to import the partner-contract ABI. Any selector not in this
-// map propagates as `UNKNOWN` so the wallet still gets a hint that
-// simulation failed.
+// Selector -> reason mapping used when a simulation-first close call
+// reverts. Selectors are 4-byte hex (bytecode-recoverable). Reasons are
+// wire-boundary strings the wallet branches on to render UX. Any
+// selector not in this map propagates as `UNKNOWN` so the caller still
+// gets a hint that simulation failed.
 export type SimulationReason =
   | 'INTEREST_POOL_LOW'
   | 'ALREADY_CLOSED'
