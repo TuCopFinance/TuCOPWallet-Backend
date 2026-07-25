@@ -44,6 +44,7 @@ describe('GET /api/meta/contracts/neeru', () => {
             { type: 'uint8' },
             { type: 'uint256' },
             { type: 'uint256' },
+            { type: 'uint256' },
           ],
         },
       },

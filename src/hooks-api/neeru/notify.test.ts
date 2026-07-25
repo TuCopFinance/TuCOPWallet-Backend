@@ -3,28 +3,32 @@ import { buildProvisionalDeposit } from './notify'
 import { CONTRACT_ADDRESS } from '../../neeru-indexer/abi'
 
 const ORIGINAL_ENV = { ...process.env }
-const DEPOSIT_TOPIC0 =
-  '0x12ef563408f10ef4a1dde37b59a2538dcc75957c7e154bf71deea27089689653'
-const USER = '0x8427e4409b73a31b9d4e0d210677c88877472ece'
+// Synthetic topic0 matching whatever NEERU_DEPOSIT_EVENT_TOPIC0 the test
+// sets on process.env. The value below is a placeholder used only to
+// route the log filter through the "match" branch of buildProvisionalDeposit.
+const EVENT_TOPIC0 =
+  '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+const USER = '0x1111111111111111111111111111111111111111'
 const TX = '0xaabbccddeeff11223344556677889900aabbccddeeff11223344556677889900'
 
 beforeAll(() => {
-  process.env.NEERU_DEPOSIT_EVENT_TOPIC0 = DEPOSIT_TOPIC0
+  process.env.NEERU_DEPOSIT_EVENT_TOPIC0 = EVENT_TOPIC0
 })
 afterAll(() => {
   process.env = { ...ORIGINAL_ENV }
 })
 
-// Encode {category=1, amount=1_000e18, rateValue=RAY+1} as the Deposit
-// event data (three non-indexed args). Layout matches the wallet's
-// DEPOSIT_EVENT_DATA_SCHEMA in PR #265.
-function encodeDepositData(
-  category: number,
-  amount: bigint,
-  rateValue: bigint,
+// Encode four positional uint slots (r0..r3) as the log.data bytes.
+// r0 is uint8 in the deployed event, r1..r3 are uint256; all four get
+// left-padded to 32 bytes as viem's decodeAbiParameters expects.
+function encodeEventData(
+  r0: number,
+  r1: bigint,
+  r2: bigint,
+  r3: bigint,
 ): `0x${string}` {
   const hex = (v: bigint) => v.toString(16).padStart(64, '0')
-  return `0x${hex(BigInt(category))}${hex(amount)}${hex(rateValue)}` as `0x${string}`
+  return `0x${hex(BigInt(r0))}${hex(r1)}${hex(r2)}${hex(r3)}` as `0x${string}`
 }
 
 function padAddress(addr: string): `0x${string}` {
@@ -37,18 +41,12 @@ function padPositionId(id: bigint): `0x${string}` {
 
 function makeClient(overrides: {
   receipt?: unknown
-  block?: unknown
   receiptError?: unknown
-  blockError?: unknown
 }): PublicClient {
   return {
     getTransactionReceipt: jest.fn(async () => {
       if (overrides.receiptError) throw overrides.receiptError
       return overrides.receipt
-    }),
-    getBlock: jest.fn(async () => {
-      if (overrides.blockError) throw overrides.blockError
-      return overrides.block
     }),
   } as unknown as PublicClient
 }
@@ -61,24 +59,31 @@ const HAPPY_RECEIPT = {
     {
       address: CONTRACT_ADDRESS,
       topics: [
-        DEPOSIT_TOPIC0,
+        EVENT_TOPIC0,
         padAddress(USER),
         padPositionId(42n),
       ] as `0x${string}`[],
-      data: encodeDepositData(1, 1_000_000_000_000_000_000_000n, (10n ** 27n) + 1n),
+      // r0=1 (category), r1=1000e18 (amount), r2=1_700_000_000 (startTs),
+      // r3=1_700_000_000 + 7d (endTs).
+      data: encodeEventData(
+        1,
+        1_000_000_000_000_000_000_000n,
+        1_700_000_000n,
+        1_700_000_000n + BigInt(7 * 86400),
+      ),
     },
   ],
 }
-const HAPPY_BLOCK = { timestamp: 1_700_000_000n }
 
 describe('buildProvisionalDeposit', () => {
   it('returns a provisional position with correct fields on the happy path', async () => {
-    const client = makeClient({ receipt: HAPPY_RECEIPT, block: HAPPY_BLOCK })
+    const client = makeClient({ receipt: HAPPY_RECEIPT })
     const outcome = await buildProvisionalDeposit({
       address: USER,
       txHash: TX,
       client,
       categorySecs: (c) => (c === 1 ? BigInt(7 * 86400) : null),
+      categoryRateRay: () => 10n ** 27n,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('ok')
@@ -113,20 +118,21 @@ describe('buildProvisionalDeposit', () => {
         {
           address: CONTRACT_ADDRESS,
           topics: [
-            DEPOSIT_TOPIC0,
+            EVENT_TOPIC0,
             padAddress(USER),
             padPositionId(7n),
           ] as `0x${string}`[],
-          data: encodeDepositData(0, 500n * 10n ** 18n, 10n ** 27n),
+          data: encodeEventData(0, 500n * 10n ** 18n, 1_700_000_000n, 0n),
         },
       ],
     }
-    const client = makeClient({ receipt, block: HAPPY_BLOCK })
+    const client = makeClient({ receipt })
     const outcome = await buildProvisionalDeposit({
       address: USER,
       txHash: TX,
       client,
       categorySecs: (c) => (c === 0 ? 0n : null),
+      categoryRateRay: () => 10n ** 27n,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('ok')
@@ -140,27 +146,31 @@ describe('buildProvisionalDeposit', () => {
 
   it('returns not_configured when NEERU_DEPOSIT_EVENT_TOPIC0 is unset', async () => {
     delete process.env.NEERU_DEPOSIT_EVENT_TOPIC0
-    const client = makeClient({ receipt: HAPPY_RECEIPT, block: HAPPY_BLOCK })
+    const client = makeClient({ receipt: HAPPY_RECEIPT })
     const outcome = await buildProvisionalDeposit({
       address: USER,
       txHash: TX,
       client,
       categorySecs: () => null,
+      categoryRateRay: () => null,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('not_configured')
-    process.env.NEERU_DEPOSIT_EVENT_TOPIC0 = DEPOSIT_TOPIC0
+    process.env.NEERU_DEPOSIT_EVENT_TOPIC0 = EVENT_TOPIC0
   })
 
   it('returns not_found when the RPC says receipt not found', async () => {
     const client = makeClient({
-      receiptError: new Error('Transaction receipt with hash "..." could not be found.'),
+      receiptError: new Error(
+        'Transaction receipt with hash "..." could not be found.',
+      ),
     })
     const outcome = await buildProvisionalDeposit({
       address: USER,
       txHash: TX,
       client,
       categorySecs: () => null,
+      categoryRateRay: () => null,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('not_found')
@@ -173,6 +183,7 @@ describe('buildProvisionalDeposit', () => {
       txHash: TX,
       client,
       categorySecs: () => null,
+      categoryRateRay: () => null,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('rpc_error')
@@ -187,48 +198,50 @@ describe('buildProvisionalDeposit', () => {
       txHash: TX,
       client,
       categorySecs: () => null,
+      categoryRateRay: () => null,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('not_deposit')
   })
 
-  it('returns not_deposit when no Deposit event log is present', async () => {
+  it('returns not_deposit when no matching log is present', async () => {
     const client = makeClient({
       receipt: { ...HAPPY_RECEIPT, logs: [] },
-      block: HAPPY_BLOCK,
     })
     const outcome = await buildProvisionalDeposit({
       address: USER,
       txHash: TX,
       client,
       categorySecs: () => null,
+      categoryRateRay: () => null,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('not_deposit')
   })
 
   it('returns wrong_address when the depositor topic does not match the caller', async () => {
-    const other = '0x1111111111111111111111111111111111111111'
+    const other = '0x2222222222222222222222222222222222222222'
     const receipt = {
       ...HAPPY_RECEIPT,
       logs: [
         {
           address: CONTRACT_ADDRESS,
           topics: [
-            DEPOSIT_TOPIC0,
+            EVENT_TOPIC0,
             padAddress(other),
             padPositionId(1n),
           ] as `0x${string}`[],
-          data: encodeDepositData(1, 100n * 10n ** 18n, 10n ** 27n),
+          data: encodeEventData(1, 100n * 10n ** 18n, 1_700_000_000n, 0n),
         },
       ],
     }
-    const client = makeClient({ receipt, block: HAPPY_BLOCK })
+    const client = makeClient({ receipt })
     const outcome = await buildProvisionalDeposit({
       address: USER,
       txHash: TX,
       client,
       categorySecs: () => 0n,
+      categoryRateRay: () => null,
       depositDecimals: 18,
     })
     expect(outcome.kind).toBe('wrong_address')
