@@ -139,6 +139,16 @@ export function monthlyYieldPercent(rateRaw: bigint): number {
   return Number(scaled) / 1_000_000
 }
 
+// Colombian financial convention: quotes are monthly effective (M.V.); the
+// headline shown to users is the annual effective (E.A.) so it compares
+// against every other yield surface. Exact: E.A. = ((1 + M.V./100)^12 - 1) * 100.
+export function annualEffectivePercent(monthlyPct: number): number {
+  if (!Number.isFinite(monthlyPct) || monthlyPct <= 0) return 0
+  const monthly = monthlyPct / 100
+  const annual = (Math.pow(1 + monthly, 12) - 1) * 100
+  return Number(annual.toFixed(6))
+}
+
 interface FetchCatalogueDeps {
   rpc: NeeruIndexerRpcClient
   now?: () => number
@@ -206,6 +216,55 @@ async function fetchCatalogue(
     token: { decimals, symbol },
   }
   return catalogueCache
+}
+
+// Wire-shaped catalogue for the /api/earn/neeru/catalogue endpoint.
+// Fields intentionally use opaque positional names (r0..r3 -> secs/rate) so
+// the response documents ordering without echoing internal on-chain names.
+export interface NeeruCatalogueEntry {
+  id: number
+  secs: string
+  rateRay: string
+  monthlyRatePercentage: number
+  annualEffectivePercentage: number
+}
+
+export interface NeeruCatalogueSnapshot {
+  categories: NeeruCatalogueEntry[]
+  token: {
+    address: string
+    decimals: number
+    symbol: string
+  }
+  fetchedAt: string
+}
+
+export async function getNeeruCatalogueSnapshot(
+  rpc: NeeruIndexerRpcClient,
+  opts?: { now?: () => number },
+): Promise<NeeruCatalogueSnapshot> {
+  const snapshot = await fetchCatalogue({ rpc, now: opts?.now })
+  const entries: NeeruCatalogueEntry[] = snapshot.categories.map(
+    (read, id) => {
+      const monthly = monthlyYieldPercent(read.r0)
+      return {
+        id,
+        secs: read.r1.toString(),
+        rateRay: read.r0.toString(),
+        monthlyRatePercentage: monthly,
+        annualEffectivePercentage: annualEffectivePercent(monthly),
+      }
+    },
+  )
+  return {
+    categories: entries,
+    token: {
+      address: NEERU_DEPOSIT_TOKEN_ADDRESS,
+      decimals: snapshot.token.decimals,
+      symbol: snapshot.token.symbol,
+    },
+    fetchedAt: new Date(snapshot.fetchedAtMs).toISOString(),
+  }
 }
 
 interface UserAggregate {
