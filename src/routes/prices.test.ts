@@ -1,19 +1,80 @@
 import request from 'supertest'
 import { app } from '../app'
 import * as cmc from '../lib/coinmarketcap'
+import * as redisMod from '../lib/redis'
 
 jest.mock('../lib/coinmarketcap')
+
+// Redis is mocked as a simple in-memory Map per test so we can exercise the
+// fresh/stale write paths without a real Redis server. Individual tests can
+// override getRedis to return null to simulate a Redis-less deployment.
 jest.mock('../lib/redis', () => ({
-  getRedis: () => null,
+  getRedis: jest.fn(),
 }))
 
 const mockGetXautPriceUsd = cmc.getXautPriceUsd as jest.MockedFunction<
   typeof cmc.getXautPriceUsd
 >
+const mockGetRedis = redisMod.getRedis as jest.MockedFunction<
+  typeof redisMod.getRedis
+>
+
+interface StoreEntry {
+  value: string
+  expiresAtMs: number
+}
+
+function buildFakeRedis(): {
+  fake: {
+    get: (key: string) => Promise<string | null>
+    set: (
+      key: string,
+      value: string,
+      mode: 'EX',
+      seconds: number,
+    ) => Promise<'OK'>
+  }
+  seed: (key: string, payload: unknown, ttlSeconds: number) => void
+} {
+  const store = new Map<string, StoreEntry>()
+  return {
+    fake: {
+      get: async (key: string) => {
+        const entry = store.get(key)
+        if (!entry) return null
+        if (entry.expiresAtMs <= Date.now()) {
+          store.delete(key)
+          return null
+        }
+        return entry.value
+      },
+      set: async (
+        key: string,
+        value: string,
+        _mode: 'EX',
+        seconds: number,
+      ) => {
+        store.set(key, {
+          value,
+          expiresAtMs: Date.now() + seconds * 1000,
+        })
+        return 'OK' as const
+      },
+    },
+    seed: (key: string, payload: unknown, ttlSeconds: number) => {
+      store.set(key, {
+        value: JSON.stringify(payload),
+        expiresAtMs: Date.now() + ttlSeconds * 1000,
+      })
+    },
+  }
+}
 
 describe('GET /api/prices/xaut', () => {
   beforeEach(() => {
     mockGetXautPriceUsd.mockReset()
+    mockGetRedis.mockReset()
+    mockGetRedis.mockReturnValue(null)
   })
 
   it('returns USD price with required shape', async () => {
@@ -51,12 +112,109 @@ describe('GET /api/prices/xaut', () => {
     expect(mockGetXautPriceUsd).not.toHaveBeenCalled()
   })
 
-  it('returns 502 when upstream price feed fails', async () => {
+  it('returns 502 when upstream fails and no cached copy exists', async () => {
     mockGetXautPriceUsd.mockRejectedValueOnce(new Error('CMC unreachable'))
 
     const res = await request(app).get('/api/prices/xaut?vs=usd')
 
     expect(res.status).toBe(502)
     expect(res.body).toMatchObject({ error: expect.any(String) })
+    expect(res.headers['x-stale']).toBeUndefined()
+  })
+
+  it('writes both fresh and stale cache keys on successful upstream fetch', async () => {
+    const { fake } = buildFakeRedis()
+    const setSpy = jest.spyOn(fake, 'set')
+    mockGetRedis.mockReturnValue(
+      fake as unknown as ReturnType<typeof redisMod.getRedis>,
+    )
+    mockGetXautPriceUsd.mockResolvedValueOnce({
+      priceUsd: 4082.17,
+      asOf: '2026-07-27T02:57:05.000Z',
+    })
+
+    const res = await request(app).get('/api/prices/xaut?vs=usd')
+
+    expect(res.status).toBe(200)
+    // Fresh key: 60s TTL. Stale key: 24h TTL.
+    const calls = setSpy.mock.calls
+    expect(calls).toHaveLength(2)
+    const fresh = calls[0]!
+    const stale = calls[1]!
+    expect(fresh[0]).toBe('price:xaut:usd:fresh')
+    expect(fresh[3]).toBe(60)
+    expect(stale[0]).toBe('price:xaut:usd:stale')
+    expect(stale[3]).toBe(24 * 60 * 60)
+  })
+
+  it('serves fresh cache without hitting upstream when fresh key exists', async () => {
+    const { fake, seed } = buildFakeRedis()
+    mockGetRedis.mockReturnValue(
+      fake as unknown as ReturnType<typeof redisMod.getRedis>,
+    )
+    seed(
+      'price:xaut:usd:fresh',
+      {
+        symbol: 'XAUT',
+        vs: 'usd',
+        priceUsd: 4000,
+        asOf: '2026-07-27T02:00:00.000Z',
+      },
+      60,
+    )
+
+    const res = await request(app).get('/api/prices/xaut?vs=usd')
+
+    expect(res.status).toBe(200)
+    expect(res.body.priceUsd).toBe(4000)
+    expect(mockGetXautPriceUsd).not.toHaveBeenCalled()
+    // Fresh path emits no stale headers.
+    expect(res.headers['x-stale']).toBeUndefined()
+  })
+
+  it('serves stale-cache with X-Stale headers when upstream fails but stale key exists', async () => {
+    const { fake, seed } = buildFakeRedis()
+    mockGetRedis.mockReturnValue(
+      fake as unknown as ReturnType<typeof redisMod.getRedis>,
+    )
+    // Fresh key absent (expired), stale key populated with a 5-minute-old
+    // asOf so we can assert the X-Stale-Age header.
+    const fiveMinutesAgoIso = new Date(Date.now() - 5 * 60 * 1000).toISOString()
+    seed(
+      'price:xaut:usd:stale',
+      {
+        symbol: 'XAUT',
+        vs: 'usd',
+        priceUsd: 4050,
+        asOf: fiveMinutesAgoIso,
+      },
+      24 * 60 * 60,
+    )
+    mockGetXautPriceUsd.mockRejectedValueOnce(new Error('CMC 500'))
+
+    const res = await request(app).get('/api/prices/xaut?vs=usd')
+
+    expect(res.status).toBe(200)
+    expect(res.body.priceUsd).toBe(4050)
+    expect(res.headers['x-stale']).toBe('true')
+    // Stale age is at least 300s (5 min), with a bit of slack for test
+    // execution time.
+    const staleAge = Number(res.headers['x-stale-age'])
+    expect(staleAge).toBeGreaterThanOrEqual(300)
+    expect(staleAge).toBeLessThan(360)
+    expect(res.headers['cache-control']).toBe('max-age=0, must-revalidate')
+  })
+
+  it('falls through to 502 when upstream fails and stale key is empty', async () => {
+    const { fake } = buildFakeRedis()
+    mockGetRedis.mockReturnValue(
+      fake as unknown as ReturnType<typeof redisMod.getRedis>,
+    )
+    mockGetXautPriceUsd.mockRejectedValueOnce(new Error('CMC 500'))
+
+    const res = await request(app).get('/api/prices/xaut?vs=usd')
+
+    expect(res.status).toBe(502)
+    expect(res.headers['x-stale']).toBeUndefined()
   })
 })
