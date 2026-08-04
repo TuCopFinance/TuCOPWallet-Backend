@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express'
+import { isNeeruWarmupReady } from '../hooks-api/neeru/warmup'
 import { getCeloPublicClient } from '../lib/celoClient'
 import { getDb } from '../lib/db'
 import { createLogger } from '../lib/logger'
@@ -79,13 +80,23 @@ router.get('/api/health', livenessHandler)
 // via retryAfterMiddleware in app.ts so clients back off.
 async function readinessHandler(_req: Request, res: Response): Promise<void> {
   const [db, redis, rpc] = await Promise.all([probeDb(), probeRedis(), probeRpc()])
-  const allOk = db.ok && redis.ok && rpc.ok
+  // When the Neeru warmup is running (NEERU_INDEXER_ENABLED=true at boot),
+  // gate readiness on its first tick completing so Railway does not route
+  // traffic to a container whose shared Neeru RPC client has never opened
+  // a socket. Without this the very first request post-deploy still pays
+  // the cold TLS reconnect (measured 16.5s on the fix deploy 2026-08-04
+  // when the request landed before the warmup's first tick finished).
+  // Warmup off (tests, envs without the flag) skips this check entirely.
+  const warmupEnabled = process.env.NEERU_INDEXER_ENABLED === 'true'
+  const warmupReady = warmupEnabled ? isNeeruWarmupReady() : true
+  const allOk = db.ok && redis.ok && rpc.ok && warmupReady
   res.status(allOk ? 200 : 503).json({
     ok: allOk,
     checks: {
       db: db.ok ? 'ok' : `fail: ${db.error}`,
       redis: redis.ok ? 'ok' : `fail: ${redis.error}`,
       rpc: rpc.ok ? 'ok' : `fail: ${rpc.error}`,
+      ...(warmupEnabled ? { neeruWarmup: warmupReady ? 'ok' : 'warming' } : {}),
     },
   })
 }

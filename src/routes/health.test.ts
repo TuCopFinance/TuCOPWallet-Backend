@@ -1,4 +1,8 @@
 import request from 'supertest'
+import {
+  _resetNeeruWarmupReadyForTests,
+  _setNeeruWarmupReadyForTests,
+} from '../hooks-api/neeru/warmup'
 
 const mockQuery = jest.fn()
 const mockPing = jest.fn()
@@ -127,6 +131,55 @@ describe('GET /ready', () => {
     const res = await request(app).get('/ready')
     expect(res.status).toBe(200)
     expect(res.body.checks).toEqual({ db: 'ok', redis: 'ok', rpc: 'ok' })
+  })
+})
+
+describe('GET /ready with Neeru warmup gate', () => {
+  const ORIGINAL_FLAG = process.env.NEERU_INDEXER_ENABLED
+
+  beforeEach(() => {
+    mockQuery.mockReset()
+    mockPing.mockReset()
+    mockGetBlockNumber.mockReset()
+    dbStub = { query: mockQuery }
+    redisStub = { ping: mockPing }
+    mockQuery.mockResolvedValue({ rows: [{ '?column?': 1 }] })
+    mockPing.mockResolvedValue('PONG')
+    mockGetBlockNumber.mockResolvedValue(123n)
+  })
+
+  afterEach(() => {
+    if (ORIGINAL_FLAG === undefined) delete process.env.NEERU_INDEXER_ENABLED
+    else process.env.NEERU_INDEXER_ENABLED = ORIGINAL_FLAG
+    _resetNeeruWarmupReadyForTests()
+  })
+
+  it('503 with neeruWarmup=warming when flag is on but tick has not completed', async () => {
+    process.env.NEERU_INDEXER_ENABLED = 'true'
+    _resetNeeruWarmupReadyForTests()
+    const res = await request(app).get('/ready')
+    expect(res.status).toBe(503)
+    expect(res.body.ok).toBe(false)
+    expect(res.body.checks.neeruWarmup).toBe('warming')
+    // The other checks still pass, so warmup is the isolated blocker.
+    expect(res.body.checks.db).toBe('ok')
+    expect(res.body.checks.redis).toBe('ok')
+    expect(res.body.checks.rpc).toBe('ok')
+  })
+
+  it('200 with neeruWarmup=ok once the warmup readiness flag flips true', async () => {
+    process.env.NEERU_INDEXER_ENABLED = 'true'
+    _setNeeruWarmupReadyForTests(true)
+    const res = await request(app).get('/ready')
+    expect(res.status).toBe(200)
+    expect(res.body.checks.neeruWarmup).toBe('ok')
+  })
+
+  it('200 without neeruWarmup key when flag is off (default)', async () => {
+    delete process.env.NEERU_INDEXER_ENABLED
+    const res = await request(app).get('/ready')
+    expect(res.status).toBe(200)
+    expect(res.body.checks.neeruWarmup).toBeUndefined()
   })
 })
 
