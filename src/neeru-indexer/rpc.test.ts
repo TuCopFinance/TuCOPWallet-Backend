@@ -53,15 +53,17 @@ function buildMockClients(opts: MockClientOptions): MockClients {
 // observed returning block=0 while 200-OK) does not thrash retries when
 // the healthy upstreams could serve the request.
 describe('createNeeruRpc', () => {
-  it('tries Forno first, succeeds, never falls through', async () => {
+  // Order (2026-08-04): [ankr, forno, drpc, primary]. See rpc.ts header
+  // comment for the ordering rationale.
+  it('tries Ankr first, succeeds, never falls through', async () => {
     const mocks = buildMockClients({
       primaryBehavior: async () => {
         throw new Error('should not be called')
       },
-      fornoBehavior: async () => 100n,
-      ankrBehavior: async () => {
+      fornoBehavior: async () => {
         throw new Error('should not be called')
       },
+      ankrBehavior: async () => 100n,
       drpcBehavior: async () => {
         throw new Error('should not be called')
       },
@@ -75,21 +77,21 @@ describe('createNeeruRpc', () => {
       },
     })
     expect(await rpc.getBlockNumber()).toBe(100n)
-    expect(mocks.calls).toEqual(['forno'])
+    expect(mocks.calls).toEqual(['ankr'])
   })
 
-  it('falls back to dRPC when Forno fails once', async () => {
+  it('falls back to Forno when Ankr fails once', async () => {
     const mocks = buildMockClients({
       primaryBehavior: async () => {
         throw new Error('should not be called')
       },
-      fornoBehavior: async () => {
-        throw new Error('forno 503')
-      },
+      fornoBehavior: async () => 200n,
       ankrBehavior: async () => {
+        throw new Error('ankr 503')
+      },
+      drpcBehavior: async () => {
         throw new Error('should not be called')
       },
-      drpcBehavior: async () => 200n,
     })
     const rpc = createNeeruRpc({
       endpoints: {
@@ -100,7 +102,7 @@ describe('createNeeruRpc', () => {
       },
     })
     expect(await rpc.getBlockNumber()).toBe(200n)
-    expect(mocks.calls).toEqual(['forno', 'drpc'])
+    expect(mocks.calls).toEqual(['ankr', 'forno'])
   })
 
   it('cascades all the way to primary (last-resort celocolombia) when the first three fail', async () => {
@@ -125,7 +127,7 @@ describe('createNeeruRpc', () => {
       },
     })
     expect(await rpc.getBlockNumber()).toBe(300n)
-    expect(mocks.calls).toEqual(['forno', 'drpc', 'ankr', 'primary'])
+    expect(mocks.calls).toEqual(['ankr', 'forno', 'drpc', 'primary'])
   })
 
   it('cascades past an endpoint that returns block=0 as if it threw', async () => {
@@ -134,16 +136,18 @@ describe('createNeeruRpc', () => {
     // while multicall threw; the previous fallback treated that as a
     // valid successful result and never cascaded. Now the sanity check
     // in getBlockNumber turns the bad-data case into a throw and the
-    // iterator continues to the next endpoint.
+    // iterator continues to the next endpoint. Same guard applies
+    // regardless of position, so this test uses ankr as the degraded
+    // endpoint to reflect the current chain order.
     const mocks = buildMockClients({
       primaryBehavior: async () => {
         throw new Error('should not be called')
       },
-      fornoBehavior: async () => 0n, // degraded silently
-      ankrBehavior: async () => {
+      fornoBehavior: async () => 400n, // healthy fallback
+      ankrBehavior: async () => 0n, // degraded silently
+      drpcBehavior: async () => {
         throw new Error('should not be called')
       },
-      drpcBehavior: async () => 400n, // healthy fallback
     })
     const rpc = createNeeruRpc({
       endpoints: {
@@ -154,7 +158,7 @@ describe('createNeeruRpc', () => {
       },
     })
     expect(await rpc.getBlockNumber()).toBe(400n)
-    expect(mocks.calls).toEqual(['forno', 'drpc'])
+    expect(mocks.calls).toEqual(['ankr', 'forno'])
   })
 
   it('throws when all four endpoints fail, with all error contexts', async () => {

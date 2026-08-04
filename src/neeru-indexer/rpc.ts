@@ -145,15 +145,33 @@ export function createNeeruRpc(
   const drpcUrl = getDrpcRpcUrl()
 
   // Order matters: withFallback iterates this array and returns the first
-  // client that answers without throwing. Forno first because it is the
-  // canonical public Celo RPC and has been the most reliable endpoint in
-  // observation. drpc + ankr next as diverse-provider fallbacks. `primary`
-  // (rpc.celocolombia.org today) kept in the chain as last resort because
-  // it degrades non-obviously (has been observed returning block=0 while
-  // still 200-OK on the wire), so we want the 3-consecutive-failure skip
-  // window applied to it rather than to a healthy endpoint. See journal
-  // entry 2026-08-03 for the incident that motivated this ordering.
+  // client that answers without throwing.
+  //
+  // History (2026-08-04):
+  //   * Original: [primary(celocolombia), forno, ankr, drpc]
+  //   * PR #157:  [forno, drpc, ankr, primary] - celocolombia had silent
+  //     degradation (200 OK with block=0), forno promoted to first.
+  //   * PR #159:  added getBlockNumber/getBlock sanity checks so silent
+  //     degradation cascades regardless of position.
+  //   * THIS PR:  [ankr, forno, drpc, primary] - forno started rate-limiting
+  //     our Railway egress IP with Cloudflare 1015 (429 on every call),
+  //     causing 24s cold-hits as the fallback cascade + retry backoff
+  //     stacked. Ankr promoted because it was the only endpoint responding
+  //     cleanly from Railway. Forno kept in the chain as it recovers
+  //     periodically (rate limit is a per-window ban, not a permanent block).
+  //     drpc third because it rejects eth_getLogs with "block out of range"
+  //     for some indexer queries. celocolombia last as before (still gets
+  //     the skip window on the observed degradation pattern).
+  //
+  // If ankr starts degrading, promote whichever endpoint is currently
+  // healthy. The skip window remains attached by `name === 'primary'`,
+  // not by array position, so reordering is safe.
   const endpoints: Endpoint[] = [
+    {
+      name: 'ankr',
+      url: ankrUrl,
+      client: options.endpoints?.ankr ?? makeClient(ankrUrl),
+    },
     {
       name: 'forno',
       url: fornoUrl,
@@ -163,11 +181,6 @@ export function createNeeruRpc(
       name: 'drpc',
       url: drpcUrl,
       client: options.endpoints?.drpc ?? makeClient(drpcUrl),
-    },
-    {
-      name: 'ankr',
-      url: ankrUrl,
-      client: options.endpoints?.ankr ?? makeClient(ankrUrl),
     },
     {
       name: 'primary',
