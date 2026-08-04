@@ -122,16 +122,25 @@ export function createNeeruRpc(
   const ankrUrl = getAnkrRpcUrl()
   const drpcUrl = getDrpcRpcUrl()
 
+  // Order matters: withFallback iterates this array and returns the first
+  // client that answers without throwing. Forno first because it is the
+  // canonical public Celo RPC and has been the most reliable endpoint in
+  // observation. drpc + ankr next as diverse-provider fallbacks. `primary`
+  // (rpc.celocolombia.org today) kept in the chain as last resort because
+  // it degrades non-obviously (has been observed returning block=0 while
+  // still 200-OK on the wire), so we want the 3-consecutive-failure skip
+  // window applied to it rather than to a healthy endpoint. See journal
+  // entry 2026-08-03 for the incident that motivated this ordering.
   const endpoints: Endpoint[] = [
-    {
-      name: 'primary',
-      url: primaryUrl,
-      client: options.endpoints?.primary ?? makeClient(primaryUrl),
-    },
     {
       name: 'forno',
       url: fornoUrl,
       client: options.endpoints?.forno ?? makeClient(fornoUrl),
+    },
+    {
+      name: 'drpc',
+      url: drpcUrl,
+      client: options.endpoints?.drpc ?? makeClient(drpcUrl),
     },
     {
       name: 'ankr',
@@ -139,9 +148,9 @@ export function createNeeruRpc(
       client: options.endpoints?.ankr ?? makeClient(ankrUrl),
     },
     {
-      name: 'drpc',
-      url: drpcUrl,
-      client: options.endpoints?.drpc ?? makeClient(drpcUrl),
+      name: 'primary',
+      url: primaryUrl,
+      client: options.endpoints?.primary ?? makeClient(primaryUrl),
     },
   ]
 
