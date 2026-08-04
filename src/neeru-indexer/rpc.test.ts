@@ -128,6 +128,35 @@ describe('createNeeruRpc', () => {
     expect(mocks.calls).toEqual(['forno', 'drpc', 'ankr', 'primary'])
   })
 
+  it('cascades past an endpoint that returns block=0 as if it threw', async () => {
+    // Silent-degradation guard. rpc.celocolombia.org was observed on
+    // 2026-08-03 responding HTTP 200 with block=0 to eth_blockNumber
+    // while multicall threw; the previous fallback treated that as a
+    // valid successful result and never cascaded. Now the sanity check
+    // in getBlockNumber turns the bad-data case into a throw and the
+    // iterator continues to the next endpoint.
+    const mocks = buildMockClients({
+      primaryBehavior: async () => {
+        throw new Error('should not be called')
+      },
+      fornoBehavior: async () => 0n, // degraded silently
+      ankrBehavior: async () => {
+        throw new Error('should not be called')
+      },
+      drpcBehavior: async () => 400n, // healthy fallback
+    })
+    const rpc = createNeeruRpc({
+      endpoints: {
+        primary: mocks.primary,
+        forno: mocks.forno,
+        ankr: mocks.ankr,
+        drpc: mocks.drpc,
+      },
+    })
+    expect(await rpc.getBlockNumber()).toBe(400n)
+    expect(mocks.calls).toEqual(['forno', 'drpc'])
+  })
+
   it('throws when all four endpoints fail, with all error contexts', async () => {
     const mocks = buildMockClients({
       primaryBehavior: async () => {
@@ -210,6 +239,43 @@ describe('createNeeruRpc', () => {
     } as never)
     expect(result).toEqual(fakeReturn)
     expect(multicallCalls).toHaveLength(1)
+  })
+
+  it('getBlock cascades past an endpoint that returns timestamp=0 as if it threw', async () => {
+    // Same silent-degradation guard as the block=0 case above. A block
+    // response with timestamp=0 (or number=0 for a non-genesis fetch)
+    // is treated as untrusted data and turned into a throw so the
+    // iterator cascades.
+    const calls: Call[] = []
+    const forno = {
+      getBlock: async (args: { blockNumber: bigint }) => {
+        calls.push('forno')
+        return { number: args.blockNumber, timestamp: 0n } // degraded
+      },
+    } as unknown as PublicClient
+    const drpc = {
+      getBlock: async (args: { blockNumber: bigint }) => {
+        calls.push('drpc')
+        return { number: args.blockNumber, timestamp: 1_700_000_000n }
+      },
+    } as unknown as PublicClient
+    const ankr = {
+      getBlock: async () => {
+        throw new Error('should not be called')
+      },
+    } as unknown as PublicClient
+    const primary = {
+      getBlock: async () => {
+        throw new Error('should not be called')
+      },
+    } as unknown as PublicClient
+    const rpc = createNeeruRpc({
+      endpoints: { primary, forno, ankr, drpc },
+    })
+    const block = await rpc.getBlock({ blockNumber: 1_234_568n })
+    expect(block.number).toBe(1_234_568n)
+    expect(block.timestamp).toBe(1_700_000_000n)
+    expect(calls).toEqual(['forno', 'drpc'])
   })
 
   it('getBlock returns number + timestamp from the Forno endpoint', async () => {

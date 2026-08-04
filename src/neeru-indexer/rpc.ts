@@ -214,15 +214,37 @@ export function createNeeruRpc(
 
   return {
     async getBlockNumber(): Promise<bigint> {
-      return withFallback('getBlockNumber', (client) => client.getBlockNumber())
+      // Sanity-check the return value before handing it to the worker.
+      // A silently-degraded RPC (observed 2026-08-03 on the previous
+      // "primary" endpoint) can respond HTTP 200 with block=0, which
+      // withFallback would otherwise treat as a valid successful result
+      // and never cascade. Throwing here turns the bad-data case into an
+      // exception the fallback iterator handles like any other RPC error.
+      return withFallback('getBlockNumber', async (client) => {
+        const block = await client.getBlockNumber()
+        if (block <= 0n) {
+          throw new Error(
+            `RPC returned implausible block number ${block.toString()} - refusing to trust`,
+          )
+        }
+        return block
+      })
     },
 
     async getBlock(args): Promise<NeeruBlockSummary> {
+      // Same defensive rationale as getBlockNumber: reject implausible
+      // return shapes (block.number = 0 or block.timestamp = 0) so a
+      // silently-degraded RPC cascades instead of being trusted.
       return withFallback('getBlock', async (client) => {
         const block = await client.getBlock({
           blockNumber: args.blockNumber,
           includeTransactions: false,
         })
+        if (block.number <= 0n || block.timestamp <= 0n) {
+          throw new Error(
+            `RPC returned implausible block { number: ${block.number.toString()}, timestamp: ${block.timestamp.toString()} } for requested ${args.blockNumber.toString()} - refusing to trust`,
+          )
+        }
         return { number: block.number, timestamp: block.timestamp }
       })
     },
