@@ -24,7 +24,7 @@ import { app } from './app'
 import { runMigrations } from './db/migrate'
 import { getDb } from './lib/db'
 import { startNeeruWarmup } from './hooks-api/neeru/warmup'
-import { createNeeruRpc } from './neeru-indexer/rpc'
+import { getSharedNeeruRpc } from './neeru-indexer/rpc'
 import { startNeeruIndexer } from './neeru-indexer/worker'
 import { startTimelockIndexer } from './neeru-timelock/worker'
 import { resumePendingBackfills } from './transactions-indexer/backfill'
@@ -137,9 +137,14 @@ async function boot(): Promise<void> {
     // 2026-08-04: cold /api/earn/neeru/positions took 20-30s and blew
     // past the wallet's 15s NEERU_FETCH_TIMEOUT_MS, misleading users
     // into an empty state.
+    // getSharedNeeruRpc() returns the same singleton the 3 Neeru route
+    // handlers use, so the socket the warmup keeps warm IS the socket the
+    // wallet request will hit. Passing a fresh createNeeruRpc() here (as
+    // the initial 2026-08-04 fix did) warmed a dedicated client instead
+    // and the routes still paid the cold-reconnect on first hit.
     startNeeruWarmup({
       db: getDb()!,
-      rpc: createNeeruRpc(),
+      rpc: getSharedNeeruRpc(),
       signal: indexerAbort.signal,
     })
   }

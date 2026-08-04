@@ -7,7 +7,11 @@ import {
   getShortcuts as getAllbridgeShortcuts,
 } from '../apps/allbridge'
 import { APP_ID as ALLBRIDGE_APP_ID } from '../apps/allbridge/manifest'
-import { createNeeruRpc, type NeeruIndexerRpcClient } from '../neeru-indexer/rpc'
+import {
+  _setSharedNeeruRpcForTests,
+  getSharedNeeruRpc,
+  type NeeruIndexerRpcClient,
+} from '../neeru-indexer/rpc'
 import { hooksApiConfigured } from './config'
 import { mountNeeruDetailRoute } from './neeru/detail-route'
 import {
@@ -29,17 +33,11 @@ const log = createLogger('routes:hooks-api')
 
 const SUPPORTED_NETWORKS: ReadonlySet<NetworkId> = new Set(['celo-mainnet'])
 
-// Lazy: tests don't need the real RPC client. We construct on first use
-// so the module is import-safe even without network access.
-let rpcClient: NeeruIndexerRpcClient | null = null
-
-function getRpc(): NeeruIndexerRpcClient {
-  if (!rpcClient) rpcClient = createNeeruRpc()
-  return rpcClient
-}
-
+// All Neeru request-serving routes + the boot-time warmup MUST share ONE
+// rpc client so warmup's socket IS the socket the request will hit. See
+// getSharedNeeruRpc() in neeru-indexer/rpc.ts for the rationale.
 export function _setNeeruRpcForTests(client: NeeruIndexerRpcClient | null): void {
-  rpcClient = client
+  _setSharedNeeruRpcForTests(client)
 }
 
 function asArray(raw: unknown): string[] {
@@ -115,7 +113,7 @@ router.get('/hooks-api/getPositions', async (req: Request, res: Response) => {
       const neeru = await getNeeruHeldPositions({
         address,
         db,
-        rpc: getRpc(),
+        rpc: getSharedNeeruRpc(),
       })
       out.push(...neeru)
     } catch (err) {
@@ -201,7 +199,7 @@ router.get(
           const neeru = await getNeeruEarnPositions({
             address,
             db,
-            rpc: getRpc(),
+            rpc: getSharedNeeruRpc(),
           })
           out.push(...neeru)
         } catch (err) {
@@ -309,7 +307,9 @@ router.post('/hooks-api/triggerShortcut', async (req, res) => {
     const dispatched =
       appId === ALLBRIDGE_APP_ID
         ? await dispatchAllbridge(shortcutId, address, body)
-        : await dispatchNeeru(shortcutId, address, body, { rpc: getRpc() })
+        : await dispatchNeeru(shortcutId, address, body, {
+            rpc: getSharedNeeruRpc(),
+          })
 
     if (!dispatched.ok) {
       return res.status(dispatched.status).json({ error: dispatched.error })
