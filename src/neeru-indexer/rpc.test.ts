@@ -1,11 +1,14 @@
 import type { PublicClient } from 'viem'
 import {
+  createNeeruRpc,
+  PRIMARY_SKIP_DURATION_MS,
+} from './rpc'
+import {
   getAnkrRpcUrl,
   getDrpcRpcUrl,
   getFornoUrl,
   getPrimaryRpcUrl,
 } from '../lib/celoClient'
-import { createNeeruRpc, PRIMARY_SKIP_DURATION_MS } from './rpc'
 
 type Call = 'primary' | 'forno' | 'ankr' | 'drpc'
 
@@ -17,21 +20,23 @@ interface MockClients {
   calls: Call[]
 }
 
-function buildMockClients(opts: {
+interface MockClientOptions {
   primaryBehavior: () => Promise<bigint>
   fornoBehavior: () => Promise<bigint>
   ankrBehavior: () => Promise<bigint>
   drpcBehavior: () => Promise<bigint>
-}): MockClients {
+}
+
+function buildMockClients(opts: MockClientOptions): MockClients {
   const calls: Call[] = []
-  const make = (name: Call, behavior: () => Promise<bigint>): PublicClient => {
-    return {
+  const make = (name: Call, behavior: () => Promise<bigint>): PublicClient =>
+    ({
       getBlockNumber: async () => {
         calls.push(name)
         return behavior()
       },
-    } as unknown as PublicClient
-  }
+    }) as unknown as PublicClient
+
   return {
     primary: make('primary', opts.primaryBehavior),
     forno: make('forno', opts.fornoBehavior),
@@ -41,13 +46,19 @@ function buildMockClients(opts: {
   }
 }
 
+// Chain order after the 2026-08-03 reorder: forno -> drpc -> ankr ->
+// primary (celocolombia). Forno is tried first because it has been the
+// most reliable endpoint in production; primary is kept at the tail with
+// its 3-failure skip window so a silently-degraded celocolombia (has been
+// observed returning block=0 while 200-OK) does not thrash retries when
+// the healthy upstreams could serve the request.
 describe('createNeeruRpc', () => {
-  it('tries the primary first, succeeds, never falls through', async () => {
+  it('tries Forno first, succeeds, never falls through', async () => {
     const mocks = buildMockClients({
-      primaryBehavior: async () => 100n,
-      fornoBehavior: async () => {
+      primaryBehavior: async () => {
         throw new Error('should not be called')
       },
+      fornoBehavior: async () => 100n,
       ankrBehavior: async () => {
         throw new Error('should not be called')
       },
@@ -64,21 +75,21 @@ describe('createNeeruRpc', () => {
       },
     })
     expect(await rpc.getBlockNumber()).toBe(100n)
-    expect(mocks.calls).toEqual(['primary'])
+    expect(mocks.calls).toEqual(['forno'])
   })
 
-  it('falls back to Forno when the primary fails once', async () => {
+  it('falls back to dRPC when Forno fails once', async () => {
     const mocks = buildMockClients({
       primaryBehavior: async () => {
-        throw new Error('primary 503')
+        throw new Error('should not be called')
       },
-      fornoBehavior: async () => 200n,
+      fornoBehavior: async () => {
+        throw new Error('forno 503')
+      },
       ankrBehavior: async () => {
         throw new Error('should not be called')
       },
-      drpcBehavior: async () => {
-        throw new Error('should not be called')
-      },
+      drpcBehavior: async () => 200n,
     })
     const rpc = createNeeruRpc({
       endpoints: {
@@ -89,21 +100,21 @@ describe('createNeeruRpc', () => {
       },
     })
     expect(await rpc.getBlockNumber()).toBe(200n)
-    expect(mocks.calls).toEqual(['primary', 'forno'])
+    expect(mocks.calls).toEqual(['forno', 'drpc'])
   })
 
-  it('cascades all the way to dRPC when the first three fail', async () => {
+  it('cascades all the way to primary (last-resort celocolombia) when the first three fail', async () => {
     const mocks = buildMockClients({
-      primaryBehavior: async () => {
-        throw new Error('primary 503')
-      },
+      primaryBehavior: async () => 300n,
       fornoBehavior: async () => {
         throw new Error('forno 503')
       },
       ankrBehavior: async () => {
         throw new Error('ankr timeout')
       },
-      drpcBehavior: async () => 300n,
+      drpcBehavior: async () => {
+        throw new Error('drpc 500')
+      },
     })
     const rpc = createNeeruRpc({
       endpoints: {
@@ -114,7 +125,7 @@ describe('createNeeruRpc', () => {
       },
     })
     expect(await rpc.getBlockNumber()).toBe(300n)
-    expect(mocks.calls).toEqual(['primary', 'forno', 'ankr', 'drpc'])
+    expect(mocks.calls).toEqual(['forno', 'drpc', 'ankr', 'primary'])
   })
 
   it('throws when all four endpoints fail, with all error contexts', async () => {
@@ -150,19 +161,19 @@ describe('createNeeruRpc', () => {
     expect(String(err)).toContain(getDrpcRpcUrl())
   })
 
-  it('multicall passes through to the primary with its full return shape', async () => {
+  it('multicall passes through to Forno first with its full return shape', async () => {
     const fakeReturn = [
       { status: 'success', result: 123n },
       { status: 'success', result: 456n },
     ]
     const multicallCalls: unknown[] = []
-    const primary = {
+    const forno = {
       multicall: async (args: unknown) => {
         multicallCalls.push(args)
         return fakeReturn
       },
     } as unknown as PublicClient
-    const forno = {
+    const primary = {
       multicall: async () => {
         throw new Error('should not be called')
       },
@@ -201,15 +212,15 @@ describe('createNeeruRpc', () => {
     expect(multicallCalls).toHaveLength(1)
   })
 
-  it('getBlock returns number + timestamp from the primary endpoint', async () => {
+  it('getBlock returns number + timestamp from the Forno endpoint', async () => {
     const calls: Call[] = []
-    const primary = {
+    const forno = {
       getBlock: async (args: { blockNumber: bigint }) => {
-        calls.push('primary')
+        calls.push('forno')
         return { number: args.blockNumber, timestamp: 1_700_000_000n }
       },
     } as unknown as PublicClient
-    const forno = {
+    const primary = {
       getBlock: async () => {
         throw new Error('should not be called')
       },
@@ -230,39 +241,49 @@ describe('createNeeruRpc', () => {
     const block = await rpc.getBlock({ blockNumber: 1_234_568n })
     expect(block.number).toBe(1_234_568n)
     expect(block.timestamp).toBe(1_700_000_000n)
-    expect(calls).toEqual(['primary'])
+    expect(calls).toEqual(['forno'])
   })
 
   it('after 3 consecutive primary failures, skips it for 5 min, then resumes', async () => {
     let primaryCalls = 0
     let fornoCalls = 0
+    let drpcCalls = 0
+    let ankrCalls = 0
     const calls: Call[] = []
     let nowMs = 1_000_000
 
-    const primary = {
-      getBlockNumber: async () => {
-        calls.push('primary')
-        primaryCalls += 1
-        throw new Error('primary 503')
-      },
-    } as unknown as PublicClient
+    // Forno + drpc + ankr all throw so each request cascades all the way
+    // to primary; primary throws for the first three to trigger the skip
+    // window, then succeeds after the skip window expires.
     const forno = {
       getBlockNumber: async () => {
         calls.push('forno')
         fornoCalls += 1
-        return 42n
-      },
-    } as unknown as PublicClient
-    const ankr = {
-      getBlockNumber: async () => {
-        calls.push('ankr')
-        return 0n
+        throw new Error('forno 503')
       },
     } as unknown as PublicClient
     const drpc = {
       getBlockNumber: async () => {
         calls.push('drpc')
-        return 0n
+        drpcCalls += 1
+        throw new Error('drpc 500')
+      },
+    } as unknown as PublicClient
+    const ankr = {
+      getBlockNumber: async () => {
+        calls.push('ankr')
+        ankrCalls += 1
+        throw new Error('ankr timeout')
+      },
+    } as unknown as PublicClient
+    const primary = {
+      getBlockNumber: async () => {
+        calls.push('primary')
+        primaryCalls += 1
+        if (primaryCalls <= 3) {
+          throw new Error('primary 503')
+        }
+        return 42n
       },
     } as unknown as PublicClient
 
@@ -271,28 +292,43 @@ describe('createNeeruRpc', () => {
       now: () => nowMs,
     })
 
-    // 3 ticks: every call tries primary (fails), then Forno (succeeds).
-    expect(await rpc.getBlockNumber()).toBe(42n)
-    expect(await rpc.getBlockNumber()).toBe(42n)
-    expect(await rpc.getBlockNumber()).toBe(42n)
+    // 3 ticks: each cascades forno -> drpc -> ankr -> primary (all fail).
+    // After the 3rd primary failure the skip window opens.
+    await expect(rpc.getBlockNumber()).rejects.toThrow(
+      /all Neeru RPC endpoints failed/,
+    )
+    await expect(rpc.getBlockNumber()).rejects.toThrow(
+      /all Neeru RPC endpoints failed/,
+    )
+    await expect(rpc.getBlockNumber()).rejects.toThrow(
+      /all Neeru RPC endpoints failed/,
+    )
     expect(primaryCalls).toBe(3)
     expect(fornoCalls).toBe(3)
-    expect(calls.filter((c) => c === 'ankr').length).toBe(0)
-    expect(calls.filter((c) => c === 'drpc').length).toBe(0)
+    expect(drpcCalls).toBe(3)
+    expect(ankrCalls).toBe(3)
 
-    // 4th tick: primary is now in the skip window, only Forno should be called.
+    // 4th tick: primary is now in the skip window. forno/drpc/ankr still
+    // throw so the request still fails, but primary is not called.
     nowMs += 1000
-    expect(await rpc.getBlockNumber()).toBe(42n)
-    expect(primaryCalls).toBe(3)
+    await expect(rpc.getBlockNumber()).rejects.toThrow(
+      /all Neeru RPC endpoints failed/,
+    )
+    expect(primaryCalls).toBe(3) // unchanged, skipped
     expect(fornoCalls).toBe(4)
+    expect(drpcCalls).toBe(4)
+    expect(ankrCalls).toBe(4)
 
     // 5th tick: still inside the skip window.
     nowMs += PRIMARY_SKIP_DURATION_MS - 2000
-    expect(await rpc.getBlockNumber()).toBe(42n)
-    expect(primaryCalls).toBe(3)
+    await expect(rpc.getBlockNumber()).rejects.toThrow(
+      /all Neeru RPC endpoints failed/,
+    )
+    expect(primaryCalls).toBe(3) // still skipped
     expect(fornoCalls).toBe(5)
 
-    // 6th tick: past the skip mark, primary should be retried.
+    // 6th tick: past the skip mark, primary should be retried and now
+    // succeeds (behavior flip on primaryCalls > 3).
     nowMs += 3000
     expect(await rpc.getBlockNumber()).toBe(42n)
     expect(primaryCalls).toBe(4)
