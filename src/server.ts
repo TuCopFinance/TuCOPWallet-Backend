@@ -23,6 +23,8 @@ try {
 import { app } from './app'
 import { runMigrations } from './db/migrate'
 import { getDb } from './lib/db'
+import { startNeeruWarmup } from './hooks-api/neeru/warmup'
+import { createNeeruRpc } from './neeru-indexer/rpc'
 import { startNeeruIndexer } from './neeru-indexer/worker'
 import { startTimelockIndexer } from './neeru-timelock/worker'
 import { resumePendingBackfills } from './transactions-indexer/backfill'
@@ -127,6 +129,18 @@ async function boot(): Promise<void> {
   if (process.env.NEERU_INDEXER_ENABLED === 'true') {
     startNeeruIndexer({ db: getDb()! }).catch((err) => {
       log.error(`neeru indexer crashed: ${err instanceof Error ? err.message : String(err)}`)
+    })
+    // Internal warmup ticks every 20s so external requests to the neeru
+    // endpoints do not pay the cold-reconnect cost after brief idle
+    // windows (pg pool idle timeout 30s, catalogue cache TTL 30s, RPC
+    // TLS handshake ~1-3s). Motivated by wallet team's observation on
+    // 2026-08-04: cold /api/earn/neeru/positions took 20-30s and blew
+    // past the wallet's 15s NEERU_FETCH_TIMEOUT_MS, misleading users
+    // into an empty state.
+    startNeeruWarmup({
+      db: getDb()!,
+      rpc: createNeeruRpc(),
+      signal: indexerAbort.signal,
     })
   }
 
