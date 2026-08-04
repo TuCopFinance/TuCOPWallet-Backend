@@ -1,5 +1,9 @@
 import { Router, Request, Response } from 'express'
-import { createNeeruRpc, type NeeruIndexerRpcClient } from '../neeru-indexer/rpc'
+import {
+  _setSharedNeeruRpcForTests,
+  getSharedNeeruRpc,
+  type NeeruIndexerRpcClient,
+} from '../neeru-indexer/rpc'
 import { getNeeruCatalogueSnapshot } from '../hooks-api/neeru/positions'
 import { hooksApiConfigured } from '../hooks-api/config'
 import { createLogger } from '../lib/logger'
@@ -7,17 +11,12 @@ import { createLogger } from '../lib/logger'
 const router = Router()
 const log = createLogger('routes:earn-neeru-catalogue')
 
-let rpcClient: NeeruIndexerRpcClient | null = null
-
-function getRpc(): NeeruIndexerRpcClient {
-  if (!rpcClient) rpcClient = createNeeruRpc()
-  return rpcClient
-}
-
+// Delegates to the process-wide shared rpc singleton so warmup + all Neeru
+// routes share ONE client (see getSharedNeeruRpc in neeru-indexer/rpc.ts).
 export function _setEarnNeeruCatalogueRpcForTests(
   client: NeeruIndexerRpcClient | null,
 ): void {
-  rpcClient = client
+  _setSharedNeeruRpcForTests(client)
 }
 
 // GET /api/earn/neeru/catalogue
@@ -39,7 +38,7 @@ router.get(
       return res.status(503).json({ error: 'neeru not configured' })
     }
     try {
-      const snapshot = await getNeeruCatalogueSnapshot(getRpc())
+      const snapshot = await getNeeruCatalogueSnapshot(getSharedNeeruRpc())
       res.setHeader('Cache-Control', 'public, max-age=30')
       return res.json({ data: snapshot })
     } catch (err) {
