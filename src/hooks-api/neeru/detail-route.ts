@@ -2,7 +2,11 @@ import type { Request, Response, Router } from 'express'
 import { getDb } from '../../lib/db'
 import { HEX_ADDRESS_LOWER_RE } from '../../lib/hex'
 import { createLogger } from '../../lib/logger'
-import { createNeeruRpc, type NeeruIndexerRpcClient } from '../../neeru-indexer/rpc'
+import {
+  _setSharedNeeruRpcForTests,
+  getSharedNeeruRpc,
+  type NeeruIndexerRpcClient,
+} from '../../neeru-indexer/rpc'
 import { hooksApiConfigured } from '../config'
 import { getNeeruPositionDetail } from './detail'
 
@@ -10,17 +14,12 @@ const log = createLogger('routes:hooks-api:neeru-detail')
 
 const ALLOWED_QUERY_PARAMS: ReadonlySet<string> = new Set(['address'])
 
-let rpcClient: NeeruIndexerRpcClient | null = null
-
-function getRpc(): NeeruIndexerRpcClient {
-  if (!rpcClient) rpcClient = createNeeruRpc()
-  return rpcClient
-}
-
+// Delegates to the process-wide shared rpc singleton so warmup + all Neeru
+// routes share ONE client (see getSharedNeeruRpc in neeru-indexer/rpc.ts).
 export function _setNeeruDetailRpcForTests(
   client: NeeruIndexerRpcClient | null,
 ): void {
-  rpcClient = client
+  _setSharedNeeruRpcForTests(client)
 }
 
 export function mountNeeruDetailRoute(router: Router): void {
@@ -53,7 +52,7 @@ export function mountNeeruDetailRoute(router: Router): void {
         const data = await getNeeruPositionDetail({
           address,
           db,
-          rpc: getRpc(),
+          rpc: getSharedNeeruRpc(),
         })
         return res.json({ data })
       } catch (err) {

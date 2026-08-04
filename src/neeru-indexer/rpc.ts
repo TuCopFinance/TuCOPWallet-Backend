@@ -112,6 +112,28 @@ export interface CreateNeeruRpcOptions {
   now?: () => number
 }
 
+// Process-wide singleton shared by ALL request-serving code (the 3 Neeru
+// route handlers + the warmup tick). Every `createNeeruRpc()` call builds a
+// brand-new viem client whose http transport owns its own HTTP agent + TCP
+// connection pool, so two clients cannot share warm sockets. Before this
+// singleton the warmup kept one client warm while each route lazily built
+// its own on first request, meaning the wallet always paid the cold TLS
+// reconnect on the first hit after an idle window (measured 20.6s on
+// 2026-08-04 after the warmup shipped). Workers (neeru-indexer / timelock)
+// keep their own clients since they tick continuously and are always warm.
+let sharedRpcClient: NeeruIndexerRpcClient | null = null
+
+export function getSharedNeeruRpc(): NeeruIndexerRpcClient {
+  if (!sharedRpcClient) sharedRpcClient = createNeeruRpc()
+  return sharedRpcClient
+}
+
+export function _setSharedNeeruRpcForTests(
+  client: NeeruIndexerRpcClient | null,
+): void {
+  sharedRpcClient = client
+}
+
 export function createNeeruRpc(
   options: CreateNeeruRpcOptions = {},
 ): NeeruIndexerRpcClient {
