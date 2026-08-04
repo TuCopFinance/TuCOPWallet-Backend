@@ -1,6 +1,10 @@
 import type { Pool } from 'pg'
 import type { NeeruIndexerRpcClient } from '../../neeru-indexer/rpc'
-import { startNeeruWarmup } from './warmup'
+import {
+  _resetNeeruWarmupReadyForTests,
+  isNeeruWarmupReady,
+  startNeeruWarmup,
+} from './warmup'
 import * as positionsMod from './positions'
 
 jest.spyOn(positionsMod, 'getNeeruEarnPositions').mockImplementation(async () => [])
@@ -53,9 +57,37 @@ describe('startNeeruWarmup', () => {
     jest.useFakeTimers()
     mockGetNeeruEarnPositions.mockReset()
     mockGetNeeruEarnPositions.mockResolvedValue([])
+    _resetNeeruWarmupReadyForTests()
   })
   afterEach(() => {
     jest.useRealTimers()
+  })
+
+  it('isNeeruWarmupReady flips true after the immediate tick finishes', async () => {
+    expect(isNeeruWarmupReady()).toBe(false)
+    const { db } = buildFakeDb()
+    const rpc = buildFakeRpc()
+    const handle = startNeeruWarmup({ db, rpc, intervalMs: 100 })
+    // Same microtask-flush pattern as the first test in this file.
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(isNeeruWarmupReady()).toBe(true)
+    handle.stop()
+  })
+
+  it('isNeeruWarmupReady still flips true when a tick step throws', async () => {
+    // Both db + rpc probes intentionally fail; the flag should still flip
+    // so /ready does not 503-loop forever on a transient upstream blip.
+    expect(isNeeruWarmupReady()).toBe(false)
+    const { db, fail } = buildFakeDb()
+    const rpc = buildFakeRpc()
+    fail(new Error('db down'))
+    mockGetNeeruEarnPositions.mockRejectedValueOnce(new Error('rpc down'))
+    const handle = startNeeruWarmup({ db, rpc, intervalMs: 100 })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(isNeeruWarmupReady()).toBe(true)
+    handle.stop()
   })
 
   it('fires an immediate tick + then ticks on the configured interval', async () => {

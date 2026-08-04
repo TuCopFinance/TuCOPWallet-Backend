@@ -29,6 +29,32 @@ export interface WarmupHandle {
   stop: () => void
 }
 
+// Module-scoped readiness flag. Flipped true the FIRST time a warmup tick
+// finishes (regardless of individual step failure, so a transient upstream
+// blip does not permanently block /ready). Consumed by the readiness probe
+// so Railway does not route traffic to the container until warmup has done
+// at least one pass through the DB + RPC path. Without this gate the very
+// first request after each deploy still pays the cold TLS reconnect
+// because Railway routes traffic as soon as /ready 200s and the warmup's
+// first tick may not have completed yet.
+let firstTickCompleted = false
+
+export function isNeeruWarmupReady(): boolean {
+  return firstTickCompleted
+}
+
+export function _resetNeeruWarmupReadyForTests(): void {
+  firstTickCompleted = false
+}
+
+// Direct setter used by /ready-handler tests so they can assert the gate
+// logic without having to drive a real warmup tick through microtask +
+// macrotask flushing. Production code MUST NOT call this; readiness only
+// flips true via the tick's actual completion.
+export function _setNeeruWarmupReadyForTests(value: boolean): void {
+  firstTickCompleted = value
+}
+
 // Fires an internal tick every intervalMs. Each tick:
 //   1. runs `SELECT 1` on the pg pool so at least one connection stays
 //      out of the idle-timeout queue.
@@ -58,6 +84,14 @@ export function startNeeruWarmup(args: StartNeeruWarmupArgs): WarmupHandle {
         `catalogue prefetch failed: ${err instanceof Error ? err.message : String(err)}`,
       )
     }
+    // Flip the readiness flag AFTER both steps have been attempted. We use
+    // "attempted" rather than "both succeeded" on purpose: if e.g. the RPC
+    // is briefly flaky at boot, /ready would otherwise loop 503 forever
+    // and Railway would eventually mark the deploy failed. Warming with a
+    // transient error is still better than the pre-warmup baseline
+    // (immediate cold hit). The route handlers each surface their own
+    // per-request failures with 502 anyway.
+    firstTickCompleted = true
   }
 
   // Fire once immediately so the FIRST hit after cold boot / redeploy
