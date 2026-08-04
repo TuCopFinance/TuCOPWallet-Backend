@@ -6,6 +6,7 @@ import { createLogger } from '../lib/logger'
 import { metricsRegistry, refreshRelayBalanceMetric } from '../lib/metrics'
 import { getRedis } from '../lib/redis'
 import { getRelayClients } from '../lib/wriRelay'
+import { getSharedNeeruRpc } from '../neeru-indexer/rpc'
 
 const log = createLogger('routes:health')
 const router = Router()
@@ -52,8 +53,25 @@ async function probeRedis(): Promise<ProbeResult> {
 
 async function probeRpc(): Promise<ProbeResult> {
   try {
-    const client = getCeloPublicClient()
-    await withTimeout(client.getBlockNumber(), PROBE_TIMEOUT_MS, 'rpc')
+    // Prefer the shared Neeru RPC client when the warmup path is enabled,
+    // so /ready reflects "can we serve requests via the fallback chain?"
+    // rather than "is forno alone happy?". Otherwise fall back to the
+    // legacy singleton (forno direct) so envs without Neeru configured
+    // still see meaningful readiness. Rate-limits or Cloudflare bans on a
+    // single upstream (observed forno 429 on our Railway IP 2026-08-04)
+    // then do not 503 the deploy since the shared client cascades.
+    const client =
+      process.env.NEERU_INDEXER_ENABLED === 'true'
+        ? getSharedNeeruRpc()
+        : getCeloPublicClient()
+    // Widen the timeout when using the shared client because the fallback
+    // path can legitimately take a couple of seconds when the primary is
+    // being cascaded. Keep it tight for the legacy single-endpoint probe.
+    const timeoutMs =
+      process.env.NEERU_INDEXER_ENABLED === 'true'
+        ? PROBE_TIMEOUT_MS * 5
+        : PROBE_TIMEOUT_MS
+    await withTimeout(client.getBlockNumber(), timeoutMs, 'rpc')
     return { ok: true }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
