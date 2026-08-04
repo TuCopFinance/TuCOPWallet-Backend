@@ -3,6 +3,10 @@ import {
   _resetNeeruWarmupReadyForTests,
   _setNeeruWarmupReadyForTests,
 } from '../hooks-api/neeru/warmup'
+import {
+  _setSharedNeeruRpcForTests,
+  type NeeruIndexerRpcClient,
+} from '../neeru-indexer/rpc'
 
 const mockQuery = jest.fn()
 const mockPing = jest.fn()
@@ -146,12 +150,20 @@ describe('GET /ready with Neeru warmup gate', () => {
     mockQuery.mockResolvedValue({ rows: [{ '?column?': 1 }] })
     mockPing.mockResolvedValue('PONG')
     mockGetBlockNumber.mockResolvedValue(123n)
+    // probeRpc reads from the shared Neeru RPC when the flag is on.
+    // Inject a stub that returns fast so the check passes without hitting
+    // the real network. Cast is safe because probeRpc only calls one
+    // method here.
+    _setSharedNeeruRpcForTests({
+      getBlockNumber: async () => 123n,
+    } as unknown as NeeruIndexerRpcClient)
   })
 
   afterEach(() => {
     if (ORIGINAL_FLAG === undefined) delete process.env.NEERU_INDEXER_ENABLED
     else process.env.NEERU_INDEXER_ENABLED = ORIGINAL_FLAG
     _resetNeeruWarmupReadyForTests()
+    _setSharedNeeruRpcForTests(null)
   })
 
   it('503 with neeruWarmup=warming when flag is on but tick has not completed', async () => {
