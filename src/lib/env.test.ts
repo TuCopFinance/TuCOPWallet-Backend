@@ -153,6 +153,42 @@ describe('parseEnv (zod schema)', () => {
     expect(() => parseEnv()).toThrow(/INDEXER_ENABLED.*DATABASE_URL/)
   })
 
+  it('throws when ENABLE_SQUID_INTEGRATOR_FEES=true but address/percentage missing', () => {
+    process.env = {
+      ...MIN_REQUIRED,
+      ENABLE_SQUID_INTEGRATOR_FEES: 'true',
+      // Deliberately omitting SQUID_INTEGRATOR_FEE_ADDRESS + PERCENTAGE.
+    } as NodeJS.ProcessEnv
+    expect(() => parseEnv()).toThrow(
+      /ENABLE_SQUID_INTEGRATOR_FEES.*required vars.*SQUID_INTEGRATOR_FEE_ADDRESS.*SQUID_INTEGRATOR_FEE_PERCENTAGE/,
+    )
+  })
+
+  it('accepts ENABLE_SQUID_INTEGRATOR_FEES=true when address+percentage are set', () => {
+    process.env = {
+      ...MIN_REQUIRED,
+      ENABLE_SQUID_INTEGRATOR_FEES: 'true',
+      SQUID_INTEGRATOR_FEE_ADDRESS: '0x17CD032F61998cD0E8e9AF87c8390b98496b9354',
+      SQUID_INTEGRATOR_FEE_PERCENTAGE: '0.5',
+    } as NodeJS.ProcessEnv
+    const e = parseEnv()
+    expect(e.ENABLE_SQUID_INTEGRATOR_FEES).toBe(true)
+    expect(e.SQUID_INTEGRATOR_FEE_ADDRESS).toBe(
+      '0x17CD032F61998cD0E8e9AF87c8390b98496b9354',
+    )
+    expect(e.SQUID_INTEGRATOR_FEE_PERCENTAGE).toBe(0.5)
+  })
+
+  it('rejects SQUID_INTEGRATOR_FEE_PERCENTAGE outside (0, 100] range', () => {
+    process.env = {
+      ...MIN_REQUIRED,
+      ENABLE_SQUID_INTEGRATOR_FEES: 'true',
+      SQUID_INTEGRATOR_FEE_ADDRESS: '0x17CD032F61998cD0E8e9AF87c8390b98496b9354',
+      SQUID_INTEGRATOR_FEE_PERCENTAGE: '150',
+    } as NodeJS.ProcessEnv
+    expect(() => parseEnv()).toThrow(/SQUID_INTEGRATOR_FEE_PERCENTAGE/)
+  })
+
   it('caches the parsed env across calls', () => {
     process.env = { ...MIN_REQUIRED } as NodeJS.ProcessEnv
     const first = parseEnv()

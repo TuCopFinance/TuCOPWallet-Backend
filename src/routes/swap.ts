@@ -3,7 +3,12 @@ import { createLogger } from '../lib/logger'
 import { NATIVE_TOKEN_SENTINEL, networkIdToChainId } from '../lib/networks'
 import { buildCacheKey } from '../lib/query'
 import { getRedis } from '../lib/redis'
-import { squidRoute, SquidRouteResponse, SquidUpstreamError } from '../lib/squid'
+import {
+  squidRoute,
+  SquidCollectFees,
+  SquidRouteResponse,
+  SquidUpstreamError,
+} from '../lib/squid'
 import { firstZodIssueAsError } from './schemas/common'
 import { swapQuoteQuerySchema, type SwapQuoteInput } from './schemas/swap'
 
@@ -70,7 +75,31 @@ function computeGuaranteedPrice(
   return frac.length === 0 ? whole.toString() : `${whole.toString()}.${frac}`
 }
 
-function shapeResponse(upstream: SquidRouteResponse, input: ValidatedInput): unknown {
+// Reads the 3 integrator-fee env vars each call so a Railway env flip takes
+// effect on the next request without a redeploy (matching the pattern used
+// for SQUID_INTEGRATOR_ID and REDIS_URL). Returns undefined when the kill
+// switch is off, which makes the caller skip both the request-side
+// collectFees payload AND the response-side appFeePercentageIncludedInPrice
+// mapping. Env-var validation in lib/env.ts guarantees that when the flag
+// is on, address + percentage are both present and well-formed, so this
+// helper does not need runtime defensiveness beyond the flag check.
+function resolveCollectFeesFromEnv(): SquidCollectFees | undefined {
+  if (process.env.ENABLE_SQUID_INTEGRATOR_FEES !== 'true') return undefined
+  const address = process.env.SQUID_INTEGRATOR_FEE_ADDRESS
+  const percentage = process.env.SQUID_INTEGRATOR_FEE_PERCENTAGE
+  if (!address || !percentage) return undefined
+  return {
+    integratorAddress: address as `0x${string}`,
+    feeType: 'percentage',
+    feeValue: Number(percentage),
+  }
+}
+
+function shapeResponse(
+  upstream: SquidRouteResponse,
+  input: ValidatedInput,
+  collectFees: SquidCollectFees | undefined,
+): unknown {
   const swapType: 'same-chain' | 'cross-chain' =
     input.sellNetworkId === input.buyNetworkId ? 'same-chain' : 'cross-chain'
 
@@ -115,6 +144,19 @@ function shapeResponse(upstream: SquidRouteResponse, input: ValidatedInput): unk
     swapTx.maxCrossChainFee = totalFees.toString()
   }
 
+  // Only surface the integrator-fee percentage to the wallet when the flag
+  // is ON. Prefer Squid's echo (source of truth for what actually got applied
+  // to the route) over our request-side config (what we ASKED for); if
+  // Squid did not echo but we know the fee was requested, fall back to our
+  // config value so the wallet still renders a fee line and matches what the
+  // user will be charged. Absent field when flag off = wire shape identical
+  // to today, backwards compatible.
+  if (collectFees) {
+    const echoed = est.appFeePercentageIncludedInPrice
+    swapTx.appFeePercentageIncludedInPrice =
+      echoed ?? collectFees.feeValue.toString()
+  }
+
   return {
     unvalidatedSwapTransaction: swapTx,
     details: { swapProvider: 'squid' },
@@ -134,7 +176,18 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
   const { input } = v
 
   const cache = getRedis()
-  const cacheKey = buildCacheKey('squid', req.path, req.query as Record<string, string>)
+  // Include the integrator-fee flag state in the cache key so a Railway
+  // env flip does NOT serve stale responses across the transition. Without
+  // this, a cached quote taken with the flag OFF (no fee applied, no
+  // appFeePercentageIncludedInPrice field) could be served for 30s after
+  // the flag flipped ON — the wallet would show no fee line but the user
+  // would actually be charged. Same failure in reverse when flipping off.
+  // Two suffixes keep the two states in separate cache buckets.
+  const feesOn = process.env.ENABLE_SQUID_INTEGRATOR_FEES === 'true'
+  const cacheKey = buildCacheKey('squid', req.path, {
+    ...(req.query as Record<string, string>),
+    _fees: feesOn ? '1' : '0',
+  })
 
   try {
     const cached = await cache?.get(cacheKey)
@@ -147,6 +200,7 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
 
   const fromToken = input.sellIsNative ? NATIVE_TOKEN_SENTINEL : input.sellToken
   const toToken = input.buyIsNative ? NATIVE_TOKEN_SENTINEL : input.buyToken
+  const collectFees = resolveCollectFeesFromEnv()
 
   try {
     const upstream = await squidRoute(
@@ -160,11 +214,39 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
         toAddress: input.userAddress,
         slippage: input.slippagePercentage,
         quoteOnly: input.quoteOnly,
+        ...(collectFees ? { collectFees } : {}),
       },
       integratorId,
     )
 
-    const payload = shapeResponse(upstream, input)
+    const payload = shapeResponse(upstream, input, collectFees)
+
+    // Structured integrator-fee log for on-chain reconciliation. Emitted
+    // ONLY when the fee is active so quiet swaps stay quiet. Fields chosen
+    // so a batch query can cross-check log.sum(feeAmount) against the
+    // recipient's ERC-20 balance growth on Celoscan. Any mismatch between
+    // `feeValueRequested` (our config) and `feeValueApplied` (Squid echo)
+    // is a data-integrity signal - if consistent, alert externally.
+    if (collectFees) {
+      const echoed = upstream.route?.estimate?.appFeePercentageIncludedInPrice
+      log.info(
+        JSON.stringify({
+          event: 'squid_integrator_fee',
+          integratorAddress: collectFees.integratorAddress,
+          feeType: collectFees.feeType,
+          feeValueRequested: collectFees.feeValue,
+          feeValueApplied: echoed ?? null,
+          feeMatch: echoed === undefined ? null : Number(echoed) === collectFees.feeValue,
+          fromChain: String(input.fromChainId),
+          toChain: String(input.toChainId),
+          fromToken,
+          toToken,
+          fromAmount: input.sellAmount,
+          userAddress: input.userAddress,
+          quoteOnly: input.quoteOnly,
+        }),
+      )
+    }
 
     try {
       await cache?.set(cacheKey, JSON.stringify(payload), 'EX', CACHE_TTL_SECONDS)

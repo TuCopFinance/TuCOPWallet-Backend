@@ -252,6 +252,100 @@ describe('GET /api/swap/quote', () => {
     expect(JSON.stringify(res.body)).not.toContain('leaky-detail')
   })
 
+  describe('integrator fees (ENABLE_SQUID_INTEGRATOR_FEES flag)', () => {
+    const FEE_ADDRESS = '0x17CD032F61998cD0E8e9AF87c8390b98496b9354'
+    const FEE_PERCENTAGE = '0.5'
+
+    beforeEach(() => {
+      delete process.env.ENABLE_SQUID_INTEGRATOR_FEES
+      delete process.env.SQUID_INTEGRATOR_FEE_ADDRESS
+      delete process.env.SQUID_INTEGRATOR_FEE_PERCENTAGE
+    })
+
+    it('flag OFF (default): request body has no collectFees, response has no appFeePercentageIncludedInPrice', async () => {
+      // Baseline: identical to the pre-feature behaviour. This is THE test
+      // that guards live users during a merge with the flag off.
+      fetchSpy.mockResolvedValueOnce(squidResponse())
+
+      const res = await request(app).get('/api/swap/quote?' + paramsTo())
+
+      expect(res.status).toBe(200)
+      expect(res.body.unvalidatedSwapTransaction).not.toHaveProperty(
+        'appFeePercentageIncludedInPrice',
+      )
+      const body = JSON.parse(fetchSpy.mock.calls[0]?.[1]?.body as string)
+      expect(body).not.toHaveProperty('collectFees')
+    })
+
+    it('flag ON with env set: request body includes collectFees, response includes appFeePercentageIncludedInPrice', async () => {
+      process.env.ENABLE_SQUID_INTEGRATOR_FEES = 'true'
+      process.env.SQUID_INTEGRATOR_FEE_ADDRESS = FEE_ADDRESS
+      process.env.SQUID_INTEGRATOR_FEE_PERCENTAGE = FEE_PERCENTAGE
+      fetchSpy.mockResolvedValueOnce(
+        squidResponse({ appFeePercentageIncludedInPrice: '0.5' }),
+      )
+
+      const res = await request(app).get('/api/swap/quote?' + paramsTo())
+
+      expect(res.status).toBe(200)
+      expect(res.body.unvalidatedSwapTransaction.appFeePercentageIncludedInPrice).toBe(
+        '0.5',
+      )
+      const body = JSON.parse(fetchSpy.mock.calls[0]?.[1]?.body as string)
+      expect(body.collectFees).toEqual({
+        integratorAddress: FEE_ADDRESS,
+        feeType: 'percentage',
+        feeValue: 0.5,
+      })
+    })
+
+    it('flag ON but Squid did NOT echo appFeePercentageIncludedInPrice: falls back to requested percentage', async () => {
+      // Squid may omit the echo field for routes that could not honor the
+      // integrator fee (e.g. an intermediate hop that does not support it).
+      // We still surface the REQUESTED percentage so the wallet renders a
+      // fee line matching what the user will actually be charged on the
+      // hops that do apply it.
+      process.env.ENABLE_SQUID_INTEGRATOR_FEES = 'true'
+      process.env.SQUID_INTEGRATOR_FEE_ADDRESS = FEE_ADDRESS
+      process.env.SQUID_INTEGRATOR_FEE_PERCENTAGE = FEE_PERCENTAGE
+      fetchSpy.mockResolvedValueOnce(squidResponse()) // no echo
+
+      const res = await request(app).get('/api/swap/quote?' + paramsTo())
+
+      expect(res.status).toBe(200)
+      expect(res.body.unvalidatedSwapTransaction.appFeePercentageIncludedInPrice).toBe(
+        '0.5',
+      )
+    })
+
+    it('flag ON: cache key differs vs flag OFF so a flip does not serve stale cross-state responses', async () => {
+      useRedis = true
+
+      // First hit: flag OFF, populates cache under the "_fees=0" bucket.
+      mockRedisGet.mockResolvedValueOnce(null)
+      fetchSpy.mockResolvedValueOnce(squidResponse())
+      await request(app).get('/api/swap/quote?' + paramsTo())
+      const keyOff = mockRedisSet.mock.calls[0]?.[0] as string
+
+      // Second hit: flag ON. Cache lookup must use a DIFFERENT key so the
+      // OFF-state cached value is not returned. Redis returns null for the
+      // new key -> upstream is called again.
+      process.env.ENABLE_SQUID_INTEGRATOR_FEES = 'true'
+      process.env.SQUID_INTEGRATOR_FEE_ADDRESS = FEE_ADDRESS
+      process.env.SQUID_INTEGRATOR_FEE_PERCENTAGE = FEE_PERCENTAGE
+      mockRedisGet.mockResolvedValueOnce(null)
+      fetchSpy.mockResolvedValueOnce(
+        squidResponse({ appFeePercentageIncludedInPrice: '0.5' }),
+      )
+      await request(app).get('/api/swap/quote?' + paramsTo())
+      const keyOn = mockRedisSet.mock.calls[1]?.[0] as string
+
+      expect(keyOff).not.toBe(keyOn)
+      // Both hits went to upstream (no cross-state cache hit).
+      expect(fetchSpy).toHaveBeenCalledTimes(2)
+    })
+  })
+
   it('caches responses for 30 seconds (cache hit skips upstream)', async () => {
     useRedis = true
     mockRedisGet.mockResolvedValueOnce(null)
