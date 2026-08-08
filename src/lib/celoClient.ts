@@ -39,18 +39,30 @@ export function getDrpcRpcUrl(): string {
   return env.DRPC_RPC_URL
 }
 
-// Canonical fallback chain for Celo public-client reads. Order matters:
-// primary first (lowest-latency for us), then the public providers in
-// decreasing preference. Both the Neeru indexer (custom skip-after-failure
-// supervisor) and the Allbridge route (viem's fallback transport) consume
-// this list. Single source of truth - do NOT redefine in other modules.
+// Optional. Returns undefined when ALCHEMY_RPC_URL is not set (older deploys
+// or dev machines without an Alchemy key). Callers must handle absence.
+export function getAlchemyRpcUrl(): string | undefined {
+  return env.ALCHEMY_RPC_URL
+}
+
+// Canonical fallback chain for Celo public-client reads. Alchemy first when
+// available (dedicated endpoint, own rate limit, escapes the Cloudflare 1015
+// pattern that forno-on-Railway-IP hits). Falls back to the four public
+// endpoints in the order they've proven most reliable in our observation.
+//
+// Both the Neeru indexer (custom skip-after-failure supervisor) and the
+// transactions-indexer / Allbridge route (viem's fallback transport)
+// consume this list. Single source of truth - do NOT redefine in other
+// modules.
 export function getCeloRpcFallbackUrls(): readonly string[] {
-  return [
-    getPrimaryRpcUrl(),
-    getFornoUrl(),
+  const alchemy = getAlchemyRpcUrl()
+  const publics = [
     getAnkrRpcUrl(),
+    getFornoUrl(),
     getDrpcRpcUrl(),
+    getPrimaryRpcUrl(),
   ]
+  return alchemy ? [alchemy, ...publics] : publics
 }
 
 // Cached singleton client for shared read-only probes (health checks,

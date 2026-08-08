@@ -10,6 +10,7 @@ import {
 } from 'viem'
 import {
   createCeloPublicClient,
+  getAlchemyRpcUrl,
   getAnkrRpcUrl,
   getDrpcRpcUrl,
   getFornoUrl,
@@ -85,7 +86,7 @@ export interface NeeruIndexerRpcClient {
   call(args: NeeruCallArgs): Promise<NeeruCallOutcome>
 }
 
-type EndpointName = 'primary' | 'forno' | 'ankr' | 'drpc'
+type EndpointName = 'alchemy' | 'primary' | 'forno' | 'ankr' | 'drpc'
 
 interface Endpoint {
   name: EndpointName
@@ -104,6 +105,7 @@ function makeClient(url: string): PublicClient {
 
 export interface CreateNeeruRpcOptions {
   endpoints?: {
+    alchemy?: PublicClient
     primary?: PublicClient
     forno?: PublicClient
     ankr?: PublicClient
@@ -143,30 +145,33 @@ export function createNeeruRpc(
   const fornoUrl = getFornoUrl()
   const ankrUrl = getAnkrRpcUrl()
   const drpcUrl = getDrpcRpcUrl()
+  const alchemyUrl = getAlchemyRpcUrl()
 
   // Order matters: withFallback iterates this array and returns the first
   // client that answers without throwing.
   //
-  // History (2026-08-04):
+  // History:
   //   * Original: [primary(celocolombia), forno, ankr, drpc]
-  //   * PR #157:  [forno, drpc, ankr, primary] - celocolombia had silent
-  //     degradation (200 OK with block=0), forno promoted to first.
-  //   * PR #159:  added getBlockNumber/getBlock sanity checks so silent
-  //     degradation cascades regardless of position.
-  //   * THIS PR:  [ankr, forno, drpc, primary] - forno started rate-limiting
-  //     our Railway egress IP with Cloudflare 1015 (429 on every call),
-  //     causing 24s cold-hits as the fallback cascade + retry backoff
-  //     stacked. Ankr promoted because it was the only endpoint responding
-  //     cleanly from Railway. Forno kept in the chain as it recovers
-  //     periodically (rate limit is a per-window ban, not a permanent block).
-  //     drpc third because it rejects eth_getLogs with "block out of range"
-  //     for some indexer queries. celocolombia last as before (still gets
-  //     the skip window on the observed degradation pattern).
+  //   * PR #157 (2026-08-03): [forno, drpc, ankr, primary] - celocolombia
+  //     had silent degradation (200 OK with block=0), forno promoted.
+  //   * PR #159 (2026-08-04): added getBlockNumber/getBlock sanity checks so
+  //     silent degradation cascades regardless of position.
+  //   * PR #166 (2026-08-05): [ankr, forno, drpc, primary] - forno started
+  //     rate-limiting our Railway egress IP with Cloudflare 1015 (429 on
+  //     every call), causing 24s cold-hits as the fallback cascade + retry
+  //     backoff stacked. Ankr promoted because it was the only endpoint
+  //     responding cleanly from Railway.
+  //   * THIS PR (2026-08-08): [alchemy?, ankr, forno, drpc, primary] -
+  //     added TuCop's OWN Alchemy dedicated endpoint at position 0 when the
+  //     ALCHEMY_RPC_URL env is set. Alchemy has its own API key so the
+  //     Cloudflare-1015-per-Railway-IP pattern that hits the public
+  //     endpoints does not apply. Public four remain as fallback for
+  //     resilience if Alchemy hits its own limits or goes down.
   //
-  // If ankr starts degrading, promote whichever endpoint is currently
-  // healthy. The skip window remains attached by `name === 'primary'`,
-  // not by array position, so reordering is safe.
-  const endpoints: Endpoint[] = [
+  // If Alchemy starts degrading, unset ALCHEMY_RPC_URL in Railway and the
+  // chain automatically reverts to [ankr, forno, drpc, primary]. The skip
+  // window remains attached by `name === 'primary'`, not by array position.
+  const publicEndpoints: Endpoint[] = [
     {
       name: 'ankr',
       url: ankrUrl,
@@ -188,6 +193,17 @@ export function createNeeruRpc(
       client: options.endpoints?.primary ?? makeClient(primaryUrl),
     },
   ]
+  const endpoints: Endpoint[] =
+    alchemyUrl || options.endpoints?.alchemy
+      ? [
+          {
+            name: 'alchemy',
+            url: alchemyUrl ?? 'https://celo-mainnet.g.alchemy.com/v2/test',
+            client: options.endpoints?.alchemy ?? makeClient(alchemyUrl!),
+          },
+          ...publicEndpoints,
+        ]
+      : publicEndpoints
 
   const primaryState: PrimaryState = {
     consecutiveFailures: 0,
