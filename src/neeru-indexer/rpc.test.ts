@@ -1,7 +1,7 @@
 import type { PublicClient } from 'viem'
 import {
   createNeeruRpc,
-  PRIMARY_SKIP_DURATION_MS,
+  ENDPOINT_SKIP_DURATION_MS,
 } from './rpc'
 import {
   getAnkrRpcUrl,
@@ -408,46 +408,43 @@ describe('createNeeruRpc', () => {
     expect(calls).toEqual(['forno'])
   })
 
-  it('after 3 consecutive primary failures, skips it for 5 min, then resumes', async () => {
-    let primaryCalls = 0
-    let fornoCalls = 0
-    let drpcCalls = 0
+  it('universal skip-window: any endpoint that fails 3x in a row gets skipped for 5 min, then retried', async () => {
+    // Before 2026-08-08 this test was primary-only ("after 3 consecutive
+    // primary failures, skips it..."). Refactored to reflect the new
+    // universal skip semantics: ANY endpoint that fails 3x consecutive
+    // gets skipped for ENDPOINT_SKIP_DURATION_MS, not just primary.
+    //
+    // Scenario: ankr (position 0 in the current chain) fails 3x and gets
+    // skipped. Forno takes over and succeeds. After the skip window
+    // elapses, ankr is retried and now succeeds too. Primary + drpc
+    // remain untouched.
     let ankrCalls = 0
-    const calls: Call[] = []
+    let fornoCalls = 0
     let nowMs = 1_000_000
 
-    // Forno + drpc + ankr all throw so each request cascades all the way
-    // to primary; primary throws for the first three to trigger the skip
-    // window, then succeeds after the skip window expires.
+    const ankr = {
+      getBlockNumber: async () => {
+        ankrCalls += 1
+        if (ankrCalls <= 3) {
+          throw new Error('ankr 503')
+        }
+        return 100n
+      },
+    } as unknown as PublicClient
     const forno = {
       getBlockNumber: async () => {
-        calls.push('forno')
         fornoCalls += 1
-        throw new Error('forno 503')
+        return 200n
       },
     } as unknown as PublicClient
     const drpc = {
       getBlockNumber: async () => {
-        calls.push('drpc')
-        drpcCalls += 1
-        throw new Error('drpc 500')
-      },
-    } as unknown as PublicClient
-    const ankr = {
-      getBlockNumber: async () => {
-        calls.push('ankr')
-        ankrCalls += 1
-        throw new Error('ankr timeout')
+        throw new Error('should not be called')
       },
     } as unknown as PublicClient
     const primary = {
       getBlockNumber: async () => {
-        calls.push('primary')
-        primaryCalls += 1
-        if (primaryCalls <= 3) {
-          throw new Error('primary 503')
-        }
-        return 42n
+        throw new Error('should not be called')
       },
     } as unknown as PublicClient
 
@@ -456,46 +453,30 @@ describe('createNeeruRpc', () => {
       now: () => nowMs,
     })
 
-    // 3 ticks: each cascades forno -> drpc -> ankr -> primary (all fail).
-    // After the 3rd primary failure the skip window opens.
-    await expect(rpc.getBlockNumber()).rejects.toThrow(
-      /all Neeru RPC endpoints failed/,
-    )
-    await expect(rpc.getBlockNumber()).rejects.toThrow(
-      /all Neeru RPC endpoints failed/,
-    )
-    await expect(rpc.getBlockNumber()).rejects.toThrow(
-      /all Neeru RPC endpoints failed/,
-    )
-    expect(primaryCalls).toBe(3)
-    expect(fornoCalls).toBe(3)
-    expect(drpcCalls).toBe(3)
+    // Ticks 1-3: ankr fails each time, forno takes over. After the 3rd
+    // ankr failure the skip window opens.
+    for (let i = 1; i <= 3; i++) {
+      expect(await rpc.getBlockNumber()).toBe(200n)
+    }
     expect(ankrCalls).toBe(3)
+    expect(fornoCalls).toBe(3)
 
-    // 4th tick: primary is now in the skip window. forno/drpc/ankr still
-    // throw so the request still fails, but primary is not called.
+    // Tick 4: ankr is now skipped. Only forno is called.
     nowMs += 1000
-    await expect(rpc.getBlockNumber()).rejects.toThrow(
-      /all Neeru RPC endpoints failed/,
-    )
-    expect(primaryCalls).toBe(3) // unchanged, skipped
+    expect(await rpc.getBlockNumber()).toBe(200n)
+    expect(ankrCalls).toBe(3) // unchanged
     expect(fornoCalls).toBe(4)
-    expect(drpcCalls).toBe(4)
-    expect(ankrCalls).toBe(4)
 
-    // 5th tick: still inside the skip window.
-    nowMs += PRIMARY_SKIP_DURATION_MS - 2000
-    await expect(rpc.getBlockNumber()).rejects.toThrow(
-      /all Neeru RPC endpoints failed/,
-    )
-    expect(primaryCalls).toBe(3) // still skipped
-    expect(fornoCalls).toBe(5)
+    // Tick 5: still inside the skip window.
+    nowMs += ENDPOINT_SKIP_DURATION_MS - 2000
+    expect(await rpc.getBlockNumber()).toBe(200n)
+    expect(ankrCalls).toBe(3) // still skipped
 
-    // 6th tick: past the skip mark, primary should be retried and now
-    // succeeds (behavior flip on primaryCalls > 3).
+    // Tick 6: past the skip mark, ankr is retried and now succeeds
+    // (behavior flip on ankrCalls > 3). Forno not called this time.
     nowMs += 3000
-    expect(await rpc.getBlockNumber()).toBe(42n)
-    expect(primaryCalls).toBe(4)
-    expect(fornoCalls).toBe(6)
+    expect(await rpc.getBlockNumber()).toBe(100n)
+    expect(ankrCalls).toBe(4)
+    expect(fornoCalls).toBe(5) // unchanged from tick 5
   })
 })
