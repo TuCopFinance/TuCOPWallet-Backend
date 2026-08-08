@@ -1,6 +1,6 @@
 import type { Pool } from 'pg'
 import type { Hash } from 'viem'
-import { createCeloPublicClient, getFornoUrl } from '../lib/celoClient'
+import { createCeloFallbackExecutor } from '../lib/celoRpcFallback'
 import { getDb } from '../lib/db'
 import { env } from '../lib/env'
 import { createLogger } from '../lib/logger'
@@ -62,8 +62,40 @@ export interface IndexerRpcClient {
   }>
 }
 
-function buildDefaultClient() {
-  return createCeloPublicClient({ url: getFornoUrl() })
+// Wraps the shared Celo fallback executor into the minimal IndexerRpcClient
+// interface the tick loop consumes. Previously this returned a single
+// forno-only client with no fallback; a receipt that forno legitimately
+// returned as null (e.g. state pruning window, receipt not indexed there
+// yet) would throw and the ENTIRE tick would fail. Since the cursor does
+// not advance on failure, the next tick re-ran the same block, hit the
+// same null-receipt, and looped indefinitely. Confirmed 2026-08-08 on
+// tx 0x17acd57569b869320a8ac698292a794f7156f801eae16520419c29ee25582e7d:
+// forno returned null, ankr + drpc both returned a valid status:0x1
+// receipt. Wrapping the executor here rotates through the fallback chain
+// on the FIRST throw so the receipt is fetched from a healthy endpoint,
+// the tick completes, and the cursor advances.
+function buildDefaultClient(): IndexerRpcClient {
+  const executor = createCeloFallbackExecutor()
+  return {
+    getBlockNumber() {
+      return executor.withFallback('indexer:getBlockNumber', (c) =>
+        c.getBlockNumber(),
+      )
+    },
+    getBlock(args) {
+      return executor.withFallback('indexer:getBlock', (c) =>
+        c.getBlock({
+          blockNumber: args.blockNumber,
+          includeTransactions: true,
+        }),
+      ) as ReturnType<IndexerRpcClient['getBlock']>
+    },
+    getTransactionReceipt(args) {
+      return executor.withFallback('indexer:getTransactionReceipt', (c) =>
+        c.getTransactionReceipt({ hash: args.hash }),
+      ) as ReturnType<IndexerRpcClient['getTransactionReceipt']>
+    },
+  }
 }
 
 function isWatchedTopic(topic: string | null, watched: Set<string>): boolean {
