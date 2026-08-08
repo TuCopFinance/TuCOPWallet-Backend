@@ -1,3 +1,6 @@
+// Wallet spec: `tasks/specs/wallet-consumer-spec.md` section "Squid quote proxy".
+// Public docs: `docs/api.md` section "GET /api/swap/quote". Any change to wire
+// shape or kill switches here must update both.
 import { Router, Request, Response } from 'express'
 import { createLogger } from '../lib/logger'
 import { NATIVE_TOKEN_SENTINEL, networkIdToChainId } from '../lib/networks'

@@ -1,3 +1,8 @@
+// Wallet spec: `tasks/specs/wallet-consumer-spec.md` section "Hooks API v2"
+// covers every endpoint mounted here (getPositions, getEarnPositions,
+// getShortcuts, triggerShortcut). Any wire change (new shortcutId, new
+// wallet-facing error code, changed body shape) must update that section
+// AND the changelog at the top of the spec.
 import { Router, type Request, type Response } from 'express'
 import { getDb } from '../lib/db'
 import { HEX_ADDRESS_RE } from '../lib/hex'

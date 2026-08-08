@@ -1,3 +1,9 @@
+// Wallet spec: `tasks/specs/wallet-consumer-spec.md` section "Backend kill
+// switches (env-driven)". Any new / removed / renamed env var here must
+// update that table (or explicitly land in the IGNORE list of
+// `scripts/regen-env-doc.ts` if internal-only). `yarn docs:env` detects
+// drift.
+//
 // Typed env module. Validates every env var the process consumes at boot via
 // zod. A misconfigured deploy (missing required var, malformed hex, etc.)
 // fails immediately with a clear error instead of returning 503 at the first
