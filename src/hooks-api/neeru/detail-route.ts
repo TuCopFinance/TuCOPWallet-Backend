@@ -1,3 +1,8 @@
+// Wallet spec: `tasks/specs/wallet-consumer-spec.md` section "Neeru
+// positions detail". Cero-exposicion applies here: response fields are
+// opaque wire names (amount / category / categoryLabel / endTs), never
+// semantic identifiers. Any change to the response shape or error contract
+// must update the spec section and its changelog entry.
 import type { Request, Response, Router } from 'express'
 import { getDb } from '../../lib/db'
 import { HEX_ADDRESS_LOWER_RE } from '../../lib/hex'

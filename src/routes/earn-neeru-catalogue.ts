@@ -1,3 +1,6 @@
+// Wallet spec: `tasks/specs/wallet-consumer-spec.md` section "Neeru catalogue
+// (categories + deposit token)". Cero-exposicion applies: wire field names
+// stay opaque (id / secs / rateRay / monthlyRatePercentage / annualEffectivePercentage).
 import { Router, Request, Response } from 'express'
 import {
   _setSharedNeeruRpcForTests,

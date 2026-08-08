@@ -1,3 +1,7 @@
+// Wallet spec: `tasks/specs/wallet-consumer-spec.md` section "Health probes".
+// Public docs: `docs/api.md` sections "/health", "/ready", "/health/relay",
+// "/metrics". Any change to `/ready` field shape or warmup gate behavior
+// must update both.
 import { Router, Request, Response } from 'express'
 import { isNeeruWarmupReady } from '../hooks-api/neeru/warmup'
 import { getCeloPublicClient } from '../lib/celoClient'

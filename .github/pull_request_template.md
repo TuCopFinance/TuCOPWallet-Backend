@@ -30,6 +30,21 @@
 <!-- New env vars? Schema migrations? Rollback caveats? Breaking changes for the wallet client?
      Otherwise: "none". -->
 
+## Wallet integration spec update
+
+Any PR touching `src/routes/`, `src/hooks-api/`, `src/transactions-indexer/`, or `src/lib/env.ts` MUST update the local wallet integration spec. See project `CLAUDE.md` for the full rule.
+
+- [ ] `tasks/specs/wallet-consumer-spec.md` changelog: added a one-line entry for this PR
+- [ ] `tasks/specs/wallet-consumer-spec.md` body: updated the affected section (if the delta is significant — new endpoint, new response field, new kill switch, new error code, changed semantics)
+- [ ] `yarn docs:env` reports no drift (only relevant if you added / removed / renamed an env var)
+- [ ] N/A — this PR does not touch wire, hooks-api, indexer, or env
+
+## Cero-exposicion check
+
+- [ ] I did NOT add partner-contract ABI names, event names, error names, addresses, or behavioral prose to tracked source
+- [ ] I did NOT commit content to `docs/` that includes kill switch names/defaults, rate limits, admin paths, incident detail, or wire coordination (those go to `tasks/specs/` gitignored)
+- [ ] N/A — this PR does not touch partner-app code or documentation
+
 ## Checklist
 
 - [ ] Conventional Commit message on the merge commit
