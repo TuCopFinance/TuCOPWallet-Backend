@@ -126,6 +126,25 @@ const envSchema = z.object({
   BLOCKSCOUT_ALLOWED_HOSTS: z.string().optional().default(''),
   SQUID_INTEGRATOR_ID: z.string().optional(),
 
+  // Squid integrator fee (aka collectFees per Squid docs). Kill switch is off
+  // by default; when flipped to true in Railway env, every /api/swap/quote
+  // proxy request adds a collectFees block that instructs Squid to deduct
+  // the configured percentage from the output token and route it on-chain
+  // to the configured recipient address. Address + percentage are REQUIRED
+  // when the flag is on (validated in the cross-field block below). Kept
+  // as env so we can flip on / off / rotate recipient / retune percentage
+  // without a redeploy. Range on percentage matches Squid's contract
+  // (0 < feeValue <= 100); percentages above ~1% are unusual for consumer
+  // swaps but we do not clamp defensively so the operator can dial it if
+  // Squid ever supports higher tiers.
+  ENABLE_SQUID_INTEGRATOR_FEES: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => v === 'true'),
+  SQUID_INTEGRATOR_FEE_ADDRESS: zHexAddress.optional(),
+  SQUID_INTEGRATOR_FEE_PERCENTAGE: z.coerce.number().gt(0).lte(100).optional(),
+
   // WRI relay
   WRI_RELAY_PK: zHexBytes32.optional(),
   WRI_RELAY_MIN_CELO_BALANCE: z.coerce.bigint().optional(),
@@ -307,6 +326,17 @@ export function parseEnv(): Env {
   if (e.INDEXER_ENABLED) {
     if (!e.DATABASE_URL || e.DATABASE_URL === 'disabled') {
       throw new Error('INDEXER_ENABLED=true but DATABASE_URL is missing or set to "disabled"')
+    }
+  }
+  if (e.ENABLE_SQUID_INTEGRATOR_FEES) {
+    const missing: string[] = []
+    if (!e.SQUID_INTEGRATOR_FEE_ADDRESS) missing.push('SQUID_INTEGRATOR_FEE_ADDRESS')
+    if (e.SQUID_INTEGRATOR_FEE_PERCENTAGE == null) missing.push('SQUID_INTEGRATOR_FEE_PERCENTAGE')
+    if (missing.length > 0) {
+      throw new Error(
+        `ENABLE_SQUID_INTEGRATOR_FEES=true but these required vars are missing: ${missing.join(', ')}. ` +
+          `Set both in Railway env before flipping the flag.`,
+      )
     }
   }
   if (e.NEERU_TIMELOCK_ENABLED) {

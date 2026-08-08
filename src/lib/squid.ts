@@ -17,6 +17,17 @@ export class SquidUpstreamError extends Error {
   }
 }
 
+// Squid's `collectFees` structure per https://docs.squidrouter.com/collect-fees.
+// When present, Squid deducts feeValue% from the output token BEFORE returning
+// the route + transaction, and routes that amount on-chain to integratorAddress
+// as part of the swap execution. Feature-flagged via ENABLE_SQUID_INTEGRATOR_FEES
+// in env.ts so the block below only ships to Squid when explicitly enabled.
+export interface SquidCollectFees {
+  integratorAddress: `0x${string}`
+  feeType: 'percentage'
+  feeValue: number
+}
+
 export interface SquidRouteRequest {
   fromAddress: string
   fromChain: string
@@ -27,6 +38,9 @@ export interface SquidRouteRequest {
   toAddress: string
   slippage: number
   quoteOnly: boolean
+  // Optional. Omitted from JSON.stringify body when undefined (viem-style)
+  // so the wire shape stays identical to today when the feature flag is off.
+  collectFees?: SquidCollectFees
 }
 
 interface SquidFeeCost {
@@ -50,6 +64,13 @@ export interface SquidRouteResponse {
       estimatedRouteDuration?: number
       feeCosts?: SquidFeeCost[]
       gasCosts?: SquidGasCost[]
+      // Squid echoes the integrator fee percentage back as a string decimal
+      // (e.g. "0.5" for 0.5%) when collectFees was in the request AND was
+      // successfully applied to the route. Absent when collectFees was not
+      // sent OR the route could not honor it (e.g. the underlying protocol
+      // does not support integrator fees for that hop). See the wallet's
+      // per-quote docs comment in useMultiSwapQuote.ts for the convention.
+      appFeePercentageIncludedInPrice?: string
     }
     transactionRequest: {
       target?: string
