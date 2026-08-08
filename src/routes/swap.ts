@@ -221,15 +221,22 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
 
     const payload = shapeResponse(upstream, input, collectFees)
 
-    // Structured integrator-fee log for on-chain reconciliation. Emitted
-    // ONLY when the fee is active so quiet swaps stay quiet. Fields chosen
-    // so a batch query can cross-check log.sum(feeAmount) against the
-    // recipient's ERC-20 balance growth on Celoscan. Any mismatch between
-    // `feeValueRequested` (our config) and `feeValueApplied` (Squid echo)
-    // is a data-integrity signal - if consistent, alert externally.
+    // Structured integrator-fee audit log for on-chain reconciliation.
+    // Emitted at WARN level (not INFO) because the project logger noops
+    // INFO in production (NODE_ENV=production sets minLevel=warn in
+    // src/lib/logger.ts). Every fee-collecting request is a business event
+    // that must be captured for reconciliation against the recipient's
+    // ERC-20 balance growth on Celoscan; losing it silently in prod would
+    // make the whole feature unauditable.
+    //
+    // Emitted ONLY when the fee is active so quiet swaps stay quiet.
+    // Fields chosen so a batch query can cross-check log.sum(feeAmount)
+    // against the recipient's balance growth. `feeMatch: false` = Squid
+    // applied a different percentage than requested (data-integrity
+    // signal - if it clusters, alert externally).
     if (collectFees) {
       const echoed = upstream.route?.estimate?.appFeePercentageIncludedInPrice
-      log.info(
+      log.warn(
         JSON.stringify({
           event: 'squid_integrator_fee',
           integratorAddress: collectFees.integratorAddress,
