@@ -24,8 +24,17 @@ const log = createLogger('neeru-indexer:rpc')
 // through lib/celoClient getters, which read from env, so a Railway env
 // override propagates here without a redeploy.
 
-export const PRIMARY_SKIP_AFTER_FAILURES = 3
-export const PRIMARY_SKIP_DURATION_MS = 5 * 60 * 1000
+// Skip window is applied to EVERY endpoint (was primary-only before
+// 2026-08-08). After N consecutive failures on any endpoint, we skip it
+// for M ms so requests stop paying the roundtrip cost when we know it
+// is failing. Matches the pattern already in src/lib/celoRpcFallback.ts.
+export const ENDPOINT_SKIP_AFTER_FAILURES = 3
+export const ENDPOINT_SKIP_DURATION_MS = 5 * 60 * 1000
+
+// Backwards-compat aliases for tests that still import the primary-only
+// names. Same values; safe to remove once no external consumer imports them.
+export const PRIMARY_SKIP_AFTER_FAILURES = ENDPOINT_SKIP_AFTER_FAILURES
+export const PRIMARY_SKIP_DURATION_MS = ENDPOINT_SKIP_DURATION_MS
 
 export interface NeeruGetLogsArgs {
   address: `0x${string}`
@@ -94,7 +103,7 @@ interface Endpoint {
   client: PublicClient
 }
 
-interface PrimaryState {
+interface EndpointState {
   consecutiveFailures: number
   skipUntilMs: number | null
 }
@@ -205,34 +214,48 @@ export function createNeeruRpc(
         ]
       : publicEndpoints
 
-  const primaryState: PrimaryState = {
-    consecutiveFailures: 0,
-    skipUntilMs: null,
-  }
+  // Per-endpoint skip state. When any endpoint fails N times in a row it
+  // gets skipped for M ms so subsequent requests stop paying the roundtrip
+  // cost. Recovers naturally: after the skip window elapses the next
+  // request re-tries the endpoint; a success resets the counter, a fresh
+  // failure re-skips it. Same pattern as src/lib/celoRpcFallback.ts.
+  //
+  // Before 2026-08-08 this was primary-only, which meant Alchemy at
+  // position 0 (when rate-limited) would be re-attempted on every request
+  // wasting ~100-500ms per call. Extending to every endpoint fixes that
+  // pattern uniformly.
+  const endpointState = new Map<EndpointName, EndpointState>(
+    endpoints.map((e) => [e.name, { consecutiveFailures: 0, skipUntilMs: null }]),
+  )
 
-  function primaryIsSkipped(): boolean {
-    if (primaryState.skipUntilMs == null) return false
-    if (now() >= primaryState.skipUntilMs) {
-      primaryState.skipUntilMs = null
-      primaryState.consecutiveFailures = 0
+  function isSkipped(name: EndpointName): boolean {
+    const s = endpointState.get(name)
+    if (!s || s.skipUntilMs == null) return false
+    if (now() >= s.skipUntilMs) {
+      s.skipUntilMs = null
+      s.consecutiveFailures = 0
       return false
     }
     return true
   }
 
-  function recordPrimaryFailure(): void {
-    primaryState.consecutiveFailures += 1
-    if (primaryState.consecutiveFailures >= PRIMARY_SKIP_AFTER_FAILURES) {
-      primaryState.skipUntilMs = now() + PRIMARY_SKIP_DURATION_MS
+  function recordFailure(endpoint: Endpoint): void {
+    const s = endpointState.get(endpoint.name)
+    if (!s) return
+    s.consecutiveFailures += 1
+    if (s.consecutiveFailures >= ENDPOINT_SKIP_AFTER_FAILURES) {
+      s.skipUntilMs = now() + ENDPOINT_SKIP_DURATION_MS
       log.warn(
-        `Primary RPC (${primaryUrl}) skipped for ${PRIMARY_SKIP_DURATION_MS}ms after ${primaryState.consecutiveFailures} consecutive failures`,
+        `RPC endpoint '${endpoint.name}' (${endpoint.url}) skipped for ${ENDPOINT_SKIP_DURATION_MS}ms after ${s.consecutiveFailures} consecutive failures`,
       )
     }
   }
 
-  function recordPrimarySuccess(): void {
-    primaryState.consecutiveFailures = 0
-    primaryState.skipUntilMs = null
+  function recordSuccess(name: EndpointName): void {
+    const s = endpointState.get(name)
+    if (!s) return
+    s.consecutiveFailures = 0
+    s.skipUntilMs = null
   }
 
   async function withFallback<T>(
@@ -241,17 +264,15 @@ export function createNeeruRpc(
   ): Promise<T> {
     const errors: Array<{ endpoint: string; error: string }> = []
     for (const endpoint of endpoints) {
-      if (endpoint.name === 'primary' && primaryIsSkipped()) {
-        continue
-      }
+      if (isSkipped(endpoint.name)) continue
       try {
         const result = await invoke(endpoint.client)
-        if (endpoint.name === 'primary') recordPrimarySuccess()
+        recordSuccess(endpoint.name)
         return result
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         errors.push({ endpoint: endpoint.url, error: message })
-        if (endpoint.name === 'primary') recordPrimaryFailure()
+        recordFailure(endpoint)
         log.warn(
           `RPC ${label} failed on ${endpoint.url}: ${message} - falling back`,
         )
