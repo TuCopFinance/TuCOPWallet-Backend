@@ -10,9 +10,10 @@ import {
   getPrimaryRpcUrl,
 } from '../lib/celoClient'
 
-type Call = 'primary' | 'forno' | 'ankr' | 'drpc'
+type Call = 'alchemy' | 'primary' | 'forno' | 'ankr' | 'drpc'
 
 interface MockClients {
+  alchemy?: PublicClient
   primary: PublicClient
   forno: PublicClient
   ankr: PublicClient
@@ -21,6 +22,7 @@ interface MockClients {
 }
 
 interface MockClientOptions {
+  alchemyBehavior?: () => Promise<bigint>
   primaryBehavior: () => Promise<bigint>
   fornoBehavior: () => Promise<bigint>
   ankrBehavior: () => Promise<bigint>
@@ -38,6 +40,9 @@ function buildMockClients(opts: MockClientOptions): MockClients {
     }) as unknown as PublicClient
 
   return {
+    ...(opts.alchemyBehavior
+      ? { alchemy: make('alchemy', opts.alchemyBehavior) }
+      : {}),
     primary: make('primary', opts.primaryBehavior),
     forno: make('forno', opts.fornoBehavior),
     ankr: make('ankr', opts.ankrBehavior),
@@ -55,6 +60,95 @@ function buildMockClients(opts: MockClientOptions): MockClients {
 describe('createNeeruRpc', () => {
   // Order (2026-08-04): [ankr, forno, drpc, primary]. See rpc.ts header
   // comment for the ordering rationale.
+  it('when Alchemy client is injected, tries Alchemy first + never falls through', async () => {
+    // Guards the 2026-08-08 change that inserts Alchemy at position 0 of
+    // the chain when ALCHEMY_RPC_URL is set. All other endpoints throw so
+    // any fall-through would be visible via `mocks.calls`.
+    const mocks = buildMockClients({
+      alchemyBehavior: async () => 999n,
+      primaryBehavior: async () => {
+        throw new Error('should not be called')
+      },
+      fornoBehavior: async () => {
+        throw new Error('should not be called')
+      },
+      ankrBehavior: async () => {
+        throw new Error('should not be called')
+      },
+      drpcBehavior: async () => {
+        throw new Error('should not be called')
+      },
+    })
+    const rpc = createNeeruRpc({
+      endpoints: {
+        alchemy: mocks.alchemy!,
+        primary: mocks.primary,
+        forno: mocks.forno,
+        ankr: mocks.ankr,
+        drpc: mocks.drpc,
+      },
+    })
+    expect(await rpc.getBlockNumber()).toBe(999n)
+    expect(mocks.calls).toEqual(['alchemy'])
+  })
+
+  it('when Alchemy fails, cascades to Ankr and preserves the rest of the chain', async () => {
+    const mocks = buildMockClients({
+      alchemyBehavior: async () => {
+        throw new Error('alchemy 503')
+      },
+      primaryBehavior: async () => {
+        throw new Error('should not be called')
+      },
+      fornoBehavior: async () => {
+        throw new Error('should not be called')
+      },
+      ankrBehavior: async () => 111n,
+      drpcBehavior: async () => {
+        throw new Error('should not be called')
+      },
+    })
+    const rpc = createNeeruRpc({
+      endpoints: {
+        alchemy: mocks.alchemy!,
+        primary: mocks.primary,
+        forno: mocks.forno,
+        ankr: mocks.ankr,
+        drpc: mocks.drpc,
+      },
+    })
+    expect(await rpc.getBlockNumber()).toBe(111n)
+    expect(mocks.calls).toEqual(['alchemy', 'ankr'])
+  })
+
+  it('when no Alchemy client is injected, chain matches the pre-Alchemy behavior', async () => {
+    // Backwards-compat guard. When ALCHEMY_RPC_URL is not set in the env
+    // AND options.endpoints.alchemy is not passed, the chain must be
+    // exactly the same as before this change: [ankr, forno, drpc, primary].
+    const mocks = buildMockClients({
+      primaryBehavior: async () => {
+        throw new Error('should not be called')
+      },
+      fornoBehavior: async () => {
+        throw new Error('should not be called')
+      },
+      ankrBehavior: async () => 42n,
+      drpcBehavior: async () => {
+        throw new Error('should not be called')
+      },
+    })
+    const rpc = createNeeruRpc({
+      endpoints: {
+        primary: mocks.primary,
+        forno: mocks.forno,
+        ankr: mocks.ankr,
+        drpc: mocks.drpc,
+      },
+    })
+    expect(await rpc.getBlockNumber()).toBe(42n)
+    expect(mocks.calls).toEqual(['ankr'])
+  })
+
   it('tries Ankr first, succeeds, never falls through', async () => {
     const mocks = buildMockClients({
       primaryBehavior: async () => {
