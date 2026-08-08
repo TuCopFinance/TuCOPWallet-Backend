@@ -14,7 +14,8 @@
     "dev": "tsx watch src/server.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
-    "test": "jest"
+    "test": "jest",
+    "docs:env": "tsx scripts/regen-env-doc.ts"
   },
   "dependencies": {
     "@sentry/node": "^10.0.0",

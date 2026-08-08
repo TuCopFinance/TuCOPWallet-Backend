@@ -14,7 +14,7 @@ Liveness probe. Returns 200 with static service info as long as the process is r
 
 ### `GET /ready`
 
-Readiness probe. Checks Postgres, Redis, and Celo RPC each with a 1s timeout. Returns 200 when all healthy or when the optional deps (DB, Redis) are unconfigured; returns 503 with a per-dependency status when any required check fails.
+Readiness probe. Checks Postgres, Redis, and Celo RPC. Returns 200 when all healthy or when the optional deps (DB, Redis) are unconfigured; returns 503 with a per-dependency status when any required check fails. Response may include a `neeruWarmup` field with values `'ok'` or `'warming'` on deploys where the Neeru indexer is running; during the first few seconds after a container restart the readiness gate returns 503 with `neeruWarmup: 'warming'` so external load balancers do not route traffic before the warmup completes.
 
 ```json
 { "ok": true, "checks": { "db": "ok", "redis": "ok", "rpc": "ok" } }
@@ -156,13 +156,16 @@ Drop-in replacement for Valora's `getSwapQuote` cloud function. Backend POSTs to
     "value": "0",
     "data": "0x...",
     "from": "0x...",
-    "allowanceTarget": "0x..."
+    "allowanceTarget": "0x...",
+    "appFeePercentageIncludedInPrice": "0.5"
   },
   "details": { "swapProvider": "squid" }
 }
 ```
 
 When `sellNetworkId !== buyNetworkId`, the `unvalidatedSwapTransaction` object additionally has `swapType: "cross-chain"` plus `estimatedDuration` (seconds), `maxCrossChainFee` and `estimatedCrossChainFee` (wei strings, sum of upstream `feeCosts`).
+
+The optional `appFeePercentageIncludedInPrice` field (added 2026-08-05) is a decimal string like `"0.5"` representing the percentage the upstream aggregator already deducted from `buyAmount`. Field is present only when the integrator-fee feature is active; consumers should render it as a fee line but MUST NOT subtract it from `buyAmount` a second time (the amount is already net).
 
 **Error responses:**
 
