@@ -114,15 +114,23 @@ const envSchema = z.object({
   // Redis (sentinel "disabled" disables caching)
   REDIS_URL: z.string().optional(),
 
-  // Celo RPC fallback chain. Order is primary -> forno -> ankr -> drpc; the
-  // Neeru indexer supervisor and Allbridge's viem fallback transport both
-  // consume `getCeloRpcFallbackUrls()` from lib/celoClient. All four are
-  // required: the URLs are deployment-controlled configuration, not in-source
-  // constants, so a deploy can rotate any endpoint without a code change.
+  // Celo RPC fallback chain. Current tried-order in the Neeru indexer +
+  // transactions-indexer chain: [alchemy?, ankr, forno, drpc, primary].
+  // ALCHEMY is our OWN dedicated endpoint (own API key, own rate limit) and
+  // is preferred first when set. The four public endpoints (ankr, forno,
+  // drpc, primary) remain required so a chain configured without Alchemy
+  // still cascades cleanly. All four public URLs are deployment-controlled
+  // configuration, not in-source constants; a deploy can rotate any
+  // endpoint without a code change.
   PRIMARY_RPC_URL: zHttpsUrl,
   FORNO_URL: zHttpsUrl,
   ANKR_RPC_URL: zHttpsUrl,
   DRPC_RPC_URL: zHttpsUrl,
+  // Optional. When set, Alchemy is inserted at position 0 of the fallback
+  // chain so it is tried first. Absent when we do not have (or want to
+  // consume) our own dedicated endpoint. Format: full URL with API key
+  // embedded, e.g. `https://celo-mainnet.g.alchemy.com/v2/<key>`.
+  ALCHEMY_RPC_URL: zHttpsUrl.optional(),
 
   // Upstream providers (optional; routes 503 when their feature is hit
   // without the corresponding key)
