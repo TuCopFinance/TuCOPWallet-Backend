@@ -1,6 +1,6 @@
 import type { Pool } from 'pg'
 import type { Hash } from 'viem'
-import { createCeloFallbackExecutor } from '../lib/celoRpcFallback'
+import { getSharedCeloFallbackExecutor } from '../lib/celoRpcFallback'
 import { getDb } from '../lib/db'
 import { env } from '../lib/env'
 import { createLogger } from '../lib/logger'
@@ -75,7 +75,7 @@ export interface IndexerRpcClient {
 // on the FIRST throw so the receipt is fetched from a healthy endpoint,
 // the tick completes, and the cursor advances.
 function buildDefaultClient(): IndexerRpcClient {
-  const executor = createCeloFallbackExecutor()
+  const executor = getSharedCeloFallbackExecutor()
   return {
     getBlockNumber() {
       return executor.withFallback('indexer:getBlockNumber', (c) =>
