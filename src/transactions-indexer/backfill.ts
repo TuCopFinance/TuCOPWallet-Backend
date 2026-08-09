@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from 'pg'
 import type { Hash } from 'viem'
 import {
-  createCeloFallbackExecutor,
+  getSharedCeloFallbackExecutor,
   type FallbackExecutor,
 } from '../lib/celoRpcFallback'
 import { env } from '../lib/env'
@@ -507,7 +507,12 @@ export async function runBackfillLoopForAddress(
   options: RunBackfillOptions = {},
 ): Promise<void> {
   const userLower = address.toLowerCase()
-  const executor = options.executor ?? createCeloFallbackExecutor()
+  // Shared singleton so 43+ concurrent backfills all consult the same
+  // endpoint skip state. Fresh executors per backfill would each pay the
+  // "3 initial failures then skip" cost independently on rate-limited
+  // endpoints (measured on 2026-08-08 as ~130 wasted roundtrips per
+  // 60s boot burst before this fix).
+  const executor = options.executor ?? getSharedCeloFallbackExecutor()
   const baselineDelay = options.chunkDelayMsOverride ?? env.TX_INDEXER_BACKFILL_CHUNK_DELAY_MS
   const maxDelay = options.maxDelayMsOverride ?? env.TX_INDEXER_BACKFILL_MAX_DELAY_MS
   const depth = BigInt(options.depthBlocksOverride ?? env.TX_INDEXER_BACKFILL_BLOCKS)
