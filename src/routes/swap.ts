@@ -15,10 +15,24 @@ import {
 import {
   getUniswapV4Quote,
   isUsdtCopmPair,
+  POOL_USDT_COPM,
   type UniswapV4Direction,
 } from '../lib/uniswapV4'
+import {
+  buildPermit2TypedData,
+  buildV4SwapCalldata,
+  CELO_CHAIN_ID,
+  getPermit2AllowanceInfo,
+  PERMIT2_ADDRESS,
+  UNIVERSAL_ROUTER_ADDRESS,
+} from '../lib/uniswapV4Executor'
 import { firstZodIssueAsError } from './schemas/common'
-import { swapQuoteQuerySchema, type SwapQuoteInput } from './schemas/swap'
+import {
+  swapBuildTxSchema,
+  swapQuoteQuerySchema,
+  type SwapBuildTxInput,
+  type SwapQuoteInput,
+} from './schemas/swap'
 
 const router = Router()
 const log = createLogger('routes:swap')
@@ -171,6 +185,181 @@ function shapeResponse(
   }
 }
 
+// Shapes the Fase 2 Uniswap V4 response returned when the executor flag is
+// on and either (a) Uniswap wins price on the USDT<->COPm pair, or (b) Squid
+// upstream failed. The wire shape preserves the Squid `unvalidatedSwapTransaction`
+// fields wallets already read (buyAmount, sellAmount, price, guaranteedPrice,
+// gas, to, from, value, allowanceTarget) plus a `data: '0x'` sentinel + a new
+// `details.permit2` bundle instructing the wallet to sign + POST /build-tx.
+//
+// `data === '0x'` is intentional: with the Uniswap path the final calldata
+// cannot be built until the user signs the Permit2 typed data. Wallets that
+// blindly submit the response without signing/posting to /build-tx will
+// bounce with an on-chain revert (execute() rejects an empty payload). This
+// keeps the wire delta minimal (one extra field) without silently allowing
+// non-integrated wallets to submit broken transactions.
+async function shapeUniswapV4Response(input: {
+  direction: UniswapV4Direction
+  userAddress: `0x${string}`
+  sellAmount: string // uint256 decimal string
+  sellToken: `0x${string}`
+  buyToken: `0x${string}`
+  slippagePercentage: number // 0..100
+  uniswapAmountOut: bigint
+  uniswapGasEstimate: bigint
+  collectFees: SquidCollectFees | undefined
+  quoteOnly: boolean
+}): Promise<unknown> {
+  const sellAmountBn = BigInt(input.sellAmount)
+  // Slippage-adjusted floor for the OUTPUT token. Same convention as
+  // Squid's toAmountMin (subtract slippage% from the quoted amountOut).
+  const slippageBps = Math.max(0, Math.round(input.slippagePercentage * 100))
+  const grossAmountOut = input.uniswapAmountOut
+  const grossMinOut = (grossAmountOut * BigInt(10000 - slippageBps)) / 10000n
+  // Fee comes off the OUTPUT token via TAKE_PORTION. The user's floor
+  // after the fee is (grossMinOut * (10000 - feeBips) / 10000).
+  const feeBips =
+    input.collectFees && input.collectFees.feeType === 'percentage'
+      ? Math.max(0, Math.round(input.collectFees.feeValue * 100))
+      : 0
+  const minBuyAmount =
+    feeBips > 0
+      ? (grossMinOut * BigInt(10000 - feeBips)) / 10000n
+      : grossMinOut
+  const netAmountOut =
+    feeBips > 0
+      ? (grossAmountOut * BigInt(10000 - feeBips)) / 10000n
+      : grossAmountOut
+
+  // Permit2 nonce for this (user, sellToken, UniversalRouter) triple.
+  // If the allowance is fresh AND large enough AND not expired, the wallet
+  // MAY skip signing and just submit the swap through a shortened path.
+  // We surface `existingAllowance` so the wallet can decide; either way
+  // we hand the wallet a typed data to sign for the safe path (fresh nonce
+  // is always valid to sign since Permit2 rejects reuse anyway).
+  let existingAllowance = { amount: '0', expiration: 0, nonce: 0 }
+  let nonce = 0
+  try {
+    const info = await getPermit2AllowanceInfo(
+      input.userAddress,
+      input.sellToken,
+    )
+    existingAllowance = {
+      amount: info.amount.toString(),
+      expiration: info.expiration,
+      nonce: info.nonce,
+    }
+    nonce = info.nonce
+  } catch (err) {
+    log.warn(
+      'permit2 allowance read failed, using nonce=0 fallback:',
+      err instanceof Error ? err.message : err,
+    )
+  }
+
+  // sigDeadline: give the user 5 minutes to sign the typed data.
+  // permitExpiration: 1 year (matches Uniswap Interface convention;
+  // the allowance is reusable during this window).
+  const nowSec = BigInt(Math.floor(Date.now() / 1000))
+  const sigDeadline = nowSec + 300n // 5 min
+  const permitExpiration = Number(nowSec + 365n * 24n * 3600n)
+  // permitAmount: exact sellAmount. Bounds user's exposure to precisely
+  // this trade even if the signature leaks. NOT MAX_UINT160 by design.
+  const permitAmount = sellAmountBn
+
+  const typedData = buildPermit2TypedData({
+    token: input.sellToken,
+    amount: permitAmount,
+    expiration: permitExpiration,
+    nonce,
+    sigDeadline,
+  })
+
+  const price =
+    grossAmountOut === 0n
+      ? '0'
+      : formatFixedPoint(grossAmountOut, sellAmountBn)
+  const guaranteedPrice =
+    minBuyAmount === 0n
+      ? '0'
+      : formatFixedPoint(minBuyAmount, sellAmountBn)
+
+  const swapTx: Record<string, unknown> = {
+    swapType: 'same-chain',
+    chainId: CELO_CHAIN_ID,
+    buyAmount: netAmountOut.toString(),
+    sellAmount: input.sellAmount,
+    buyTokenAddress: input.buyToken,
+    sellTokenAddress: input.sellToken,
+    price,
+    guaranteedPrice,
+    estimatedPriceImpact: null,
+    gas: input.uniswapGasEstimate.toString(),
+    estimatedGasUse: input.uniswapGasEstimate.toString(),
+    // With Uniswap V4 path the final `to` and `data` come back from
+    // /api/swap/build-tx after the wallet signs Permit2. We surface the
+    // eventual `to` so the wallet can pre-populate contract simulation UIs,
+    // but `data: '0x'` is a hard sentinel that means "you MUST call
+    // /build-tx before submitting".
+    to: UNIVERSAL_ROUTER_ADDRESS,
+    value: '0',
+    data: '0x',
+    from: input.userAddress,
+    // User approves this address (Permit2) with a standard ERC20 approve for
+    // the sellToken. Wallet already has approve-flow logic keyed on this
+    // field for the Squid path.
+    allowanceTarget: PERMIT2_ADDRESS,
+  }
+  if (feeBips > 0) {
+    swapTx.appFeePercentageIncludedInPrice = (feeBips / 100).toString()
+  }
+
+  return {
+    unvalidatedSwapTransaction: swapTx,
+    details: {
+      swapProvider: 'uniswap-v4',
+      // The wallet MUST:
+      //   1. eth_signTypedData_v4 on `permit2.typedData`.
+      //   2. If `existingAllowance.amount < sellAmount` OR
+      //      `existingAllowance.expiration <= now`, the user first needs to
+      //      approve sellToken -> Permit2 (allowanceTarget). Standard ERC20.
+      //   3. POST `permit2.buildTxRequest` to `/api/swap/build-tx` filled with
+      //      the values below + `permit2Signature: <sig>`. Response is the
+      //      final `{to, data, value}` to submit.
+      permit2: {
+        typedData,
+        existingAllowance,
+        buildTxUrl: '/api/swap/build-tx',
+        // Concrete request body template the wallet fills the signature into.
+        buildTxRequest: {
+          direction: input.direction,
+          userAddress: input.userAddress,
+          sellAmount: input.sellAmount,
+          minBuyAmount: minBuyAmount.toString(),
+          deadline: sigDeadline.toString(),
+          permitToken: input.sellToken,
+          permitAmount: permitAmount.toString(),
+          permitExpiration,
+          permitNonce: nonce,
+          permitSigDeadline: sigDeadline.toString(),
+          // permit2Signature: '<0x + 130 hex from eth_signTypedData_v4>'
+        },
+      },
+    },
+  }
+}
+
+// Small helper to format `min / sell` at 1e18 precision without going through
+// Number (which loses precision above 2^53). Mirrors computeGuaranteedPrice
+// so the wire shape matches Squid's for both fields.
+function formatFixedPoint(numerator: bigint, denominator: bigint): string {
+  if (denominator === 0n) return '0'
+  const scaled = (numerator * PRICE_SCALE) / denominator
+  const whole = scaled / PRICE_SCALE
+  const frac = (scaled % PRICE_SCALE).toString().padStart(18, '0').replace(/0+$/, '')
+  return frac.length === 0 ? whole.toString() : `${whole.toString()}.${frac}`
+}
+
 router.get('/api/swap/quote', async (req: Request, res: Response) => {
   const integratorId = process.env.SQUID_INTEGRATOR_ID
   if (!integratorId) {
@@ -220,6 +409,14 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
   const uniswapShadowActive =
     uniswapDirection !== null &&
     process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED === 'true'
+  // Fase 2 activation flag: when true AND the pair matches AND the
+  // shadow flag is on, we may return a Uniswap-V4-flavored response
+  // (uniswap-v4 provider + permit2 typed data) instead of the Squid
+  // payload. Env refinement rejects active=true without shadow=true, so
+  // both preconditions collapse to a single boolean.
+  const uniswapExecuteActive =
+    uniswapShadowActive &&
+    process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE === 'true'
   const uniswapQuotePromise: Promise<
     { amountOut: bigint; gasEstimate: bigint } | null | Error
   > | null = uniswapShadowActive
@@ -245,19 +442,54 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
       integratorId,
     )
 
-    const payload = shapeResponse(upstream, input, collectFees)
+    // Resolve the Uniswap quote alongside the Squid upstream so decision +
+    // shadow log share the same result. `uniswapQuotePromise` was launched
+    // in parallel with the Squid request above.
+    const uniswapResultForDecision = uniswapQuotePromise
+      ? await uniswapQuotePromise
+      : null
+
+    // Fase 2 decision: when the executor flag is active AND Uniswap has a
+    // valid quote AND (Squid failed to price OR Uniswap gave more output),
+    // reshape the response to route through Uniswap. Otherwise fall through
+    // to the Squid payload as before.
+    const squidToAmount = upstream.route?.estimate?.toAmount
+    const shouldRouteUniswap =
+      uniswapExecuteActive &&
+      uniswapResultForDecision !== null &&
+      !(uniswapResultForDecision instanceof Error) &&
+      uniswapDirection !== null &&
+      (!squidToAmount ||
+        BigInt(uniswapResultForDecision.amountOut) > BigInt(squidToAmount))
+
+    const payload = shouldRouteUniswap
+      ? await shapeUniswapV4Response({
+          direction: uniswapDirection!,
+          userAddress: input.userAddress as `0x${string}`,
+          sellAmount: input.sellAmount,
+          sellToken: input.sellToken as `0x${string}`,
+          buyToken: input.buyToken as `0x${string}`,
+          slippagePercentage: input.slippagePercentage,
+          uniswapAmountOut: (
+            uniswapResultForDecision as { amountOut: bigint; gasEstimate: bigint }
+          ).amountOut,
+          uniswapGasEstimate: (
+            uniswapResultForDecision as { amountOut: bigint; gasEstimate: bigint }
+          ).gasEstimate,
+          collectFees,
+          quoteOnly: input.quoteOnly,
+        })
+      : shapeResponse(upstream, input, collectFees)
 
     // Shadow log for the Uniswap V4 comparison. Emit whenever the pair is
     // USDT<->COPm and the flag is on, regardless of whether Squid succeeded
     // or failed. Uses WARN level for the same reason as the squid_integrator_fee
     // log (INFO is noop'd in prod).
-    if (uniswapShadowActive && uniswapQuotePromise) {
-      const uniswapResult = await uniswapQuotePromise
-      const squidBuyAmount = upstream.route?.estimate?.toAmount
+    if (uniswapShadowActive && uniswapResultForDecision !== null) {
       logQuoteComparison({
-        squidBuyAmount: squidBuyAmount ?? null,
+        squidBuyAmount: squidToAmount ?? null,
         squidError: null,
-        uniswapResult,
+        uniswapResult: uniswapResultForDecision,
         direction: uniswapDirection!,
         sellAmount: input.sellAmount,
         userAddress: input.userAddress,
@@ -308,12 +540,16 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
     res.json(payload)
   } catch (err) {
     log.warn('squid upstream error:', err instanceof Error ? err.message : err)
+    // Resolve the Uniswap quote (was launched in parallel with Squid) so
+    // both the shadow log AND the fallback decision see it.
+    const uniswapResultOnSquidFail = uniswapQuotePromise
+      ? await uniswapQuotePromise
+      : null
     // Emit the shadow comparison even when Squid failed: this is exactly
     // the weekend-Mento pattern we want data on. Captures "Squid returned
     // 502 but Uniswap V4 had a real quote of X COPm" — the value-of-Fase-2
     // signal.
-    if (uniswapShadowActive && uniswapQuotePromise) {
-      const uniswapResult = await uniswapQuotePromise
+    if (uniswapShadowActive && uniswapResultOnSquidFail !== null) {
       logQuoteComparison({
         squidBuyAmount: null,
         squidError:
@@ -322,12 +558,35 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
             : err instanceof Error
               ? err.message.slice(0, 200)
               : 'unknown',
-        uniswapResult,
+        uniswapResult: uniswapResultOnSquidFail,
         direction: uniswapDirection!,
         sellAmount: input.sellAmount,
         userAddress: input.userAddress,
         quoteOnly: input.quoteOnly,
       })
+    }
+    // Fase 2: when the executor flag is on AND Uniswap gave us a quote,
+    // serve the Uniswap response even though Squid failed. This is the
+    // primary user-benefit of the executor: weekend swaps stop 502ing.
+    if (
+      uniswapExecuteActive &&
+      uniswapResultOnSquidFail !== null &&
+      !(uniswapResultOnSquidFail instanceof Error) &&
+      uniswapDirection !== null
+    ) {
+      const payload = await shapeUniswapV4Response({
+        direction: uniswapDirection,
+        userAddress: input.userAddress as `0x${string}`,
+        sellAmount: input.sellAmount,
+        sellToken: input.sellToken as `0x${string}`,
+        buyToken: input.buyToken as `0x${string}`,
+        slippagePercentage: input.slippagePercentage,
+        uniswapAmountOut: uniswapResultOnSquidFail.amountOut,
+        uniswapGasEstimate: uniswapResultOnSquidFail.gasEstimate,
+        collectFees,
+        quoteOnly: input.quoteOnly,
+      })
+      return res.json(payload)
     }
     if (err instanceof SquidUpstreamError && err.status === 429) {
       if (err.retryAfter) res.setHeader('Retry-After', err.retryAfter)
@@ -389,5 +648,91 @@ function logQuoteComparison(input: {
     }),
   )
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/swap/build-tx — Fase 2 Uniswap V4 executor
+// ---------------------------------------------------------------------------
+//
+// Called by the wallet AFTER it has signed the Permit2 typed data returned
+// from GET /api/swap/quote (uniswap-v4 path). Body carries the signature
+// plus the exact PermitSingle values the wallet signed. Backend re-validates,
+// asserts the pair matches the USDT<->COPm pool + the signed token matches
+// the sell token, then rebuilds the UniversalRouter.execute() calldata
+// server-side and returns the final tx bytes {to, data, value}.
+//
+// Gated behind SWAP_FALLBACK_UNISWAP_V4_ACTIVE. Returns 503 when off,
+// 400 on any input mismatch, 200 with the tx on success.
+router.post('/api/swap/build-tx', async (req: Request, res: Response) => {
+  if (process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE !== 'true') {
+    return res.status(503).json({ error: 'uniswap v4 executor not enabled' })
+  }
+  const parsed = swapBuildTxSchema.safeParse(req.body)
+  if (!parsed.success) {
+    return res.status(400).json({ error: firstZodIssueAsError(parsed.error) })
+  }
+  const body: SwapBuildTxInput = parsed.data
+
+  // Pair sanity check. The direction + permitToken combination must map to
+  // the known USDT<->COPm pool.
+  const expectedSellToken =
+    body.direction === 'USDT_TO_COPM'
+      ? POOL_USDT_COPM.currency0
+      : POOL_USDT_COPM.currency1
+  if (body.permitToken !== expectedSellToken) {
+    return res
+      .status(400)
+      .json({ error: 'permitToken does not match direction sell token' })
+  }
+  // The permit amount must cover the swap. If the wallet signed less than
+  // sellAmount, the swap would revert at SETTLE_ALL.
+  if (BigInt(body.permitAmount) < BigInt(body.sellAmount)) {
+    return res
+      .status(400)
+      .json({ error: 'permitAmount is less than sellAmount' })
+  }
+
+  try {
+    const tx = buildV4SwapCalldata({
+      direction: body.direction,
+      recipient: body.userAddress as `0x${string}`,
+      sellAmount: BigInt(body.sellAmount),
+      minBuyAmount: BigInt(body.minBuyAmount),
+      deadline: BigInt(body.deadline),
+      permit2Signature: body.permit2Signature as `0x${string}`,
+      permitDetails: {
+        token: body.permitToken as `0x${string}`,
+        amount: BigInt(body.permitAmount),
+        expiration: body.permitExpiration,
+        nonce: body.permitNonce,
+      },
+      permitSigDeadline: BigInt(body.permitSigDeadline),
+    })
+    // Emit a structured audit log symmetric to the squid_integrator_fee log
+    // so we can reconcile Uniswap swap volume + fee routing off-chain.
+    log.warn(
+      JSON.stringify({
+        event: 'uniswap_v4_build_tx',
+        direction: body.direction,
+        userAddress: body.userAddress,
+        sellAmount: body.sellAmount,
+        minBuyAmount: body.minBuyAmount,
+        deadline: body.deadline,
+        permitNonce: body.permitNonce,
+        permitAmount: body.permitAmount,
+      }),
+    )
+    return res.json({
+      to: tx.to,
+      data: tx.data,
+      value: tx.value.toString(),
+    })
+  } catch (err) {
+    log.warn(
+      'buildV4SwapCalldata failed:',
+      err instanceof Error ? err.message : err,
+    )
+    return res.status(400).json({ error: 'invalid build-tx params' })
+  }
+})
 
 export default router
