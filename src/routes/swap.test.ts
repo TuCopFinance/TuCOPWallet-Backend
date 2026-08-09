@@ -10,6 +10,16 @@ jest.mock('../lib/redis', () => ({
   getRedis: () => (useRedis ? mockRedisClient : null),
 }))
 
+const mockGetUniswapV4Quote: jest.Mock = jest.fn()
+const mockIsUsdtCopmPair: jest.Mock = jest.fn()
+jest.mock('../lib/uniswapV4', () => ({
+  getUniswapV4Quote: (
+    direction: 'USDT_TO_COPM' | 'COPM_TO_USDT',
+    exactAmount: bigint,
+  ) => mockGetUniswapV4Quote(direction, exactAmount),
+  isUsdtCopmPair: (sell: string, buy: string) => mockIsUsdtCopmPair(sell, buy),
+}))
+
 // Synthetic test address. Avoid wallet-shaped prefixes that might collide with
 // a real maintainer key.
 const USER = '0x3333333333333333333333333333333333333333'
@@ -371,5 +381,119 @@ describe('GET /api/swap/quote', () => {
 
     expect(fetchSpy).not.toHaveBeenCalled()
     expect(second.body.unvalidatedSwapTransaction).toMatchObject({ fromCache: true })
+  })
+
+  describe('Uniswap V4 shadow log (SWAP_FALLBACK_UNISWAP_V4_ENABLED)', () => {
+    // The USDT<->COPm pair triggers the shadow. Params helper for that pair.
+    const COPM = '0x8a567e2ae79ca692bd748ab832081c45de4041ea'
+    function usdtCopmParams(overrides: Record<string, string> = {}): string {
+      return paramsTo({
+        buyToken: COPM,
+        sellToken: USDT,
+        sellAmount: '2000000',
+        ...overrides,
+      })
+    }
+
+    // Stubs at module top-level via jest.mock. Reset + configure per test.
+    beforeEach(() => {
+      mockGetUniswapV4Quote.mockReset()
+      mockIsUsdtCopmPair.mockReset()
+      // Default: real detector recognizes USDT<->COPm; tests can override.
+      mockIsUsdtCopmPair.mockImplementation((sell: string, buy: string) => {
+        const s = sell.toLowerCase()
+        const b = buy.toLowerCase()
+        if (s === USDT && b === COPM) return 'USDT_TO_COPM'
+        if (s === COPM && b === USDT) return 'COPM_TO_USDT'
+        return null
+      })
+    })
+
+    afterEach(() => {
+      delete process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED
+    })
+
+    it('flag OFF: does NOT call Uniswap V4 Quoter, even for USDT<->COPm pair', async () => {
+      // Baseline: no extra RPC roundtrip when the flag is off. Guards against
+      // ambient shadow calls that would burn Alchemy CU/s budget for nothing.
+      fetchSpy.mockResolvedValueOnce(squidResponse())
+      const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
+      expect(res.status).toBe(200)
+      expect(mockGetUniswapV4Quote).not.toHaveBeenCalled()
+    })
+
+    it('flag ON + non-USDT<->COPm pair: does NOT call Uniswap V4 (detector says no)', async () => {
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED = 'true'
+      fetchSpy.mockResolvedValueOnce(squidResponse())
+      // paramsTo() defaults to USDC/USDT, not USDT/COPm.
+      const res = await request(app).get('/api/swap/quote?' + paramsTo())
+      expect(res.status).toBe(200)
+      expect(mockGetUniswapV4Quote).not.toHaveBeenCalled()
+    })
+
+    it('flag ON + USDT->COPm + Squid OK + Uniswap OK: response unchanged (still Squid), shadow log emitted', async () => {
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED = 'true'
+      mockGetUniswapV4Quote.mockResolvedValueOnce({
+        amountOut: 6484000000000000000000n,
+        gasEstimate: 36719n,
+      })
+      fetchSpy.mockResolvedValueOnce(squidResponse({ toAmount: '5000000000000000000000' }))
+
+      const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
+
+      expect(res.status).toBe(200)
+      // Response is still Squid-shaped. No new fields, no source key.
+      expect(res.body).toMatchObject({ details: { swapProvider: 'squid' } })
+      expect(res.body).not.toHaveProperty('source')
+      // Uniswap Quoter WAS called with the right direction + amount.
+      expect(mockGetUniswapV4Quote).toHaveBeenCalledWith('USDT_TO_COPM', 2_000_000n)
+    })
+
+    it('flag ON + USDT->COPm + Squid 502 + Uniswap OK: still returns 502 (Fase 1 does not route), shadow log captures the gap', async () => {
+      // This is exactly the weekend Mento scenario. Fase 1 records the
+      // opportunity but does not yet act on it; Fase 2 will.
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED = 'true'
+      mockGetUniswapV4Quote.mockResolvedValueOnce({
+        amountOut: 6484000000000000000000n,
+        gasEstimate: 36719n,
+      })
+      fetchSpy.mockResolvedValueOnce(new Response('', { status: 502 }))
+
+      const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
+
+      expect(res.status).toBe(502)
+      expect(res.body).toEqual({ error: 'squid upstream unavailable' })
+      // Uniswap was still called + comparison log emitted.
+      expect(mockGetUniswapV4Quote).toHaveBeenCalledTimes(1)
+    })
+
+    it('flag ON + Uniswap Quoter throws: does not break Squid path', async () => {
+      // Uniswap-side failure must not leak into the user response. Squid
+      // still serves; shadow log records the Uniswap error.
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED = 'true'
+      mockGetUniswapV4Quote.mockRejectedValueOnce(new Error('rpc timeout'))
+      fetchSpy.mockResolvedValueOnce(squidResponse())
+
+      const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
+
+      expect(res.status).toBe(200)
+      expect(res.body).toMatchObject({ details: { swapProvider: 'squid' } })
+    })
+
+    it('flag ON + USDT->COPm + Squid 429: preserves 429 pass-through even with shadow active', async () => {
+      // The 429 path is separate from the 502 path — wallet team said rate-limit
+      // "probably NO gatilla Uniswap sino retry". Verify shadow doesn't change
+      // the 429 semantics.
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED = 'true'
+      mockGetUniswapV4Quote.mockResolvedValueOnce(null) // no liquidity
+      fetchSpy.mockResolvedValueOnce(
+        new Response('', { status: 429, headers: { 'retry-after': '3' } }),
+      )
+
+      const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
+
+      expect(res.status).toBe(429)
+      expect(res.headers['retry-after']).toBe('3')
+    })
   })
 })
