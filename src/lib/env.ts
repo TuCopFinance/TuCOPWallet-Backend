@@ -146,6 +146,22 @@ const envSchema = z.object({
     .default('false')
     .transform((v) => v === 'true'),
 
+  // Fase 2 activation flag. When true, /api/swap/quote may return
+  // `swapProvider: "uniswap-v4"` with a `permit2` typed-data payload the
+  // wallet must sign before POSTing back to /api/swap/build-tx. Independent
+  // from SWAP_FALLBACK_UNISWAP_V4_ENABLED (shadow log): a deployment can
+  // have shadow ON + active OFF (collect data), or both ON (route real
+  // orders). Requires the shadow flag to also be ON as a hard prerequisite
+  // (env refinement below rejects active=true + shadow=false at boot).
+  // Wallets older than the Fase 2 client release will not understand the
+  // new response shape; flip only after the wallet team confirms their
+  // release is live. Non-USDT<->COPm pairs are unaffected regardless.
+  SWAP_FALLBACK_UNISWAP_V4_ACTIVE: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => v === 'true'),
+
   // Upstream providers (optional; routes 503 when their feature is hit
   // without the corresponding key)
   COINMARKETCAP_API_KEY: z.string().optional(),
@@ -366,6 +382,12 @@ export function parseEnv(): Env {
           `Set both in Railway env before flipping the flag.`,
       )
     }
+  }
+  if (e.SWAP_FALLBACK_UNISWAP_V4_ACTIVE && !e.SWAP_FALLBACK_UNISWAP_V4_ENABLED) {
+    throw new Error(
+      'SWAP_FALLBACK_UNISWAP_V4_ACTIVE=true requires SWAP_FALLBACK_UNISWAP_V4_ENABLED=true. ' +
+        'Turn the shadow log on before routing real orders through Uniswap.',
+    )
   }
   if (e.NEERU_TIMELOCK_ENABLED) {
     const missing: string[] = []

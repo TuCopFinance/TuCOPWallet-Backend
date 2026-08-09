@@ -12,13 +12,31 @@ jest.mock('../lib/redis', () => ({
 
 const mockGetUniswapV4Quote: jest.Mock = jest.fn()
 const mockIsUsdtCopmPair: jest.Mock = jest.fn()
-jest.mock('../lib/uniswapV4', () => ({
-  getUniswapV4Quote: (
-    direction: 'USDT_TO_COPM' | 'COPM_TO_USDT',
-    exactAmount: bigint,
-  ) => mockGetUniswapV4Quote(direction, exactAmount),
-  isUsdtCopmPair: (sell: string, buy: string) => mockIsUsdtCopmPair(sell, buy),
-}))
+jest.mock('../lib/uniswapV4', () => {
+  const actual = jest.requireActual('../lib/uniswapV4')
+  return {
+    ...actual,
+    getUniswapV4Quote: (
+      direction: 'USDT_TO_COPM' | 'COPM_TO_USDT',
+      exactAmount: bigint,
+    ) => mockGetUniswapV4Quote(direction, exactAmount),
+    isUsdtCopmPair: (sell: string, buy: string) =>
+      mockIsUsdtCopmPair(sell, buy),
+  }
+})
+
+const mockGetPermit2AllowanceInfo: jest.Mock = jest.fn()
+jest.mock('../lib/uniswapV4Executor', () => {
+  const actual = jest.requireActual('../lib/uniswapV4Executor')
+  return {
+    ...actual,
+    getPermit2AllowanceInfo: (
+      user: `0x${string}`,
+      token: `0x${string}`,
+      spender?: `0x${string}`,
+    ) => mockGetPermit2AllowanceInfo(user, token, spender),
+  }
+})
 
 // Synthetic test address. Avoid wallet-shaped prefixes that might collide with
 // a real maintainer key.
@@ -494,6 +512,181 @@ describe('GET /api/swap/quote', () => {
 
       expect(res.status).toBe(429)
       expect(res.headers['retry-after']).toBe('3')
+    })
+  })
+
+  describe('Uniswap V4 executor (SWAP_FALLBACK_UNISWAP_V4_ACTIVE)', () => {
+    const COPM = '0x8a567e2ae79ca692bd748ab832081c45de4041ea'
+    function usdtCopmParams(overrides: Record<string, string> = {}): string {
+      return paramsTo({
+        buyToken: COPM,
+        sellToken: USDT,
+        sellAmount: '2000000',
+        ...overrides,
+      })
+    }
+
+    beforeEach(() => {
+      mockGetUniswapV4Quote.mockReset()
+      mockIsUsdtCopmPair.mockReset()
+      mockGetPermit2AllowanceInfo.mockReset()
+      mockIsUsdtCopmPair.mockImplementation((sell: string, buy: string) => {
+        const s = sell.toLowerCase()
+        const b = buy.toLowerCase()
+        if (s === USDT && b === COPM) return 'USDT_TO_COPM'
+        if (s === COPM && b === USDT) return 'COPM_TO_USDT'
+        return null
+      })
+      mockGetPermit2AllowanceInfo.mockResolvedValue({
+        amount: 0n,
+        expiration: 0,
+        nonce: 0,
+      })
+    })
+
+    afterEach(() => {
+      delete process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED
+      delete process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE
+    })
+
+    it('active flag ON + Uniswap wins price: returns uniswap-v4 provider + permit2 payload', async () => {
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED = 'true'
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE = 'true'
+      mockGetUniswapV4Quote.mockResolvedValueOnce({
+        amountOut: 6484000000000000000000n, // more than Squid
+        gasEstimate: 36719n,
+      })
+      fetchSpy.mockResolvedValueOnce(
+        squidResponse({ toAmount: '5000000000000000000000' }),
+      )
+
+      const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
+
+      expect(res.status).toBe(200)
+      expect(res.body.details.swapProvider).toBe('uniswap-v4')
+      expect(res.body.unvalidatedSwapTransaction.data).toBe('0x')
+      expect(res.body.unvalidatedSwapTransaction.allowanceTarget).toBe(
+        '0x000000000022d473030f116ddee9f6b43ac78ba3',
+      )
+      expect(res.body.unvalidatedSwapTransaction.to).toBe(
+        '0x8b844f885672f333bc0042cb669255f93a4c1e6b',
+      )
+      expect(res.body.details.permit2.typedData.primaryType).toBe('PermitSingle')
+      expect(res.body.details.permit2.buildTxUrl).toBe('/api/swap/build-tx')
+      expect(res.body.details.permit2.buildTxRequest.direction).toBe(
+        'USDT_TO_COPM',
+      )
+    })
+
+    it('active flag ON + Uniswap loses price: returns Squid (unchanged wire)', async () => {
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED = 'true'
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE = 'true'
+      mockGetUniswapV4Quote.mockResolvedValueOnce({
+        amountOut: 1000000000000000000n, // way less than Squid
+        gasEstimate: 36719n,
+      })
+      fetchSpy.mockResolvedValueOnce(
+        squidResponse({ toAmount: '5000000000000000000000' }),
+      )
+
+      const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
+
+      expect(res.status).toBe(200)
+      expect(res.body.details.swapProvider).toBe('squid')
+    })
+
+    it('active flag ON + Squid 502 + Uniswap OK: returns Uniswap response instead of 502', async () => {
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED = 'true'
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE = 'true'
+      mockGetUniswapV4Quote.mockResolvedValueOnce({
+        amountOut: 6484000000000000000000n,
+        gasEstimate: 36719n,
+      })
+      fetchSpy.mockResolvedValueOnce(new Response('', { status: 502 }))
+
+      const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
+
+      expect(res.status).toBe(200)
+      expect(res.body.details.swapProvider).toBe('uniswap-v4')
+    })
+
+    it('active flag OFF (shadow ON): even if Uniswap wins, returns Squid', async () => {
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED = 'true'
+      delete process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE
+      mockGetUniswapV4Quote.mockResolvedValueOnce({
+        amountOut: 6484000000000000000000n,
+        gasEstimate: 36719n,
+      })
+      fetchSpy.mockResolvedValueOnce(
+        squidResponse({ toAmount: '5000000000000000000000' }),
+      )
+
+      const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
+
+      expect(res.status).toBe(200)
+      expect(res.body.details.swapProvider).toBe('squid')
+    })
+  })
+
+  describe('POST /api/swap/build-tx', () => {
+    beforeEach(() => {
+      delete process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE
+    })
+
+    const validBody = () => ({
+      direction: 'USDT_TO_COPM' as const,
+      userAddress: '0x1111111111111111111111111111111111111111',
+      sellAmount: '1000000',
+      minBuyAmount: '3000000000000000000000',
+      deadline: '9999999999',
+      permit2Signature: '0x' + '11'.repeat(64) + '1b',
+      permitToken: '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e', // USDT
+      permitAmount: '1000000',
+      permitExpiration: 1800000000,
+      permitNonce: 0,
+      permitSigDeadline: '9999999999',
+    })
+
+    it('flag OFF: returns 503', async () => {
+      const res = await request(app).post('/api/swap/build-tx').send(validBody())
+      expect(res.status).toBe(503)
+    })
+
+    it('flag ON + valid body: returns {to, data, value}', async () => {
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE = 'true'
+      const res = await request(app).post('/api/swap/build-tx').send(validBody())
+      expect(res.status).toBe(200)
+      expect(res.body.to).toBe('0x8b844f885672f333bc0042cb669255f93a4c1e6b')
+      expect(res.body.value).toBe('0')
+      expect(res.body.data.startsWith('0x')).toBe(true)
+      expect(res.body.data.length).toBeGreaterThan(200)
+    })
+
+    it('flag ON + wrong permitToken for direction: 400', async () => {
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE = 'true'
+      const body = validBody()
+      body.permitToken = '0x8a567e2ae79ca692bd748ab832081c45de4041ea' // COPm, not USDT
+      const res = await request(app).post('/api/swap/build-tx').send(body)
+      expect(res.status).toBe(400)
+      expect(res.body.error).toMatch(/direction sell token/i)
+    })
+
+    it('flag ON + permitAmount < sellAmount: 400', async () => {
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE = 'true'
+      const body = validBody()
+      body.permitAmount = '500'
+      const res = await request(app).post('/api/swap/build-tx').send(body)
+      expect(res.status).toBe(400)
+      expect(res.body.error).toMatch(/less than sellAmount/i)
+    })
+
+    it('flag ON + malformed signature: 400', async () => {
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE = 'true'
+      const body = validBody()
+      body.permit2Signature = '0x1234'
+      const res = await request(app).post('/api/swap/build-tx').send(body)
+      expect(res.status).toBe(400)
+      expect(res.body.error).toMatch(/permit2Signature/i)
     })
   })
 })
