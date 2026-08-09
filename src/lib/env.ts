@@ -132,6 +132,20 @@ const envSchema = z.object({
   // embedded, e.g. `https://celo-mainnet.g.alchemy.com/v2/<key>`.
   ALCHEMY_RPC_URL: zHttpsUrl.optional(),
 
+  // Swap fallback: consider Uniswap V4 as an alternative quote source for
+  // the USDT<->COPm pair. Mento suspends this pair on weekends and Squid
+  // returns HTTP 502 during those windows; the Uniswap V4 pool operates
+  // 24/7. When true, every USDT<->COPm quote fetches Squid + Uniswap V4 in
+  // parallel and returns whichever gives more output. When false, only
+  // Squid is queried (current behavior). Shadow log of both quotes is
+  // emitted regardless of the flag so we accumulate data before flipping.
+  // Non-USDT<->COPm pairs are unaffected regardless of the flag.
+  SWAP_FALLBACK_UNISWAP_V4_ENABLED: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => v === 'true'),
+
   // Upstream providers (optional; routes 503 when their feature is hit
   // without the corresponding key)
   COINMARKETCAP_API_KEY: z.string().optional(),

@@ -12,6 +12,11 @@ import {
   SquidRouteResponse,
   SquidUpstreamError,
 } from '../lib/squid'
+import {
+  getUniswapV4Quote,
+  isUsdtCopmPair,
+  type UniswapV4Direction,
+} from '../lib/uniswapV4'
 import { firstZodIssueAsError } from './schemas/common'
 import { swapQuoteQuerySchema, type SwapQuoteInput } from './schemas/swap'
 
@@ -205,6 +210,24 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
   const toToken = input.buyIsNative ? NATIVE_TOKEN_SENTINEL : input.buyToken
   const collectFees = resolveCollectFeesFromEnv()
 
+  // Fase 1 (shadow only): when the pair is USDT<->COPm AND the fallback flag
+  // is on, fetch Uniswap V4 Quoter in parallel with Squid so we can log
+  // both and see the gap in production data. Nothing user-visible changes:
+  // response is still the Squid payload (or the Squid failure). Fase 2 will
+  // switch this to actually route via Uniswap V4 when it wins or when Squid
+  // fails (needs Permit2 + UniversalRouter calldata construction).
+  const uniswapDirection = isUsdtCopmPair(input.sellToken, input.buyToken)
+  const uniswapShadowActive =
+    uniswapDirection !== null &&
+    process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED === 'true'
+  const uniswapQuotePromise: Promise<
+    { amountOut: bigint; gasEstimate: bigint } | null | Error
+  > | null = uniswapShadowActive
+    ? getUniswapV4Quote(uniswapDirection, BigInt(input.sellAmount)).catch(
+        (e: unknown) => (e instanceof Error ? e : new Error(String(e))),
+      )
+    : null
+
   try {
     const upstream = await squidRoute(
       {
@@ -223,6 +246,24 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
     )
 
     const payload = shapeResponse(upstream, input, collectFees)
+
+    // Shadow log for the Uniswap V4 comparison. Emit whenever the pair is
+    // USDT<->COPm and the flag is on, regardless of whether Squid succeeded
+    // or failed. Uses WARN level for the same reason as the squid_integrator_fee
+    // log (INFO is noop'd in prod).
+    if (uniswapShadowActive && uniswapQuotePromise) {
+      const uniswapResult = await uniswapQuotePromise
+      const squidBuyAmount = upstream.route?.estimate?.toAmount
+      logQuoteComparison({
+        squidBuyAmount: squidBuyAmount ?? null,
+        squidError: null,
+        uniswapResult,
+        direction: uniswapDirection!,
+        sellAmount: input.sellAmount,
+        userAddress: input.userAddress,
+        quoteOnly: input.quoteOnly,
+      })
+    }
 
     // Structured integrator-fee audit log for on-chain reconciliation.
     // Emitted at WARN level (not INFO) because the project logger noops
@@ -267,6 +308,27 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
     res.json(payload)
   } catch (err) {
     log.warn('squid upstream error:', err instanceof Error ? err.message : err)
+    // Emit the shadow comparison even when Squid failed: this is exactly
+    // the weekend-Mento pattern we want data on. Captures "Squid returned
+    // 502 but Uniswap V4 had a real quote of X COPm" — the value-of-Fase-2
+    // signal.
+    if (uniswapShadowActive && uniswapQuotePromise) {
+      const uniswapResult = await uniswapQuotePromise
+      logQuoteComparison({
+        squidBuyAmount: null,
+        squidError:
+          err instanceof SquidUpstreamError
+            ? `upstream ${err.status}`
+            : err instanceof Error
+              ? err.message.slice(0, 200)
+              : 'unknown',
+        uniswapResult,
+        direction: uniswapDirection!,
+        sellAmount: input.sellAmount,
+        userAddress: input.userAddress,
+        quoteOnly: input.quoteOnly,
+      })
+    }
     if (err instanceof SquidUpstreamError && err.status === 429) {
       if (err.retryAfter) res.setHeader('Retry-After', err.retryAfter)
       return res.status(429).json({ error: 'rate limited by squid, retry' })
@@ -274,5 +336,58 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
     res.status(502).json({ error: 'squid upstream unavailable' })
   }
 })
+
+// Structured shadow log emitted at WARN level (INFO is noop'd in prod, see
+// logger.ts). One line per USDT<->COPm quote request when the fallback flag
+// is on. Enables historical analysis of the gap Squid vs Uniswap V4 before
+// Fase 2 activates real routing based on best amountOut.
+function logQuoteComparison(input: {
+  squidBuyAmount: string | null
+  squidError: string | null
+  uniswapResult: { amountOut: bigint; gasEstimate: bigint } | null | Error
+  direction: UniswapV4Direction
+  sellAmount: string
+  userAddress: string
+  quoteOnly: boolean
+}): void {
+  const uniswap = input.uniswapResult
+  const uniswapAmountOut =
+    uniswap && !(uniswap instanceof Error) ? uniswap.amountOut.toString() : null
+  const uniswapError =
+    uniswap instanceof Error ? uniswap.message.slice(0, 200) : null
+  // "Winner" is Uniswap iff we have both quotes AND uniswap > squid, or if
+  // Squid failed and Uniswap has a quote. Left null when we cannot compare.
+  let winner: 'squid' | 'uniswap_v4' | 'neither' | null = null
+  if (input.squidBuyAmount && uniswapAmountOut) {
+    winner =
+      BigInt(uniswapAmountOut) > BigInt(input.squidBuyAmount)
+        ? 'uniswap_v4'
+        : 'squid'
+  } else if (input.squidError && uniswapAmountOut) {
+    winner = 'uniswap_v4'
+  } else if (input.squidBuyAmount && !uniswapAmountOut) {
+    winner = 'squid'
+  } else {
+    winner = 'neither'
+  }
+  log.warn(
+    JSON.stringify({
+      event: 'swap_quote_comparison',
+      direction: input.direction,
+      sellAmount: input.sellAmount,
+      squidBuyAmount: input.squidBuyAmount,
+      squidError: input.squidError,
+      uniswapAmountOut,
+      uniswapError,
+      uniswapGasEstimate:
+        uniswap && !(uniswap instanceof Error)
+          ? uniswap.gasEstimate.toString()
+          : null,
+      winner,
+      userAddress: input.userAddress,
+      quoteOnly: input.quoteOnly,
+    }),
+  )
+}
 
 export default router
