@@ -1,8 +1,10 @@
 import { decodeFunctionData, decodeAbiParameters, hashTypedData } from 'viem'
 import {
   buildEip7702BatchedSwapCalls,
+  buildErc20ApproveCalldata,
   buildPermit2ApproveCalldata,
   buildPermit2TypedData,
+  buildSafeErc20ApproveCalls,
   buildV4SwapCalldata,
   buildV4SwapCalldataNoPermit,
   CELO_CHAIN_ID,
@@ -510,5 +512,58 @@ describe('buildEip7702BatchedSwapCalls', () => {
     expect(spender.toLowerCase()).toBe(UNIVERSAL_ROUTER_ADDRESS.toLowerCase())
     expect(amount).toBe(1_234_567n)
     expect(expiration).toBe(2)
+  })
+})
+
+describe('buildErc20ApproveCalldata + buildSafeErc20ApproveCalls (Bug 3 fix)', () => {
+  it('encodes standard ERC20 approve(spender, amount) selector', () => {
+    const data = buildErc20ApproveCalldata(PERMIT2_ADDRESS, 1_000_000n)
+    // approve(address,uint256) selector
+    expect(data.slice(0, 10)).toBe('0x095ea7b3')
+    // 4 selector + 2 * 32 args = 68 bytes = 138 chars including 0x
+    expect(data.length).toBe(2 + 8 + 2 * 64)
+  })
+
+  it('returns [] when current allowance already covers target', () => {
+    const calls = buildSafeErc20ApproveCalls(
+      USDT,
+      PERMIT2_ADDRESS,
+      5_000_000n,
+      1_000_000n,
+    )
+    expect(calls).toEqual([])
+  })
+
+  it('returns single approve when current is zero', () => {
+    const calls = buildSafeErc20ApproveCalls(
+      USDT,
+      PERMIT2_ADDRESS,
+      0n,
+      1_000_000n,
+    )
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.to).toBe(USDT)
+    expect(calls[0]!.data.slice(0, 10)).toBe('0x095ea7b3')
+  })
+
+  it('returns [approve 0, approve target] when current is non-zero-but-insufficient (Tether edge)', () => {
+    const calls = buildSafeErc20ApproveCalls(
+      USDT,
+      PERMIT2_ADDRESS,
+      100n,
+      1_000_000n,
+    )
+    expect(calls).toHaveLength(2)
+    // First call: approve to 0 (Tether-style tokens reject non-zero -> non-zero)
+    const [zeroCall, targetCall] = calls
+    // Decode both to confirm amounts
+    const amt0 = BigInt(
+      '0x' + zeroCall!.data.slice(10 + 64, 10 + 128),
+    )
+    const amt1 = BigInt(
+      '0x' + targetCall!.data.slice(10 + 64, 10 + 128),
+    )
+    expect(amt0).toBe(0n)
+    expect(amt1).toBe(1_000_000n)
   })
 })
