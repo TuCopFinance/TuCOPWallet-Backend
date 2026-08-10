@@ -576,6 +576,43 @@ describe('GET /api/swap/quote', () => {
       expect(res.body.details.permit2.buildTxRequest.direction).toBe(
         'USDT_TO_COPM',
       )
+      // Regression guard: price + guaranteedPrice must be human-readable
+      // (whole/whole ratio adjusted for token decimals), NOT wei/wei.
+      // Wallet renderer bails on magnitudes that don't match sellToken
+      // in whole units. Bug caught by wallet team 2026-08-10.
+      // For 2 USDT (10^6 * 2) -> 6484 COPm (10^18 * 6484), price should be
+      // ~3242 (COPm per USDT), NOT ~3.24e15 (wei per wei).
+      const price = res.body.unvalidatedSwapTransaction.price
+      expect(price).toMatch(/^\d+(\.\d+)?$/)
+      const priceNum = Number(price)
+      expect(priceNum).toBeGreaterThan(1000)
+      expect(priceNum).toBeLessThan(10000)
+      const guaranteedPrice =
+        res.body.unvalidatedSwapTransaction.guaranteedPrice
+      expect(Number(guaranteedPrice)).toBeGreaterThan(1000)
+      expect(Number(guaranteedPrice)).toBeLessThan(10000)
+    })
+
+    it('COPm->USDT direction: price is human-readable (0.0003xx, NOT wei/wei)', async () => {
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED = 'true'
+      process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE = 'true'
+      mockGetUniswapV4Quote.mockResolvedValueOnce({
+        amountOut: 1018330n, // ~1 USDT (6 decimals) out for 3242 COPm in
+        gasEstimate: 36719n,
+      })
+      fetchSpy.mockResolvedValueOnce(new Response('', { status: 502 }))
+      const res = await request(app)
+        .get('/api/swap/quote?' + usdtCopmParams({
+          sellToken: COPM,
+          buyToken: USDT,
+          sellAmount: '3242000000000000000000',
+        }))
+      expect(res.status).toBe(200)
+      expect(res.body.details.swapProvider).toBe('uniswap-v4')
+      const price = Number(res.body.unvalidatedSwapTransaction.price)
+      // ~0.000314 USDT per 1 COPm. Sanity: between 1e-5 and 1e-2.
+      expect(price).toBeGreaterThan(1e-5)
+      expect(price).toBeLessThan(1e-2)
     })
 
     it('active flag ON + Uniswap loses price: returns Squid (unchanged wire)', async () => {

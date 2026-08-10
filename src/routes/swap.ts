@@ -275,14 +275,30 @@ async function shapeUniswapV4Response(input: {
     sigDeadline,
   })
 
+  // Token decimals for the USDT<->COPm pair. USDT is 6, COPm is 18. The
+  // `price` field must be human-readable (whole/whole), NOT wei/wei — the
+  // wallet renderer bails on magnitudes that don't match the sellToken
+  // amount in whole units (bug caught by wallet team 2026-08-10).
+  const [sellDecimals, buyDecimals] =
+    input.direction === 'USDT_TO_COPM' ? [6, 18] : [18, 6]
   const price =
     grossAmountOut === 0n
       ? '0'
-      : formatFixedPoint(grossAmountOut, sellAmountBn)
+      : computeExchangeRate(
+          grossAmountOut,
+          buyDecimals,
+          sellAmountBn,
+          sellDecimals,
+        )
   const guaranteedPrice =
     minBuyAmount === 0n
       ? '0'
-      : formatFixedPoint(minBuyAmount, sellAmountBn)
+      : computeExchangeRate(
+          minBuyAmount,
+          buyDecimals,
+          sellAmountBn,
+          sellDecimals,
+        )
 
   const swapTx: Record<string, unknown> = {
     swapType: 'same-chain',
@@ -349,12 +365,29 @@ async function shapeUniswapV4Response(input: {
   }
 }
 
-// Small helper to format `min / sell` at 1e18 precision without going through
-// Number (which loses precision above 2^53). Mirrors computeGuaranteedPrice
-// so the wire shape matches Squid's for both fields.
-function formatFixedPoint(numerator: bigint, denominator: bigint): string {
-  if (denominator === 0n) return '0'
-  const scaled = (numerator * PRICE_SCALE) / denominator
+// Computes the human-readable exchange rate `buyAmount / sellAmount`
+// accounting for token decimals. Both amounts are raw wei of their
+// respective tokens.
+//
+//   price = (buyWei / 10^buyDec) / (sellWei / 10^sellDec)
+//         = buyWei * 10^sellDec / (sellWei * 10^buyDec)
+//
+// Scales by 1e18 for output precision, keeps bigint throughout to avoid
+// Number precision loss above 2^53.
+//
+// Wire contract: the returned string is a decimal representation of the
+// exchange rate in whole units. E.g. for 1 USDT (6 decimals) -> 3242 COPm
+// (18 decimals), returns "3242.xxx" — NOT "3.24e15" (wei/wei ratio).
+function computeExchangeRate(
+  buyAmountWei: bigint,
+  buyDecimals: number,
+  sellAmountWei: bigint,
+  sellDecimals: number,
+): string {
+  if (sellAmountWei === 0n) return '0'
+  const numer = buyAmountWei * 10n ** BigInt(sellDecimals) * PRICE_SCALE
+  const denom = sellAmountWei * 10n ** BigInt(buyDecimals)
+  const scaled = numer / denom
   const whole = scaled / PRICE_SCALE
   const frac = (scaled % PRICE_SCALE).toString().padStart(18, '0').replace(/0+$/, '')
   return frac.length === 0 ? whole.toString() : `${whole.toString()}.${frac}`
