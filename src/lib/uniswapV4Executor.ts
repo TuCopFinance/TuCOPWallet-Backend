@@ -290,9 +290,23 @@ function packActions(bytes: readonly number[]): `0x${string}` {
   return packCommands(bytes)
 }
 
-// SWAP_EXACT_IN_SINGLE params: (PoolKey, bool zeroForOne, uint128 amountIn,
-// uint128 amountOutMinimum, bytes hookData). The pool-side amountOutMinimum
-// is the gross output floor (before the fee TAKE_PORTION is deducted).
+// SWAP_EXACT_IN_SINGLE params for UniversalRouter v2.1.1 on Celo:
+//   struct ExactInputSingleParams {
+//     PoolKey poolKey;
+//     bool zeroForOne;
+//     uint128 amountIn;
+//     uint128 amountOutMinimum;
+//     uint256 minHopPriceX36;   // per-hop min price check; 0 disables
+//     bytes hookData;
+//   }
+//
+// Bug 4 (2026-08-10): the initial v0 encoding omitted `minHopPriceX36`,
+// producing 320-byte params vs the 352-byte minimum the CalldataDecoder
+// assembly checks (`if lt(params.length, 0x160)`). Layout mismatch caused
+// the SWAP action to revert during decode with empty data, which bubbled
+// up as `ExecutionFailed(index=1, reason=0x)` inside the BatchExecutor
+// wrap. Fix: encode `minHopPriceX36: 0n` as the 5th field so params
+// length hits 0x160 and every slot lines up with what V4Router expects.
 const SWAP_EXACT_IN_SINGLE_PARAMS_TYPE = {
   type: 'tuple',
   components: [
@@ -310,6 +324,7 @@ const SWAP_EXACT_IN_SINGLE_PARAMS_TYPE = {
     { name: 'zeroForOne', type: 'bool' },
     { name: 'amountIn', type: 'uint128' },
     { name: 'amountOutMinimum', type: 'uint128' },
+    { name: 'minHopPriceX36', type: 'uint256' },
     { name: 'hookData', type: 'bytes' },
   ],
 } as const
@@ -400,6 +415,9 @@ function buildV4SwapInput(
         zeroForOne,
         amountIn: sellAmount,
         amountOutMinimum: poolMinOut,
+        // 0 disables the per-hop price check (we already have amountOutMinimum
+        // as the slippage bound; minHopPriceX36 is redundant for single-hop).
+        minHopPriceX36: 0n,
         hookData: '0x' as `0x${string}`,
       } as unknown as never,
     ],
