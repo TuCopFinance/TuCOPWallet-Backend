@@ -27,6 +27,7 @@ jest.mock('../lib/uniswapV4', () => {
 
 const mockGetPermit2AllowanceInfo: jest.Mock = jest.fn()
 const mockIsEip7702Delegated: jest.Mock = jest.fn()
+const mockGetErc20Allowance: jest.Mock = jest.fn()
 jest.mock('../lib/uniswapV4Executor', () => {
   const actual = jest.requireActual('../lib/uniswapV4Executor')
   return {
@@ -37,6 +38,11 @@ jest.mock('../lib/uniswapV4Executor', () => {
       spender?: `0x${string}`,
     ) => mockGetPermit2AllowanceInfo(user, token, spender),
     isEip7702Delegated: (user: `0x${string}`) => mockIsEip7702Delegated(user),
+    getErc20Allowance: (
+      token: `0x${string}`,
+      owner: `0x${string}`,
+      spender: `0x${string}`,
+    ) => mockGetErc20Allowance(token, owner, spender),
   }
 })
 
@@ -548,6 +554,10 @@ describe('GET /api/swap/quote', () => {
       // Default: user NOT delegated -> Permit2 signature path (existing
       // integration tests remain valid for this branch).
       mockIsEip7702Delegated.mockResolvedValue(false)
+      // Default: no ERC20 allowance to Permit2 (fresh EOA scenario).
+      // Delegated-branch tests override this per case.
+      mockGetErc20Allowance.mockReset()
+      mockGetErc20Allowance.mockResolvedValue(0n)
     })
 
     afterEach(() => {
@@ -677,7 +687,10 @@ describe('GET /api/swap/quote', () => {
         mockIsEip7702Delegated.mockResolvedValue(true)
       })
 
-      it('returns batchCalls (approve + swap) instead of permit2 typed data', async () => {
+      it('user with sufficient ERC20 allowance: batchCalls = [Permit2.approve, UR.execute] (2 items)', async () => {
+        mockGetErc20Allowance.mockResolvedValueOnce(
+          10_000_000_000n, // 10k USDT, way more than needed
+        )
         mockGetUniswapV4Quote.mockResolvedValueOnce({
           amountOut: 6484000000000000000000n,
           gasEstimate: 36719n,
@@ -686,21 +699,65 @@ describe('GET /api/swap/quote', () => {
         const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
         expect(res.status).toBe(200)
         expect(res.body.details.swapProvider).toBe('uniswap-v4')
-        // Delegated branch: batchCalls present, permit2 ABSENT.
-        expect(res.body.details.batchCalls).toBeDefined()
         expect(res.body.details.permit2).toBeUndefined()
         expect(res.body.details.batchCalls).toHaveLength(2)
-        const [approve, swap] = res.body.details.batchCalls
-        // First call: Permit2.approve()
-        expect(approve.to).toBe(
+        expect(res.body.details.batchCalls[0].to).toBe(
           '0x000000000022d473030f116ddee9f6b43ac78ba3',
         )
-        expect(approve.data.startsWith('0x87517c45')).toBe(true) // approve selector
-        expect(approve.value).toBe('0')
-        // Second call: UniversalRouter.execute()
-        expect(swap.to).toBe('0x8b844f885672f333bc0042cb669255f93a4c1e6b')
-        expect(swap.data.startsWith('0x3593564c')).toBe(true) // execute selector
-        expect(swap.value).toBe('0')
+        expect(res.body.details.batchCalls[0].data.startsWith('0x87517c45')).toBe(true)
+        expect(res.body.details.batchCalls[1].to).toBe(
+          '0x8b844f885672f333bc0042cb669255f93a4c1e6b',
+        )
+      })
+
+      it('fresh user (zero ERC20 allowance): batchCalls = [USDT.approve, Permit2.approve, UR.execute] (3 items)', async () => {
+        mockGetErc20Allowance.mockResolvedValueOnce(0n)
+        mockGetUniswapV4Quote.mockResolvedValueOnce({
+          amountOut: 6484000000000000000000n,
+          gasEstimate: 36719n,
+        })
+        fetchSpy.mockResolvedValueOnce(new Response('', { status: 502 }))
+        const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
+        expect(res.status).toBe(200)
+        expect(res.body.details.batchCalls).toHaveLength(3)
+        // [0] = USDT.approve(Permit2, sellAmount)
+        expect(res.body.details.batchCalls[0].to).toBe(USDT)
+        expect(res.body.details.batchCalls[0].data.startsWith('0x095ea7b3')).toBe(true) // ERC20 approve selector
+        // [1] = Permit2.approve
+        expect(res.body.details.batchCalls[1].to).toBe(
+          '0x000000000022d473030f116ddee9f6b43ac78ba3',
+        )
+        expect(res.body.details.batchCalls[1].data.startsWith('0x87517c45')).toBe(true)
+        // [2] = UR.execute
+        expect(res.body.details.batchCalls[2].to).toBe(
+          '0x8b844f885672f333bc0042cb669255f93a4c1e6b',
+        )
+      })
+
+      it('user with non-zero-but-insufficient ERC20 allowance: batchCalls = [approve 0, approve target, Permit2.approve, UR.execute] (4 items, Tether edge)', async () => {
+        mockGetErc20Allowance.mockResolvedValueOnce(1_000n) // < 2 USDT (sellAmount)
+        mockGetUniswapV4Quote.mockResolvedValueOnce({
+          amountOut: 6484000000000000000000n,
+          gasEstimate: 36719n,
+        })
+        fetchSpy.mockResolvedValueOnce(new Response('', { status: 502 }))
+        const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
+        expect(res.status).toBe(200)
+        expect(res.body.details.batchCalls).toHaveLength(4)
+        // [0] = USDT.approve(Permit2, 0) - Tether reset
+        expect(res.body.details.batchCalls[0].to).toBe(USDT)
+        expect(res.body.details.batchCalls[0].data.startsWith('0x095ea7b3')).toBe(true)
+        // [1] = USDT.approve(Permit2, sellAmount)
+        expect(res.body.details.batchCalls[1].to).toBe(USDT)
+        expect(res.body.details.batchCalls[1].data.startsWith('0x095ea7b3')).toBe(true)
+        // [2] = Permit2.approve
+        expect(res.body.details.batchCalls[2].to).toBe(
+          '0x000000000022d473030f116ddee9f6b43ac78ba3',
+        )
+        // [3] = UR.execute
+        expect(res.body.details.batchCalls[3].to).toBe(
+          '0x8b844f885672f333bc0042cb669255f93a4c1e6b',
+        )
       })
 
       it('non-delegated user gets permit2 path (existing behavior)', async () => {
