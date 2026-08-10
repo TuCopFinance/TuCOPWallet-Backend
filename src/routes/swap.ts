@@ -19,10 +19,12 @@ import {
   type UniswapV4Direction,
 } from '../lib/uniswapV4'
 import {
+  buildEip7702BatchedSwapCalls,
   buildPermit2TypedData,
   buildV4SwapCalldata,
   CELO_CHAIN_ID,
   getPermit2AllowanceInfo,
+  isEip7702Delegated,
   PERMIT2_ADDRESS,
   UNIVERSAL_ROUTER_ADDRESS,
 } from '../lib/uniswapV4Executor'
@@ -300,6 +302,22 @@ async function shapeUniswapV4Response(input: {
           sellDecimals,
         )
 
+  // EIP-7702 delegation detection. TuCop wallets are smart wallets
+  // delegated to BatchExecutor, which does NOT implement ERC1271
+  // isValidSignature. Permit2's SignatureVerification.verify switches
+  // to the ERC1271 path when the caller's `code.length > 0` and reverts
+  // silently. To avoid that whole class of failures we skip the Permit2
+  // signature flow entirely for delegated users and return an explicit
+  // batchCalls array the wallet's BatchExecutor executes atomically
+  // (approve to Permit2 + swap through UniversalRouter without
+  // PERMIT2_PERMIT). This matches the wallet's existing pattern for
+  // Neeru approve+deposit and requires no BatchExecutor contract
+  // upgrade. Non-delegated users (unusual for TuCop but possible for
+  // third-party consumers of the same API) keep the Permit2 signature
+  // flow.
+  const isDelegated = await isEip7702Delegated(input.userAddress)
+
+  // Swap tx envelope. Common fields for both branches.
   const swapTx: Record<string, unknown> = {
     swapType: 'same-chain',
     chainId: CELO_CHAIN_ID,
@@ -312,24 +330,76 @@ async function shapeUniswapV4Response(input: {
     estimatedPriceImpact: null,
     gas: input.uniswapGasEstimate.toString(),
     estimatedGasUse: input.uniswapGasEstimate.toString(),
-    // With Uniswap V4 path the final `to` and `data` come back from
-    // /api/swap/build-tx after the wallet signs Permit2. We surface the
-    // eventual `to` so the wallet can pre-populate contract simulation UIs,
-    // but `data: '0x'` is a hard sentinel that means "you MUST call
-    // /build-tx before submitting".
     to: UNIVERSAL_ROUTER_ADDRESS,
     value: '0',
+    // `data: '0x'` is intentional. In BOTH branches the wallet does NOT
+    // submit the top-level `unvalidatedSwapTransaction` directly. Delegated
+    // users iterate `details.batchCalls`. Non-delegated users sign the
+    // typed data + POST `/api/swap/build-tx` to get the final data.
+    // Any wallet that blindly submits data:'0x' will revert on-chain.
     data: '0x',
     from: input.userAddress,
-    // User approves this address (Permit2) with a standard ERC20 approve for
-    // the sellToken. Wallet already has approve-flow logic keyed on this
-    // field for the Squid path.
+    // User approves this address (Permit2) with a standard ERC20 approve.
+    // Same for both branches; the difference is in what happens AFTER
+    // the ERC20 approve to Permit2 lands.
     allowanceTarget: PERMIT2_ADDRESS,
   }
   if (feeBips > 0) {
     swapTx.appFeePercentageIncludedInPrice = (feeBips / 100).toString()
   }
 
+  // -----------------------------------------------------------------
+  // Delegated branch: return batchCalls, no Permit2 signature needed.
+  // -----------------------------------------------------------------
+  if (isDelegated) {
+    // Deadline for the on-chain execute() call. 5 min is plenty for the
+    // wallet to sign + submit; also matches the sigDeadline convention
+    // from the non-delegated branch.
+    const execDeadline = nowSec + 300n
+    // Permit2.approve expiration: 1 year, same as the non-delegated
+    // `permitExpiration`. This lets the allowance be reused across
+    // subsequent swaps in the same window (wallet can skip the approve
+    // call on subsequent batches if it detects an unexpired allowance).
+    const approveExpiration = Number(nowSec + 365n * 24n * 3600n)
+
+    const batched = buildEip7702BatchedSwapCalls({
+      direction: input.direction,
+      sellToken: input.sellToken,
+      sellAmount: sellAmountBn,
+      minBuyAmount,
+      deadline: execDeadline,
+      approveExpiration,
+    })
+
+    return {
+      unvalidatedSwapTransaction: swapTx,
+      details: {
+        swapProvider: 'uniswap-v4',
+        // BatchExecutor.execute() consumes THIS array as-is: 2 calls,
+        // in the exact order given. First updates Permit2 allowance on
+        // behalf of the delegated wallet (msg.sender == the wallet EOA
+        // inside the delegated context, so no signature needed). Second
+        // runs the swap through UniversalRouter, which pulls from the
+        // just-set Permit2 allowance.
+        batchCalls: [
+          {
+            to: batched.approve.to,
+            data: batched.approve.data,
+            value: batched.approve.value.toString(),
+          },
+          {
+            to: batched.swap.to,
+            data: batched.swap.data,
+            value: batched.swap.value.toString(),
+          },
+        ],
+      },
+    }
+  }
+
+  // -----------------------------------------------------------------
+  // Non-delegated branch: Permit2 signature + /api/swap/build-tx flow.
+  // -----------------------------------------------------------------
   return {
     unvalidatedSwapTransaction: swapTx,
     details: {
