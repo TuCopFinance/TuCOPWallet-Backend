@@ -26,6 +26,7 @@ jest.mock('../lib/uniswapV4', () => {
 })
 
 const mockGetPermit2AllowanceInfo: jest.Mock = jest.fn()
+const mockIsEip7702Delegated: jest.Mock = jest.fn()
 jest.mock('../lib/uniswapV4Executor', () => {
   const actual = jest.requireActual('../lib/uniswapV4Executor')
   return {
@@ -35,6 +36,7 @@ jest.mock('../lib/uniswapV4Executor', () => {
       token: `0x${string}`,
       spender?: `0x${string}`,
     ) => mockGetPermit2AllowanceInfo(user, token, spender),
+    isEip7702Delegated: (user: `0x${string}`) => mockIsEip7702Delegated(user),
   }
 })
 
@@ -530,6 +532,7 @@ describe('GET /api/swap/quote', () => {
       mockGetUniswapV4Quote.mockReset()
       mockIsUsdtCopmPair.mockReset()
       mockGetPermit2AllowanceInfo.mockReset()
+      mockIsEip7702Delegated.mockReset()
       mockIsUsdtCopmPair.mockImplementation((sell: string, buy: string) => {
         const s = sell.toLowerCase()
         const b = buy.toLowerCase()
@@ -542,6 +545,9 @@ describe('GET /api/swap/quote', () => {
         expiration: 0,
         nonce: 0,
       })
+      // Default: user NOT delegated -> Permit2 signature path (existing
+      // integration tests remain valid for this branch).
+      mockIsEip7702Delegated.mockResolvedValue(false)
     })
 
     afterEach(() => {
@@ -662,6 +668,54 @@ describe('GET /api/swap/quote', () => {
 
       expect(res.status).toBe(200)
       expect(res.body.details.swapProvider).toBe('squid')
+    })
+
+    describe('EIP-7702 delegated user: batchCalls path (option B)', () => {
+      beforeEach(() => {
+        process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED = 'true'
+        process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE = 'true'
+        mockIsEip7702Delegated.mockResolvedValue(true)
+      })
+
+      it('returns batchCalls (approve + swap) instead of permit2 typed data', async () => {
+        mockGetUniswapV4Quote.mockResolvedValueOnce({
+          amountOut: 6484000000000000000000n,
+          gasEstimate: 36719n,
+        })
+        fetchSpy.mockResolvedValueOnce(new Response('', { status: 502 }))
+        const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
+        expect(res.status).toBe(200)
+        expect(res.body.details.swapProvider).toBe('uniswap-v4')
+        // Delegated branch: batchCalls present, permit2 ABSENT.
+        expect(res.body.details.batchCalls).toBeDefined()
+        expect(res.body.details.permit2).toBeUndefined()
+        expect(res.body.details.batchCalls).toHaveLength(2)
+        const [approve, swap] = res.body.details.batchCalls
+        // First call: Permit2.approve()
+        expect(approve.to).toBe(
+          '0x000000000022d473030f116ddee9f6b43ac78ba3',
+        )
+        expect(approve.data.startsWith('0x87517c45')).toBe(true) // approve selector
+        expect(approve.value).toBe('0')
+        // Second call: UniversalRouter.execute()
+        expect(swap.to).toBe('0x8b844f885672f333bc0042cb669255f93a4c1e6b')
+        expect(swap.data.startsWith('0x3593564c')).toBe(true) // execute selector
+        expect(swap.value).toBe('0')
+      })
+
+      it('non-delegated user gets permit2 path (existing behavior)', async () => {
+        mockIsEip7702Delegated.mockResolvedValueOnce(false)
+        mockGetUniswapV4Quote.mockResolvedValueOnce({
+          amountOut: 6484000000000000000000n,
+          gasEstimate: 36719n,
+        })
+        fetchSpy.mockResolvedValueOnce(new Response('', { status: 502 }))
+        const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
+        expect(res.status).toBe(200)
+        expect(res.body.details.swapProvider).toBe('uniswap-v4')
+        expect(res.body.details.batchCalls).toBeUndefined()
+        expect(res.body.details.permit2).toBeDefined()
+      })
     })
   })
 
