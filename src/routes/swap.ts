@@ -21,8 +21,10 @@ import {
 import {
   buildEip7702BatchedSwapCalls,
   buildPermit2TypedData,
+  buildSafeErc20ApproveCalls,
   buildV4SwapCalldata,
   CELO_CHAIN_ID,
+  getErc20Allowance,
   getPermit2AllowanceInfo,
   isEip7702Delegated,
   PERMIT2_ADDRESS,
@@ -371,17 +373,61 @@ async function shapeUniswapV4Response(input: {
       approveExpiration,
     })
 
+    // Prepend ERC20 approve to Permit2 when the user's on-chain allowance
+    // is insufficient. Without this, batchCall[swap] reverts empty inside
+    // SETTLE_ALL because USDT.transferFrom (called by Permit2.transferFrom)
+    // requires ERC20 allowance >= sellAmount. Tether-style tokens revert
+    // with no error string, which looks like an empty ExecutionFailed
+    // inside the BatchExecutor wrap.
+    //
+    // Bug 3 (2026-08-10): wallet team caught this during first EIP-7702
+    // batched smoke test on prod-shaped local backend. Root cause: spec
+    // v1 assumed wallet would prepend the ERC20 approve, but that broke
+    // the "consume batchCalls verbatim" contract. Fix: backend does the
+    // detection + prepend so batchCalls is truly the exact list of calls
+    // the wallet's BatchExecutor forwards.
+    let erc20Allowance = 0n
+    try {
+      erc20Allowance = await getErc20Allowance(
+        input.sellToken,
+        input.userAddress,
+        PERMIT2_ADDRESS,
+      )
+    } catch (err) {
+      log.warn(
+        'ERC20 allowance read failed, prepending approve defensively:',
+        err instanceof Error ? err.message : err,
+      )
+    }
+    const erc20ApproveCalls = buildSafeErc20ApproveCalls(
+      input.sellToken,
+      PERMIT2_ADDRESS,
+      erc20Allowance,
+      sellAmountBn,
+    )
+
     return {
       unvalidatedSwapTransaction: swapTx,
       details: {
         swapProvider: 'uniswap-v4',
-        // BatchExecutor.execute() consumes THIS array as-is: 2 calls,
-        // in the exact order given. First updates Permit2 allowance on
-        // behalf of the delegated wallet (msg.sender == the wallet EOA
-        // inside the delegated context, so no signature needed). Second
-        // runs the swap through UniversalRouter, which pulls from the
-        // just-set Permit2 allowance.
+        // BatchExecutor.execute() consumes THIS array as-is. The wallet
+        // does NOT need to prepend anything, check allowances, or split
+        // by concern - just forward each entry as a call. The array
+        // varies in length based on current on-chain state:
+        //   - 2 items: user already has USDT.allowance(user, Permit2) >= sellAmount
+        //     -> [Permit2.approve, UniversalRouter.execute]
+        //   - 3 items: user has zero ERC20 allowance to Permit2
+        //     -> [USDT.approve(Permit2, sellAmount), Permit2.approve, UniversalRouter.execute]
+        //   - 4 items: user has non-zero-but-insufficient ERC20 allowance
+        //     -> [USDT.approve(Permit2, 0), USDT.approve(Permit2, sellAmount),
+        //         Permit2.approve, UniversalRouter.execute]
+        //     (Tether-style tokens require the reset-to-zero step.)
         batchCalls: [
+          ...erc20ApproveCalls.map((call) => ({
+            to: call.to,
+            data: call.data,
+            value: call.value.toString(),
+          })),
           {
             to: batched.approve.to,
             data: batched.approve.data,

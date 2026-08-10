@@ -497,6 +497,95 @@ export interface BuildBatchedCallsInput {
   approveExpiration: number
 }
 
+// -----------------------------------------------------------------------
+// ERC20 allowance read + calldata builder (needed for EIP-7702 batchCalls
+// path because Permit2.transferFrom internally calls ERC20 transferFrom,
+// which requires the user's ERC20 allowance to Permit2 be sufficient).
+// -----------------------------------------------------------------------
+
+const ERC20_ALLOWANCE_ABI = [
+  {
+    type: 'function',
+    name: 'allowance',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'owner', type: 'address' },
+      { name: 'spender', type: 'address' },
+    ],
+    outputs: [{ name: 'remaining', type: 'uint256' }],
+  },
+] as const
+
+const ERC20_APPROVE_ABI = [
+  {
+    type: 'function',
+    name: 'approve',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'spender', type: 'address' },
+      { name: 'value', type: 'uint256' },
+    ],
+    outputs: [{ name: 'success', type: 'bool' }],
+  },
+] as const
+
+export async function getErc20Allowance(
+  token: `0x${string}`,
+  owner: `0x${string}`,
+  spender: `0x${string}`,
+): Promise<bigint> {
+  const executor = getSharedCeloFallbackExecutor()
+  return await executor.withFallback(
+    'erc20:allowance',
+    async (client: PublicClient) =>
+      (await client.readContract({
+        address: token,
+        abi: ERC20_ALLOWANCE_ABI,
+        functionName: 'allowance',
+        args: [owner, spender],
+      })) as bigint,
+  )
+}
+
+export function buildErc20ApproveCalldata(
+  spender: `0x${string}`,
+  amount: bigint,
+): `0x${string}` {
+  return encodeFunctionData({
+    abi: ERC20_APPROVE_ABI,
+    functionName: 'approve',
+    args: [spender, amount],
+  })
+}
+
+// USDT-style tokens (Tether USD₮ on Celo included) reject a non-zero -> non-zero
+// allowance change without a reset to zero in between. Given a current allowance
+// and a target amount, returns the sequence of approve calls required to safely
+// reach the target. Idempotent when current >= target (returns empty).
+//   current >= target             -> []
+//   current == 0                  -> [approve(spender, target)]
+//   0 < current < target          -> [approve(spender, 0), approve(spender, target)]
+export function buildSafeErc20ApproveCalls(
+  token: `0x${string}`,
+  spender: `0x${string}`,
+  currentAllowance: bigint,
+  targetAmount: bigint,
+): BuiltSwapTx[] {
+  if (currentAllowance >= targetAmount) return []
+  const approveTarget: BuiltSwapTx = {
+    to: token,
+    data: buildErc20ApproveCalldata(spender, targetAmount),
+    value: 0n,
+  }
+  if (currentAllowance === 0n) return [approveTarget]
+  const resetToZero: BuiltSwapTx = {
+    to: token,
+    data: buildErc20ApproveCalldata(spender, 0n),
+    value: 0n,
+  }
+  return [resetToZero, approveTarget]
+}
+
 // Builds calldata for `Permit2.approve(token, spender, amount, expiration)`.
 // Used inside the BatchExecutor batch for EIP-7702 delegated wallets that
 // cannot sign Permit2 typed data (BatchExecutor does not implement ERC1271).
