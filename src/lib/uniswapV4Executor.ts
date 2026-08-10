@@ -348,54 +348,34 @@ const EXECUTE_ABI = [
   },
 ] as const
 
-export function buildV4SwapCalldata(
-  input: BuildV4SwapCalldataInput,
-): BuiltSwapTx {
-  if (input.permit2Signature.length !== 132) {
-    // 0x + 65 bytes * 2 hex chars = 132
-    throw new Error(
-      `permit2Signature must be 65 bytes (0x + 130 hex), got ${input.permit2Signature.length} chars`,
-    )
-  }
-  if (hexToBytes(input.permit2Signature).length !== 65) {
-    throw new Error('permit2Signature is not 65 raw bytes')
-  }
-
-  const zeroForOne = input.direction === 'USDT_TO_COPM'
+// Internal: builds the V4_SWAP command input (SWAP_EXACT_IN_SINGLE +
+// SETTLE_ALL + TAKE_PORTION? + TAKE_ALL). Shared between the Permit2-sig
+// path and the batchCalls path. Returns the encoded bytes suitable as
+// UniversalRouter.execute()'s `inputs[]` entry for the V4_SWAP command.
+function buildV4SwapInput(
+  direction: UniswapV4Direction,
+  sellAmount: bigint,
+  minBuyAmount: bigint,
+): `0x${string}` {
+  const zeroForOne = direction === 'USDT_TO_COPM'
   const inputCurrency = zeroForOne
     ? POOL_USDT_COPM.currency0
     : POOL_USDT_COPM.currency1
   const outputCurrency = zeroForOne
     ? POOL_USDT_COPM.currency1
     : POOL_USDT_COPM.currency0
-
   const feeBips = getIntegratorFeeBips()
   const feeRecipient = getFeeRecipient()
   const collectFee = feeRecipient !== null
 
-  // The pool-side amountOutMinimum protects against slippage inside the
-  // swap. minBuyAmount is what the USER must receive AFTER the fee cut.
-  // TAKE_PORTION removes `feeBips/10000` of the credit. So to guarantee
-  // the user receives at least minBuyAmount, the pool output floor must be:
-  //   poolMinOut = ceil(minBuyAmount * 10000 / (10000 - feeBips))
   const poolMinOut = collectFee
-    ? (input.minBuyAmount * 10000n + (10000n - BigInt(feeBips) - 1n)) /
+    ? (minBuyAmount * 10000n + (10000n - BigInt(feeBips) - 1n)) /
       (10000n - BigInt(feeBips))
-    : input.minBuyAmount
+    : minBuyAmount
 
-  // Sanity-check ranges. amountIn / amountOutMinimum are uint128; the pool
-  // key fee is uint24; other bounds enforced by env parsing at boot.
   const MAX_U128 = (1n << 128n) - 1n
-  if (input.sellAmount > MAX_U128) {
-    throw new Error('sellAmount exceeds uint128')
-  }
-  if (poolMinOut > MAX_U128) {
-    throw new Error('poolMinOut exceeds uint128')
-  }
-
-  // -----------------------------------------------------------------------
-  // Build V4_SWAP input: abi.encode(bytes actions, bytes[] params)
-  // -----------------------------------------------------------------------
+  if (sellAmount > MAX_U128) throw new Error('sellAmount exceeds uint128')
+  if (poolMinOut > MAX_U128) throw new Error('poolMinOut exceeds uint128')
 
   const swapActions = collectFee
     ? [
@@ -418,51 +398,55 @@ export function buildV4SwapCalldata(
           hooks: POOL_USDT_COPM.hooks,
         },
         zeroForOne,
-        amountIn: input.sellAmount,
+        amountIn: sellAmount,
         amountOutMinimum: poolMinOut,
         hookData: '0x' as `0x${string}`,
       } as unknown as never,
     ],
   )
-
   const settleAllParams = encodeAbiParameters(
-    [
-      { type: 'address' }, // currency
-      { type: 'uint256' }, // maxAmount
-    ],
-    [inputCurrency, input.sellAmount],
+    [{ type: 'address' }, { type: 'uint256' }],
+    [inputCurrency, sellAmount],
   )
-
   const takeAllParams = encodeAbiParameters(
-    [
-      { type: 'address' }, // currency
-      { type: 'uint256' }, // minAmount
-    ],
-    [outputCurrency, input.minBuyAmount],
+    [{ type: 'address' }, { type: 'uint256' }],
+    [outputCurrency, minBuyAmount],
   )
-
   const swapParams: `0x${string}`[] = collectFee
     ? [
         swapExactInSingleParams,
         settleAllParams,
         encodeAbiParameters(
-          [
-            { type: 'address' }, // currency
-            { type: 'address' }, // recipient
-            { type: 'uint256' }, // bips
-          ],
+          [{ type: 'address' }, { type: 'address' }, { type: 'uint256' }],
           [outputCurrency, feeRecipient!, BigInt(feeBips)],
         ),
         takeAllParams,
       ]
     : [swapExactInSingleParams, settleAllParams, takeAllParams]
 
-  const v4SwapInput = encodeAbiParameters(
-    [
-      { type: 'bytes' }, // actions
-      { type: 'bytes[]' }, // params per action
-    ],
+  return encodeAbiParameters(
+    [{ type: 'bytes' }, { type: 'bytes[]' }],
     [packActions(swapActions), swapParams],
+  )
+}
+
+export function buildV4SwapCalldata(
+  input: BuildV4SwapCalldataInput,
+): BuiltSwapTx {
+  if (input.permit2Signature.length !== 132) {
+    // 0x + 65 bytes * 2 hex chars = 132
+    throw new Error(
+      `permit2Signature must be 65 bytes (0x + 130 hex), got ${input.permit2Signature.length} chars`,
+    )
+  }
+  if (hexToBytes(input.permit2Signature).length !== 65) {
+    throw new Error('permit2Signature is not 65 raw bytes')
+  }
+
+  const v4SwapInput = buildV4SwapInput(
+    input.direction,
+    input.sellAmount,
+    input.minBuyAmount,
   )
 
   // -----------------------------------------------------------------------
@@ -487,10 +471,6 @@ export function buildV4SwapCalldata(
     ],
   )
 
-  // -----------------------------------------------------------------------
-  // Assemble the outer execute() call
-  // -----------------------------------------------------------------------
-
   const commands = packCommands([CMD_PERMIT2_PERMIT, CMD_V4_SWAP])
   const data = encodeFunctionData({
     abi: EXECUTE_ABI,
@@ -498,14 +478,138 @@ export function buildV4SwapCalldata(
     args: [commands, [permitInput, v4SwapInput], input.deadline],
   })
 
-  log.info(
-    `built V4 swap calldata direction=${input.direction} sell=${input.sellAmount.toString()} min=${input.minBuyAmount.toString()} fee=${collectFee ? feeBips : 0}bips deadline=${input.deadline.toString()}`,
-  )
+  return { to: UNIVERSAL_ROUTER_ADDRESS, data, value: 0n }
+}
 
-  return {
-    to: UNIVERSAL_ROUTER_ADDRESS,
-    data,
+// -----------------------------------------------------------------------
+// EIP-7702 delegated flow: build the two calldatas the wallet's
+// BatchExecutor will execute atomically (no Permit2 signature required)
+// -----------------------------------------------------------------------
+
+export interface BuildBatchedCallsInput {
+  direction: UniswapV4Direction
+  sellAmount: bigint
+  minBuyAmount: bigint
+  // Unix seconds; UniversalRouter.execute reverts after this.
+  deadline: bigint
+  // Permit2.approve expiration. Should be far enough that subsequent swaps
+  // in the same batch cycle can reuse the allowance if the wallet chooses.
+  approveExpiration: number
+}
+
+// Builds calldata for `Permit2.approve(token, spender, amount, expiration)`.
+// Used inside the BatchExecutor batch for EIP-7702 delegated wallets that
+// cannot sign Permit2 typed data (BatchExecutor does not implement ERC1271).
+// msg.sender inside the delegated context is the wallet EOA, so Permit2
+// updates `allowance[wallet][token][UniversalRouter]` directly with no
+// signature needed.
+export function buildPermit2ApproveCalldata(
+  token: `0x${string}`,
+  spender: `0x${string}`,
+  amount: bigint,
+  expiration: number,
+): `0x${string}` {
+  const MAX_U160 = (1n << 160n) - 1n
+  if (amount > MAX_U160) throw new Error('amount exceeds uint160')
+  return encodeFunctionData({
+    abi: [
+      {
+        type: 'function',
+        name: 'approve',
+        stateMutability: 'nonpayable',
+        inputs: [
+          { name: 'token', type: 'address' },
+          { name: 'spender', type: 'address' },
+          { name: 'amount', type: 'uint160' },
+          { name: 'expiration', type: 'uint48' },
+        ],
+        outputs: [],
+      },
+    ] as const,
+    functionName: 'approve',
+    args: [token, spender, amount, expiration],
+  })
+}
+
+// Builds the UniversalRouter.execute() calldata for a V4 swap WITHOUT the
+// PERMIT2_PERMIT command. Callers (typically the /api/swap/quote handler
+// on the EIP-7702 delegated path) are responsible for ensuring Permit2 has
+// the required allowance to UniversalRouter beforehand (via a preceding
+// Permit2.approve call inside the same BatchExecutor batch).
+export function buildV4SwapCalldataNoPermit(
+  input: BuildBatchedCallsInput,
+): BuiltSwapTx {
+  const v4SwapInput = buildV4SwapInput(
+    input.direction,
+    input.sellAmount,
+    input.minBuyAmount,
+  )
+  const commands = packCommands([CMD_V4_SWAP])
+  const data = encodeFunctionData({
+    abi: EXECUTE_ABI,
+    functionName: 'execute',
+    args: [commands, [v4SwapInput], input.deadline],
+  })
+  return { to: UNIVERSAL_ROUTER_ADDRESS, data, value: 0n }
+}
+
+// High-level helper: builds both calldatas the wallet's BatchExecutor
+// executes atomically for an EIP-7702 delegated user. First call ensures
+// Permit2 has the allowance; second call performs the swap. Returns the
+// pair in the exact order the batch must execute.
+export interface BatchedSwapCalls {
+  approve: BuiltSwapTx
+  swap: BuiltSwapTx
+}
+
+export function buildEip7702BatchedSwapCalls(
+  input: BuildBatchedCallsInput & { sellToken: `0x${string}` },
+): BatchedSwapCalls {
+  const approveData = buildPermit2ApproveCalldata(
+    input.sellToken,
+    UNIVERSAL_ROUTER_ADDRESS,
+    input.sellAmount,
+    input.approveExpiration,
+  )
+  const swap = buildV4SwapCalldataNoPermit(input)
+  const approve: BuiltSwapTx = {
+    to: PERMIT2_ADDRESS,
+    data: approveData,
     value: 0n,
+  }
+  log.info(
+    `built EIP-7702 batched calls direction=${input.direction} sell=${input.sellAmount.toString()} min=${input.minBuyAmount.toString()} deadline=${input.deadline.toString()}`,
+  )
+  return { approve, swap }
+}
+
+// -----------------------------------------------------------------------
+// EIP-7702 delegation detection
+// -----------------------------------------------------------------------
+
+// Returns true when the given address has EIP-7702 delegation code
+// (0xef01 prefix, 23 bytes total: 3-byte magic + 20-byte delegate address).
+// Non-delegated EOAs return false (code.length == 0). Regular contracts
+// also return false (their code doesn't start with the 0xef01 magic).
+export async function isEip7702Delegated(
+  address: `0x${string}`,
+): Promise<boolean> {
+  const executor = getSharedCeloFallbackExecutor()
+  try {
+    const code = await executor.withFallback(
+      'eip7702:getCode',
+      async (client: PublicClient) => client.getCode({ address }),
+    )
+    if (!code || code === '0x') return false
+    // EIP-7702 delegation payload is exactly 23 bytes: `0xef01` + 1-byte
+    // version + 20-byte delegate address. In practice observed on Celo as
+    // `0xef0100 + 40-hex delegate`.
+    return code.length === 48 && code.toLowerCase().startsWith('0xef0100')
+  } catch (err) {
+    log.warn(
+      `isEip7702Delegated failed for ${address}, assuming NOT delegated: ${err instanceof Error ? err.message : String(err)}`,
+    )
+    return false
   }
 }
 

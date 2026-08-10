@@ -1,7 +1,10 @@
 import { decodeFunctionData, decodeAbiParameters, hashTypedData } from 'viem'
 import {
+  buildEip7702BatchedSwapCalls,
+  buildPermit2ApproveCalldata,
   buildPermit2TypedData,
   buildV4SwapCalldata,
+  buildV4SwapCalldataNoPermit,
   CELO_CHAIN_ID,
   PERMIT2_ADDRESS,
   UNIVERSAL_ROUTER_ADDRESS,
@@ -365,5 +368,147 @@ describe('typed-data reproducibility (wallet signs THIS exact hash)', () => {
       },
     })
     expect(hOrig).not.toBe(hMut)
+  })
+})
+
+// -----------------------------------------------------------------------
+// EIP-7702 delegated batch flow (option B)
+// -----------------------------------------------------------------------
+
+describe('buildPermit2ApproveCalldata', () => {
+  it('encodes Permit2.approve(token, spender, amount, expiration) selector', () => {
+    const data = buildPermit2ApproveCalldata(
+      USDT,
+      UNIVERSAL_ROUTER_ADDRESS,
+      1_000_000n,
+      1_800_000_000,
+    )
+    // selector for approve(address,address,uint160,uint48)
+    expect(data.slice(0, 10)).toBe('0x87517c45')
+    // 4 selector + 4 * 32 args = 132 hex chars including 0x
+    expect(data.length).toBe(2 + 8 + 4 * 64)
+  })
+
+  it('rejects amount above uint160', () => {
+    expect(() =>
+      buildPermit2ApproveCalldata(USDT, UNIVERSAL_ROUTER_ADDRESS, 1n << 160n, 1),
+    ).toThrow(/uint160/)
+  })
+})
+
+describe('buildV4SwapCalldataNoPermit', () => {
+  beforeEach(() => {
+    delete process.env.SQUID_INTEGRATOR_FEE_ADDRESS
+    delete process.env.SQUID_INTEGRATOR_FEE_PERCENTAGE
+  })
+
+  it('returns to=UniversalRouter, value=0, commands=0x10 (V4_SWAP only, no PERMIT2_PERMIT)', () => {
+    const tx = buildV4SwapCalldataNoPermit({
+      direction: 'USDT_TO_COPM',
+      sellAmount: 1_000_000n,
+      minBuyAmount: 3_000_000_000_000_000_000_000n,
+      deadline: 1_700_000_030n,
+      approveExpiration: 1_800_000_000,
+    })
+    expect(tx.to).toBe(UNIVERSAL_ROUTER_ADDRESS)
+    expect(tx.value).toBe(0n)
+    const { args } = decodeFunctionData({
+      abi: [
+        {
+          type: 'function',
+          name: 'execute',
+          stateMutability: 'payable',
+          inputs: [
+            { name: 'commands', type: 'bytes' },
+            { name: 'inputs', type: 'bytes[]' },
+            { name: 'deadline', type: 'uint256' },
+          ],
+          outputs: [],
+        },
+      ] as const,
+      data: tx.data,
+    })
+    const [commands, inputs, deadline] = args as unknown as [
+      `0x${string}`,
+      `0x${string}`[],
+      bigint,
+    ]
+    expect(commands).toBe('0x10') // V4_SWAP only, NO PERMIT2_PERMIT
+    expect(inputs).toHaveLength(1)
+    expect(deadline).toBe(1_700_000_030n)
+  })
+})
+
+describe('buildEip7702BatchedSwapCalls', () => {
+  beforeEach(() => {
+    process.env.SQUID_INTEGRATOR_FEE_ADDRESS = FEE_RECIPIENT
+    process.env.SQUID_INTEGRATOR_FEE_PERCENTAGE = '0.5'
+  })
+
+  afterEach(() => {
+    delete process.env.SQUID_INTEGRATOR_FEE_ADDRESS
+    delete process.env.SQUID_INTEGRATOR_FEE_PERCENTAGE
+  })
+
+  it('returns 2 calls: [Permit2.approve, UniversalRouter.execute]', () => {
+    const { approve, swap } = buildEip7702BatchedSwapCalls({
+      direction: 'USDT_TO_COPM',
+      sellToken: USDT,
+      sellAmount: 1_000_000n,
+      minBuyAmount: 3_000_000_000_000_000_000_000n,
+      deadline: 1_700_000_030n,
+      approveExpiration: 1_800_000_000,
+    })
+    // First call = Permit2.approve
+    expect(approve.to).toBe(PERMIT2_ADDRESS)
+    expect(approve.value).toBe(0n)
+    expect(approve.data.slice(0, 10)).toBe('0x87517c45') // approve selector
+    // Second call = UniversalRouter.execute WITHOUT PERMIT2_PERMIT
+    expect(swap.to).toBe(UNIVERSAL_ROUTER_ADDRESS)
+    expect(swap.value).toBe(0n)
+    const { args } = decodeFunctionData({
+      abi: [
+        {
+          type: 'function',
+          name: 'execute',
+          stateMutability: 'payable',
+          inputs: [
+            { name: 'commands', type: 'bytes' },
+            { name: 'inputs', type: 'bytes[]' },
+            { name: 'deadline', type: 'uint256' },
+          ],
+          outputs: [],
+        },
+      ] as const,
+      data: swap.data,
+    })
+    const [commands] = args as unknown as [`0x${string}`, unknown[], bigint]
+    expect(commands).toBe('0x10') // V4_SWAP only
+  })
+
+  it('approve amount equals sellAmount (bounds exposure)', () => {
+    const { approve } = buildEip7702BatchedSwapCalls({
+      direction: 'USDT_TO_COPM',
+      sellToken: USDT,
+      sellAmount: 1_234_567n,
+      minBuyAmount: 100n,
+      deadline: 1n,
+      approveExpiration: 2,
+    })
+    // Decode approve(token, spender, amount, expiration) params.
+    // Skip 4-byte selector then decode.
+    const [token, spender, amount, expiration] = decodeAbiParameters(
+      [
+        { type: 'address' },
+        { type: 'address' },
+        { type: 'uint160' },
+        { type: 'uint48' },
+      ],
+      ('0x' + approve.data.slice(10)) as `0x${string}`,
+    ) as [`0x${string}`, `0x${string}`, bigint, number]
+    expect(token.toLowerCase()).toBe(USDT.toLowerCase())
+    expect(spender.toLowerCase()).toBe(UNIVERSAL_ROUTER_ADDRESS.toLowerCase())
+    expect(amount).toBe(1_234_567n)
+    expect(expiration).toBe(2)
   })
 })
