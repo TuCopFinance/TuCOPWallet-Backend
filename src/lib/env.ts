@@ -165,6 +165,23 @@ const envSchema = z.object({
   // Upstream providers (optional; routes 503 when their feature is hit
   // without the corresponding key)
   COINMARKETCAP_API_KEY: z.string().optional(),
+  // CoinGecko Demo API key. Header `x-cg-demo-api-key` against
+  // api.coingecko.com/api/v3. 30 req/min, 10k/mo on free tier. Consumed
+  // as the second tier of the token-price waterfall (after CMC, before
+  // DIA + on-chain fallbacks). See src/lib/priceProviders.ts.
+  COINGECKO_API_KEY: z.string().optional(),
+  // Fase 3 token-prices proxy. When true, /api/tokens/info returns a
+  // response shaped like Valora's legacy getTokensInfoWithPrices with
+  // priceUsd filled from the multi-provider waterfall in
+  // src/lib/priceProviders.ts. Wallet-side Statsig gate
+  // `use_tucop_backend_tokens_info` controls whether the mobile app
+  // routes here vs. the legacy Valora URL. Default false: endpoint is
+  // still callable (defense in depth) but the wallet does not use it.
+  TOKENS_INFO_ENDPOINT_ENABLED: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => v === 'true'),
   BLOCKSCOUT_API_KEY: z.string().optional(),
   BLOCKSCOUT_BASE_URL: zHttpsUrl.optional(),
   BLOCKSCOUT_ALLOWED_HOSTS: z.string().optional().default(''),
