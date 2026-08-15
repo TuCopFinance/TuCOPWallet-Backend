@@ -1,4 +1,4 @@
-import { readEnvAddress, ZERO_ADDRESS } from '../lib/env'
+import { env, readEnvAddress, ZERO_ADDRESS } from '../lib/env'
 import { createLogger } from '../lib/logger'
 
 const log = createLogger('hooks-api:config')
@@ -9,14 +9,14 @@ export const NEERU_DEPOSIT_TOKEN_ADDRESS = readEnvAddress(
 )
 
 export const NEERU_CATEGORY_IMAGE_URL_TEMPLATE =
-  process.env.NEERU_CATEGORY_IMAGE_URL_TEMPLATE ?? ''
+  env.NEERU_CATEGORY_IMAGE_URL_TEMPLATE
 
-export const NEERU_MANAGE_URL = process.env.NEERU_MANAGE_URL ?? ''
+export const NEERU_MANAGE_URL = env.NEERU_MANAGE_URL
 
-export const NEERU_TERMS_URL = process.env.NEERU_TERMS_URL ?? ''
+export const NEERU_TERMS_URL = env.NEERU_TERMS_URL
 
 export const NEERU_CONTRACT_CREATED_AT_ISO =
-  process.env.NEERU_CONTRACT_CREATED_AT_ISO ?? null
+  env.NEERU_CONTRACT_CREATED_AT_ISO ?? null
 
 export function hooksApiConfigured(): boolean {
   return NEERU_DEPOSIT_TOKEN_ADDRESS !== ZERO_ADDRESS

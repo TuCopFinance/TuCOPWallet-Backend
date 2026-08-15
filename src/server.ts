@@ -8,7 +8,7 @@ initSentry()
 // missing or any var is malformed; we exit non-zero so a misconfigured
 // deploy fails immediately instead of returning 503 at the first request
 // that touches the missing config.
-import { parseEnv } from './lib/env'
+import { env, parseEnv } from './lib/env'
 import { createLogger } from './lib/logger'
 
 const log = createLogger('server')
@@ -30,7 +30,7 @@ import { startTimelockIndexer } from './neeru-timelock/worker'
 import { resumePendingBackfills } from './transactions-indexer/backfill'
 import { startIndexer } from './transactions-indexer/worker'
 
-const PORT = Number(process.env.PORT) || 8080
+const PORT = env.PORT
 
 // Blockscout proxy host allowlist. The previous check only enforced https://
 // which left BLOCKSCOUT_BASE_URL trusted beyond the protocol; a misconfigured
@@ -46,7 +46,7 @@ const BLOCKSCOUT_DEFAULT_ALLOWED_HOSTS = [
   'api.blockscout.com',
 ]
 
-const blockscoutBaseUrl = process.env.BLOCKSCOUT_BASE_URL
+const blockscoutBaseUrl = env.BLOCKSCOUT_BASE_URL
 if (blockscoutBaseUrl) {
   let parsed: URL
   try {
@@ -60,7 +60,7 @@ if (blockscoutBaseUrl) {
     log.error(`FATAL: BLOCKSCOUT_BASE_URL must use https:// (got: ${blockscoutBaseUrl})`)
     process.exit(1)
   }
-  const extra = (process.env.BLOCKSCOUT_ALLOWED_HOSTS ?? '')
+  const extra = env.BLOCKSCOUT_ALLOWED_HOSTS
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean)
@@ -76,7 +76,7 @@ if (blockscoutBaseUrl) {
 }
 
 async function boot(): Promise<void> {
-  if (process.env.DATABASE_URL && process.env.DATABASE_URL !== 'disabled') {
+  if (env.DATABASE_URL && env.DATABASE_URL !== 'disabled') {
     try {
       const result = await runMigrations()
       if (result.applied.length > 0) {

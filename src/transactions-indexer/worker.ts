@@ -8,6 +8,7 @@ import {
   transactionsIndexerLagBlocks,
   transactionsIndexerWatchedAddresses,
 } from '../lib/metrics'
+import { Sentry } from '../lib/sentry'
 import { NETWORK_ID, persistTx } from './persist'
 
 const log = createLogger('indexer:worker')
@@ -412,6 +413,25 @@ export async function startIndexer(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       consecutiveErrors += 1
+      if (consecutiveErrors === ERROR_ESCALATION_THRESHOLD) {
+        // First cross of the threshold - fire ONE Sentry event so alerts
+        // ring exactly once per stuck-window instead of per tick after the
+        // threshold. Subsequent ticks in the same window keep logging error
+        // but do not re-capture; recovery resets consecutiveErrors to 0 and
+        // primes the next crossing. Bursts of 100+ consecutive fails
+        // (observed 2026-08-09) now surface immediately.
+        Sentry.captureMessage('tx_indexer_stuck', {
+          level: 'error',
+          tags: {
+            event: 'tx_indexer_stuck',
+            indexer: 'transactions',
+          },
+          extra: {
+            consecutiveErrors,
+            lastError: message,
+          },
+        })
+      }
       if (consecutiveErrors >= ERROR_ESCALATION_THRESHOLD) {
         log.error(`tick failed (${consecutiveErrors} consecutive): ${message}`)
       } else {

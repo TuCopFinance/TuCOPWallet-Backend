@@ -1,5 +1,5 @@
 import { Pool, type PoolConfig } from 'pg'
-import { parseEnvBigInt } from './env'
+import { env, parseEnvBigInt } from './env'
 import { createLogger } from './logger'
 
 const log = createLogger('lib:db')
@@ -30,7 +30,7 @@ let pool: Pool | null | undefined
 export function getDb(): Pool | null {
   if (pool !== undefined) return pool
 
-  const url = process.env.DATABASE_URL
+  const url = env.DATABASE_URL
   if (!url || url === 'disabled') {
     pool = null
     return null

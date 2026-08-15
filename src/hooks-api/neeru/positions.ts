@@ -2,8 +2,8 @@ import type { Pool } from 'pg'
 import { CONTRACT_ADDRESS } from '../../neeru-indexer/abi'
 import type { NeeruIndexerRpcClient } from '../../neeru-indexer/rpc'
 import { decimalString } from '../../lib/decimal'
-import { getCopmPriceUsd } from '../../lib/coinmarketcap'
 import { createLogger } from '../../lib/logger'
+import { fetchSingleTokenPrice } from '../../lib/priceProviders'
 import {
   ERC20_READ_ABI,
   HOOKS_READ_ABI,
@@ -72,19 +72,26 @@ export function _resetHooksApiNeeruCacheForTests(): void {
   priceCache = null
 }
 
-// Fetches USD price of one COPm token. Fails soft to '0' so a downed CMC
-// or missing API key does not break the whole positions endpoint. When
-// the fallback fires, the wallet shows the "$ 0.00" state that existed
-// before this endpoint was priced, so behavior degrades gracefully.
+// Fetches USD price of one COPm token via the multi-provider waterfall
+// (DIA -> CoinGecko -> CMC -> Mento on-chain). Sole-CMC dependency
+// removed 2026-08-15; positions endpoint now tolerates CMC monthly
+// exhaustion because DIA + CG + Mento cover COPm too. Fails soft to '0'
+// so a total-blackout does not break the whole positions endpoint;
+// wallet then shows the "$ 0.00" state that existed before this
+// endpoint was priced.
 async function fetchCopmPriceCached(now: () => number): Promise<string> {
   if (priceCache && now() - priceCache.fetchedAtMs < PRICE_TTL_MS) {
     return priceCache.priceUsd
   }
   try {
-    const { priceUsd } = await getCopmPriceUsd()
+    const priced = await fetchSingleTokenPrice('COPm')
+    if (!priced) {
+      log.warn('copm price waterfall returned null - returning 0')
+      return '0'
+    }
     // 10 decimal places is far more precision than COP/USD moves per
     // minute; keeps the JSON compact vs full float toString.
-    const asStr = priceUsd.toFixed(10)
+    const asStr = priced.priceUsd.toFixed(10)
     priceCache = { fetchedAtMs: now(), priceUsd: asStr }
     return asStr
   } catch (err) {

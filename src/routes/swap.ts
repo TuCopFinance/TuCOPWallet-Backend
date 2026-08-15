@@ -510,6 +510,8 @@ function computeExchangeRate(
 }
 
 router.get('/api/swap/quote', async (req: Request, res: Response) => {
+  // Read process.env directly (rather than via the zod-frozen env proxy) so
+  // tests can flip the value at runtime; zod already validated at boot.
   const integratorId = process.env.SQUID_INTEGRATOR_ID
   if (!integratorId) {
     return res.status(503).json({ error: 'squid integrator id not configured' })

@@ -1,3 +1,4 @@
+import { env } from './env'
 import { fetchWithTimeout } from './http'
 import { buildSafeQueryString, stripReservedParams } from './query'
 
@@ -9,8 +10,8 @@ export interface BlockscoutGetInput {
 }
 
 export async function blockscoutGet({ path, query = {} }: BlockscoutGetInput): Promise<unknown> {
-  const base = process.env.BLOCKSCOUT_BASE_URL?.replace(/\/$/, '') ?? DEFAULT_BASE
-  const apiKey = process.env.BLOCKSCOUT_API_KEY
+  const base = env.BLOCKSCOUT_BASE_URL?.replace(/\/$/, '') ?? DEFAULT_BASE
+  const apiKey = env.BLOCKSCOUT_API_KEY
 
   const safeQuery = stripReservedParams(query)
   if (apiKey) safeQuery.apikey = apiKey
