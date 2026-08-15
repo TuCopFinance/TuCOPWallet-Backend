@@ -116,18 +116,6 @@ interface FetchResult {
   fetchedAtMs: number
 }
 
-// Callback shape the individual provider implementations return. `exhausted`
-// signals "quota is dead, skip me for a longer window" vs a normal thrown
-// error (transient, short skip).
-interface ProviderFetchOutcome {
-  pricesBySymbol: Map<PriceSymbol, number>
-  exhaustedProviders?: never
-}
-
-interface ProviderFetchExhausted {
-  exhausted: true
-}
-
 // A provider fetch function returns either a Map of prices (may be empty
 // or partial), throws for a transient error, or throws an ExhaustionError
 // for quota-exhausted responses. The controller handles the state changes.
