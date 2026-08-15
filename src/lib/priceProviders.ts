@@ -4,7 +4,7 @@
 // Multi-provider price fetch with waterfall fallback. Each provider carries
 // its own quota / rate-limit envelope; when one exhausts, we skip it for a
 // cool-down window and cascade to the next. Same pattern as
-// src/lib/celoRpcFallback.ts (RPC endpoints) — proven in production for the
+// src/lib/celoRpcFallback.ts (RPC endpoints), proven in production for the
 // Neeru indexer since #19.
 //
 // Provider chain (ordered by "always up first, keep paid quota in reserve"):
@@ -225,7 +225,7 @@ const coingeckoBatchFetch: ProviderBatchFetch = async (symbols) => {
 }
 
 const diaBatchFetch: ProviderBatchFetch = async (symbols) => {
-  // DIA does not support batch — issue individual fetches in parallel and
+  // DIA does not support batch, issue individual fetches in parallel and
   // consolidate. Cheap because each is a short HTTPS call to a CDN-cached
   // endpoint and we cap the whole batch under a Redis TTL upstream.
   const eligible = symbols
