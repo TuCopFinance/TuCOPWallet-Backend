@@ -2,6 +2,7 @@ import type { Pool } from 'pg'
 import { getDb } from '../lib/db'
 import { env } from '../lib/env'
 import { createLogger } from '../lib/logger'
+import { Sentry } from '../lib/sentry'
 import {
   assertIndexerConfig,
   CONTRACT_ADDRESS,
@@ -47,7 +48,6 @@ export {
 
 const log = createLogger('neeru-indexer:worker')
 
-const DEFAULT_TICK_INTERVAL_MS = 30_000
 const DEFAULT_REORG_CHECK_INTERVAL_MS = 60_000
 const REORG_BUFFER_BLOCKS = 5n
 const REORG_RUN_UTC_HOUR = 3
@@ -57,16 +57,10 @@ const REORG_RUN_UTC_HOUR = 3
 const ERROR_ESCALATION_THRESHOLD = 5
 
 function parseIntervalMs(): number {
-  const raw = process.env.NEERU_INDEXER_INTERVAL_MS
-  if (!raw) return DEFAULT_TICK_INTERVAL_MS
-  const n = Number(raw)
-  if (!Number.isFinite(n) || n <= 0) {
-    log.warn(
-      `NEERU_INDEXER_INTERVAL_MS ignored (got: ${raw}); using default ${DEFAULT_TICK_INTERVAL_MS}`,
-    )
-    return DEFAULT_TICK_INTERVAL_MS
-  }
-  return Math.floor(n)
+  // env.NEERU_INDEXER_INTERVAL_MS is validated + defaulted by the zod schema
+  // (zPositiveInt default 30_000). Boot fails fast on invalid values, so we
+  // trust the parsed value directly here.
+  return env.NEERU_INDEXER_INTERVAL_MS
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -274,6 +268,24 @@ export async function startNeeruIndexer(
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         consecutiveErrors += 1
+        if (consecutiveErrors === ERROR_ESCALATION_THRESHOLD) {
+          // First cross of the threshold - fire ONE Sentry event so alerts
+          // ring exactly once per stuck-window instead of per tick after
+          // the threshold. Subsequent ticks in the same window keep
+          // logging error but do not re-capture; recovery resets
+          // consecutiveErrors to 0 and primes the next crossing.
+          Sentry.captureMessage('neeru_indexer_stuck', {
+            level: 'error',
+            tags: {
+              event: 'neeru_indexer_stuck',
+              indexer: 'neeru',
+            },
+            extra: {
+              consecutiveErrors,
+              lastError: message,
+            },
+          })
+        }
         if (consecutiveErrors >= ERROR_ESCALATION_THRESHOLD) {
           log.error(
             `tick failed (${consecutiveErrors} consecutive): ${message}`,

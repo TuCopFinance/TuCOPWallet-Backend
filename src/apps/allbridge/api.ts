@@ -8,11 +8,12 @@
 //
 // - LRU import removed (uses a single-entry, time-boxed cache inline; one
 //   dependency less, behavior identical).
-// - Optional API key read from `process.env.ALLBRIDGE_API_KEY` instead of
-//   a config object - matches the conventions in this repo.
+// - Optional API key read from the zod-validated env (env.ALLBRIDGE_API_KEY)
+//   instead of a config object, matches the conventions in this repo.
 // - Narrowed to the chain symbols this backend supports (Celo only).
 
 import type { Address } from 'viem'
+import { env } from '../../lib/env'
 import { createLogger } from '../../lib/logger'
 import type { NetworkId } from './types'
 
@@ -103,9 +104,8 @@ export async function getAllbridgeTokenInfo({
       // Same value upstream uses. Allbridge whitelists known SDK agents.
       'x-Sdk-Agent': 'AllbridgeCoreSDK/3.21.0',
     }
-    const apiKey = process.env.ALLBRIDGE_API_KEY
-    if (apiKey) {
-      headers['valora-allbridge-core'] = apiKey
+    if (env.ALLBRIDGE_API_KEY) {
+      headers['valora-allbridge-core'] = env.ALLBRIDGE_API_KEY
     }
 
     const res = await fetch(TOKEN_INFO_URL, { headers })

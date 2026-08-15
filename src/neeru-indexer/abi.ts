@@ -1,5 +1,6 @@
 import type { AbiFunction } from 'viem'
 import {
+  env,
   readEnvAddress,
   readEnvTopic0,
   ZERO_ADDRESS,
@@ -8,9 +9,7 @@ import {
 
 export const CONTRACT_ADDRESS = readEnvAddress('NEERU_CONTRACT_ADDRESS')
 
-export const INDEXER_GENESIS_BLOCK = BigInt(
-  process.env.NEERU_INDEXER_GENESIS_BLOCK ?? '0',
-)
+export const INDEXER_GENESIS_BLOCK = env.NEERU_INDEXER_GENESIS_BLOCK ?? 0n
 
 export const EVENT_A_TOPIC0 = readEnvTopic0('NEERU_EVENT_A_TOPIC0')
 export const EVENT_B_TOPIC0 = readEnvTopic0('NEERU_EVENT_B_TOPIC0')
