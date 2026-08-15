@@ -1,6 +1,6 @@
 import { Router } from 'express'
-import { getXautPriceUsd } from '../lib/coinmarketcap'
 import { createLogger } from '../lib/logger'
+import { fetchSingleTokenPrice } from '../lib/priceProviders'
 import { getRedis } from '../lib/redis'
 
 const router = Router()
@@ -47,14 +47,17 @@ router.get('/api/prices/xaut', async (req, res) => {
     log.warn('redis fresh read failed:', err instanceof Error ? err.message : err)
   }
 
-  // Slow path: try upstream.
+  // Slow path: try upstream via multi-provider waterfall (DIA -> CoinGecko
+  // -> CMC -> hardcoded). Sole-CMC dependency removed 2026-08-15; XAUt now
+  // benefits from DIA-first (free, no quota) and CG fallback before CMC.
   try {
-    const fresh = await getXautPriceUsd()
+    const fresh = await fetchSingleTokenPrice('XAUt')
+    if (!fresh) throw new Error('no provider returned a price for XAUt')
     const payload: CachedPayload = {
       symbol: 'XAUT',
       vs: 'usd',
       priceUsd: fresh.priceUsd,
-      asOf: fresh.asOf,
+      asOf: new Date(fresh.fetchedAtMs).toISOString(),
     }
     // Write both keys so the stale copy survives CMC outages longer than
     // the fresh TTL. Failures on either write are non-fatal; the request

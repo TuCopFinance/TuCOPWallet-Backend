@@ -146,6 +146,8 @@ interface Provider {
 // CoinMarketCap Pro batch quotes. Handles the "credit limit exceeded" error
 // (code 1010) as ProviderExhaustedError so the controller can skip us long.
 const cmcBatchFetch: ProviderBatchFetch = async (symbols) => {
+  // Read process.env directly (rather than via the zod-frozen env proxy) so
+  // tests can flip the value at runtime; zod validated the key at boot.
   const key = process.env.COINMARKETCAP_API_KEY
   if (!key) throw new Error('COINMARKETCAP_API_KEY not set')
   const cmcSymbols = symbols
@@ -188,6 +190,7 @@ const cmcBatchFetch: ProviderBatchFetch = async (symbols) => {
 }
 
 const coingeckoBatchFetch: ProviderBatchFetch = async (symbols) => {
+  // Same test-mutation rationale as cmcBatchFetch above.
   const key = process.env.COINGECKO_API_KEY
   const ids = symbols
     .map((s) => SYMBOL_TABLE[s].coingeckoId)

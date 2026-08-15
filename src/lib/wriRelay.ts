@@ -23,6 +23,9 @@ let missingPkLogged = false
 export function getRelayClients(): RelayClients | null {
   if (cached) return cached
 
+  // Read process.env directly (rather than via the zod-frozen env proxy) so
+  // tests can flip the value at runtime; zod already validated the hex shape
+  // at boot.
   const pk = process.env.WRI_RELAY_PK
   if (!pk) {
     if (!missingPkLogged) {

@@ -3,14 +3,12 @@
 // change. The event ABI shapes are needed to decode the data blob after the
 // selector match.
 
-import { readEnvAddress, readEnvTopic0, ZERO_ADDRESS, ZERO_TOPIC } from '../lib/env'
+import { env, readEnvAddress, readEnvTopic0, ZERO_ADDRESS, ZERO_TOPIC } from '../lib/env'
 
 export const TIMELOCK_ADDRESS = readEnvAddress('NEERU_TIMELOCK_ADDRESS')
 export const NEERU_CONTRACT_ADDRESS = readEnvAddress('NEERU_CONTRACT_ADDRESS')
 
-export const TIMELOCK_GENESIS_BLOCK = BigInt(
-  process.env.NEERU_TIMELOCK_GENESIS_BLOCK ?? '0',
-)
+export const TIMELOCK_GENESIS_BLOCK = env.NEERU_TIMELOCK_GENESIS_BLOCK ?? 0n
 
 export const EVENT_SCHEDULED_TOPIC0 = readEnvTopic0(
   'NEERU_TIMELOCK_EVENT_SCHEDULED_TOPIC0',

@@ -1,4 +1,5 @@
 import Redis from 'ioredis'
+import { env } from './env'
 import { createLogger } from './logger'
 
 const log = createLogger('lib:redis')
@@ -8,7 +9,7 @@ let client: Redis | null | undefined
 export function getRedis(): Redis | null {
   if (client !== undefined) return client
 
-  const url = process.env.REDIS_URL
+  const url = env.REDIS_URL
   if (!url || url === 'disabled') {
     client = null
     return null

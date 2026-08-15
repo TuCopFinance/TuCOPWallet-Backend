@@ -1,9 +1,9 @@
 import request from 'supertest'
 import { app } from '../app'
-import * as cmc from '../lib/coinmarketcap'
+import * as priceProviders from '../lib/priceProviders'
 import * as redisMod from '../lib/redis'
 
-jest.mock('../lib/coinmarketcap')
+jest.mock('../lib/priceProviders')
 
 // Redis is mocked as a simple in-memory Map per test so we can exercise the
 // fresh/stale write paths without a real Redis server. Individual tests can
@@ -12,9 +12,10 @@ jest.mock('../lib/redis', () => ({
   getRedis: jest.fn(),
 }))
 
-const mockGetXautPriceUsd = cmc.getXautPriceUsd as jest.MockedFunction<
-  typeof cmc.getXautPriceUsd
->
+const mockFetchSingleTokenPrice =
+  priceProviders.fetchSingleTokenPrice as jest.MockedFunction<
+    typeof priceProviders.fetchSingleTokenPrice
+  >
 const mockGetRedis = redisMod.getRedis as jest.MockedFunction<
   typeof redisMod.getRedis
 >
@@ -72,15 +73,17 @@ function buildFakeRedis(): {
 
 describe('GET /api/prices/xaut', () => {
   beforeEach(() => {
-    mockGetXautPriceUsd.mockReset()
+    mockFetchSingleTokenPrice.mockReset()
     mockGetRedis.mockReset()
     mockGetRedis.mockReturnValue(null)
   })
 
   it('returns USD price with required shape', async () => {
-    mockGetXautPriceUsd.mockResolvedValueOnce({
+    const fetchedAtMs = new Date('2026-06-16T12:00:00.000Z').getTime()
+    mockFetchSingleTokenPrice.mockResolvedValueOnce({
       priceUsd: 3421.5,
-      asOf: '2026-06-16T12:00:00.000Z',
+      source: 'dia',
+      fetchedAtMs,
     })
 
     const res = await request(app).get('/api/prices/xaut?vs=usd')
@@ -95,9 +98,10 @@ describe('GET /api/prices/xaut', () => {
   })
 
   it('defaults to usd when vs is omitted', async () => {
-    mockGetXautPriceUsd.mockResolvedValueOnce({
+    mockFetchSingleTokenPrice.mockResolvedValueOnce({
       priceUsd: 3500,
-      asOf: '2026-06-16T12:00:00.000Z',
+      source: 'dia',
+      fetchedAtMs: Date.now(),
     })
 
     const res = await request(app).get('/api/prices/xaut')
@@ -109,11 +113,23 @@ describe('GET /api/prices/xaut', () => {
   it('rejects non-usd vs param', async () => {
     const res = await request(app).get('/api/prices/xaut?vs=cop')
     expect(res.status).toBe(400)
-    expect(mockGetXautPriceUsd).not.toHaveBeenCalled()
+    expect(mockFetchSingleTokenPrice).not.toHaveBeenCalled()
   })
 
-  it('returns 502 when upstream fails and no cached copy exists', async () => {
-    mockGetXautPriceUsd.mockRejectedValueOnce(new Error('CMC unreachable'))
+  it('returns 502 when waterfall returns null and no cached copy exists', async () => {
+    mockFetchSingleTokenPrice.mockResolvedValueOnce(null)
+
+    const res = await request(app).get('/api/prices/xaut?vs=usd')
+
+    expect(res.status).toBe(502)
+    expect(res.body).toMatchObject({ error: expect.any(String) })
+    expect(res.headers['x-stale']).toBeUndefined()
+  })
+
+  it('returns 502 when waterfall throws and no cached copy exists', async () => {
+    mockFetchSingleTokenPrice.mockRejectedValueOnce(
+      new Error('all providers exhausted'),
+    )
 
     const res = await request(app).get('/api/prices/xaut?vs=usd')
 
@@ -128,9 +144,11 @@ describe('GET /api/prices/xaut', () => {
     mockGetRedis.mockReturnValue(
       fake as unknown as ReturnType<typeof redisMod.getRedis>,
     )
-    mockGetXautPriceUsd.mockResolvedValueOnce({
+    const fetchedAtMs = new Date('2026-07-27T02:57:05.000Z').getTime()
+    mockFetchSingleTokenPrice.mockResolvedValueOnce({
       priceUsd: 4082.17,
-      asOf: '2026-07-27T02:57:05.000Z',
+      source: 'coingecko',
+      fetchedAtMs,
     })
 
     const res = await request(app).get('/api/prices/xaut?vs=usd')
@@ -167,7 +185,7 @@ describe('GET /api/prices/xaut', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.priceUsd).toBe(4000)
-    expect(mockGetXautPriceUsd).not.toHaveBeenCalled()
+    expect(mockFetchSingleTokenPrice).not.toHaveBeenCalled()
     // Fresh path emits no stale headers.
     expect(res.headers['x-stale']).toBeUndefined()
   })
@@ -190,7 +208,7 @@ describe('GET /api/prices/xaut', () => {
       },
       24 * 60 * 60,
     )
-    mockGetXautPriceUsd.mockRejectedValueOnce(new Error('CMC 500'))
+    mockFetchSingleTokenPrice.mockRejectedValueOnce(new Error('all providers down'))
 
     const res = await request(app).get('/api/prices/xaut?vs=usd')
 
@@ -210,7 +228,7 @@ describe('GET /api/prices/xaut', () => {
     mockGetRedis.mockReturnValue(
       fake as unknown as ReturnType<typeof redisMod.getRedis>,
     )
-    mockGetXautPriceUsd.mockRejectedValueOnce(new Error('CMC 500'))
+    mockFetchSingleTokenPrice.mockRejectedValueOnce(new Error('all providers down'))
 
     const res = await request(app).get('/api/prices/xaut?vs=usd')
 

@@ -30,6 +30,8 @@ const DEFAULT_WRITE_ORIGINS = [
 ]
 
 export function getWriteAllowedOrigins(): readonly string[] {
+  // Read process.env directly (rather than via the zod-frozen env proxy) so
+  // tests can flip the value at runtime. Zod validates the shape at boot.
   const fromEnv = (process.env.CORS_WRITE_ALLOWED_ORIGINS ?? '')
     .split(',')
     .map((s) => s.trim())

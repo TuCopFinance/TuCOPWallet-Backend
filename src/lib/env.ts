@@ -170,6 +170,12 @@ const envSchema = z.object({
   // as the second tier of the token-price waterfall (after CMC, before
   // DIA + on-chain fallbacks). See src/lib/priceProviders.ts.
   COINGECKO_API_KEY: z.string().optional(),
+  // Allbridge Core token-info API key (optional). Header
+  // `valora-allbridge-core` against core.api.allbridgecoreapi.net. Only
+  // consumed by the ported hooks-api allbridge app in
+  // src/apps/allbridge/api.ts. Unset in prod today; if the endpoint
+  // starts rate-limiting we set this to a whitelisted key.
+  ALLBRIDGE_API_KEY: z.string().optional(),
   // Fase 3 token-prices proxy. When true, /api/tokens/info returns a
   // response shaped like Valora's legacy getTokensInfoWithPrices with
   // priceUsd filled from the multi-provider waterfall in

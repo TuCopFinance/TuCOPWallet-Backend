@@ -26,6 +26,8 @@ function firstString(value: unknown): string | undefined {
 }
 
 router.get('/events', async (req: Request, res: Response) => {
+  // Read process.env directly (rather than via the zod-frozen env proxy) so
+  // tests can flip the value at runtime; zod already required this at boot.
   const apiKey = process.env.ETHERSCAN_API_KEY
   if (!apiKey) {
     return res.status(503).json({ error: 'etherscan key not configured' })
