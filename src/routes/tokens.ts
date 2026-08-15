@@ -133,7 +133,7 @@ const CELO_MAINNET_TOKENS: TokenCatalogueEntry[] = [
     priceSymbol: 'COPm',
   },
   {
-    address: '0xc825b96be7e15e1c313ff3ceafda4432a17b6a1a',
+    address: '0xaf37e8b6c9ed7f6318979f56fc287d76c30847ff',
     decimals: 6,
     symbol: 'XAUt0',
     name: 'Tether Gold',
