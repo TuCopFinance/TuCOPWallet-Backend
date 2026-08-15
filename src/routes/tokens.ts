@@ -26,6 +26,9 @@ import {
 } from '../lib/priceProviders'
 import { buildCacheKey } from '../lib/query'
 import { getRedis } from '../lib/redis'
+import { Sentry } from '../lib/sentry'
+
+const UPSTREAM_PROVIDERS: readonly ProviderName[] = ['dia', 'coingecko', 'cmc']
 
 const router = Router()
 const log = createLogger('routes:tokens')
@@ -267,6 +270,13 @@ router.get('/api/tokens/info', async (req: Request, res: Response) => {
     body[tokenId] = entry
   }
 
+  const unresolvedSymbols = wantedSymbols.filter(
+    (s) => !fetchResult.prices.has(s),
+  )
+  const allUpstreamSkipped = UPSTREAM_PROVIDERS.every((p) =>
+    fetchResult.skippedProviders.includes(p),
+  )
+
   // Audit log for observability. When the endpoint degrades to a lower tier
   // provider (or misses tokens entirely), the dashboard should reflect it
   // via this signal. Mirrors the swap_quote_comparison log convention.
@@ -279,8 +289,38 @@ router.get('/api/tokens/info', async (req: Request, res: Response) => {
       providersUsed: fetchResult.usedProviders,
       providersSkipped: fetchResult.skippedProviders,
       perProvider: providerCount,
+      unresolvedSymbols,
     }),
   )
+
+  if (allUpstreamSkipped) {
+    Sentry.captureMessage('tokens_info_all_upstream_providers_skipped', {
+      level: 'warning',
+      tags: {
+        event: 'tokens_info_all_upstream_providers_skipped',
+        networkIds: requested.join(','),
+      },
+      extra: {
+        providersSkipped: fetchResult.skippedProviders,
+        providersUsed: fetchResult.usedProviders,
+        perProvider: providerCount,
+      },
+    })
+  }
+  if (unresolvedSymbols.length > 0) {
+    Sentry.captureMessage('tokens_info_unresolved_symbols', {
+      level: 'warning',
+      tags: {
+        event: 'tokens_info_unresolved_symbols',
+        networkIds: requested.join(','),
+      },
+      extra: {
+        unresolvedSymbols,
+        providersUsed: fetchResult.usedProviders,
+        providersSkipped: fetchResult.skippedProviders,
+      },
+    })
+  }
 
   try {
     await cache?.set(cacheKey, JSON.stringify(body), 'EX', CACHE_TTL_SECONDS)
