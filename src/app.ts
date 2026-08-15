@@ -14,6 +14,7 @@ import healthRouter from './routes/health'
 import metaContractsNeeruRouter from './routes/meta-contracts-neeru'
 import positionsNotifyRouter from './routes/positions-notify'
 import pricesRouter from './routes/prices'
+import tokensRouter from './routes/tokens'
 import txStatusRouter from './routes/tx-status'
 import swapRouter from './routes/swap'
 import wriRouter from './routes/wri'
@@ -125,6 +126,7 @@ app.use(
 app.use(healthRouter)
 app.use(eventsRouter)
 app.use(pricesRouter)
+app.use(tokensRouter)
 app.use(metaContractsNeeruRouter)
 app.use(earnNeeruCatalogueRouter)
 app.use(txStatusRouter)
