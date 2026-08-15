@@ -68,7 +68,7 @@ describe('GET /api/tokens/info', () => {
         'celo-mainnet:0xceba9300f2b948710d2653dd7b07f33a8b32118c',
         'celo-mainnet:0x765de816845861e75a25fca122bb6898b8b1282a',
         'celo-mainnet:0x8a567e2ae79ca692bd748ab832081c45de4041ea',
-        'celo-mainnet:0xc825b96be7e15e1c313ff3ceafda4432a17b6a1a',
+        'celo-mainnet:0xaf37e8b6c9ed7f6318979f56fc287d76c30847ff',
         'celo-mainnet:0xa2036f0538221a77a3937f1379699f44945018d0',
       ]),
     )
@@ -111,7 +111,7 @@ describe('GET /api/tokens/info', () => {
     // COPm / XAUt have NO hardcoded and stay without priceUsd
     const copm = res.body['celo-mainnet:0x8a567e2ae79ca692bd748ab832081c45de4041ea']
     expect(copm.priceUsd).toBeUndefined()
-    const xaut = res.body['celo-mainnet:0xc825b96be7e15e1c313ff3ceafda4432a17b6a1a']
+    const xaut = res.body['celo-mainnet:0xaf37e8b6c9ed7f6318979f56fc287d76c30847ff']
     expect(xaut.priceUsd).toBeUndefined()
   })
 })
