@@ -162,11 +162,17 @@ export interface IngestResult {
 
 // Concurrency limit for getTransactionReceipt fan-out. A block with 100 txs
 // historically generated 100 sequential RPC calls (~50ms each on Forno warm
-// path = 5s per block, 1000s per 200-block tick). Parallelizing with 10
+// path = 5s per block, 1000s per 200-block tick). Parallelizing with a few
 // workers brings tick latency from ~minutes to ~tens of seconds on the same
 // hardware. Not a dep on p-limit because the helper below is 10 LOC and
-// has no third-party surface to audit.
-const DEFAULT_RECEIPT_CONCURRENCY = 10
+// has no third-party surface to audit. Kept at 3 (not 10) to stay under the
+// per-second rate limit of the cheapest RPC in the fallback chain (ANKR
+// free tier). At 10 concurrent + INDEXER_MAX_BLOCKS_PER_TICK=25 + ~20 tx
+// per block, one tick can burst 500 concurrent RPC calls and trip ANKR
+// into a 5-min skip window that cascades to alchemy/forno also getting
+// saturated, stalling the indexer indefinitely (observed 2026-08-05 to
+// 2026-08-15 -> 927k block stall).
+const DEFAULT_RECEIPT_CONCURRENCY = 3
 
 async function withConcurrency<T, R>(
   items: readonly T[],
@@ -204,15 +210,39 @@ export async function ingestRange(
     // Pre-fetch all receipts in this block concurrently. Persisting still
     // happens sequentially below so the existing tx-ordering invariants
     // (cursor advance, log ordering) are preserved exactly.
+    //
+    // "Receipt not found on all endpoints" is a soft-skip (returns null)
+    // instead of throwing the whole tick to a stop. DRPC has been observed
+    // 2026-08-15 to drop getTransactionReceipt for real confirmed txs
+    // ("Transaction receipt with hash X could not be found"), which
+    // propagates through the fallback executor as "all endpoints failed"
+    // and stalls the indexer at that tick. Skipping the tx (and logging)
+    // preserves forward progress; the address that owned the tx will lose
+    // that one row in the feed but the next tick advances the cursor past
+    // the problematic block.
     const receipts = await withConcurrency(
       block.transactions,
       DEFAULT_RECEIPT_CONCURRENCY,
-      (tx) => rpc.getTransactionReceipt({ hash: tx.hash }),
+      async (tx) => {
+        try {
+          return await rpc.getTransactionReceipt({ hash: tx.hash })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (msg.includes('could not be found')) {
+            log.warn(
+              `receipt not found across all endpoints for tx ${tx.hash} in block ${bn.toString()}; skipping (feed will miss this row)`,
+            )
+            return null
+          }
+          throw err
+        }
+      },
     )
 
     for (let i = 0; i < block.transactions.length; i++) {
       const tx = block.transactions[i]!
-      const receipt = receipts[i]!
+      const receipt = receipts[i]
+      if (receipt == null) continue
       const from = tx.from.toLowerCase()
       const to = tx.to ? tx.to.toLowerCase() : null
       const directTouch = opts.watched.has(from) || (to !== null && opts.watched.has(to))
