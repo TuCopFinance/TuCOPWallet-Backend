@@ -56,6 +56,27 @@ const REORG_RUN_UTC_HOUR = 3
 // difference between transient RPC blips and a permanently stuck indexer.
 const ERROR_ESCALATION_THRESHOLD = 5
 
+// Classify an RPC error message into a stable tag value. Mirrors the
+// classifier in src/transactions-indexer/worker.ts. Kept duplicated
+// (5-line file, no shared helper) to avoid coupling the two workers on
+// a bump to the classifier surface.
+function classifyRpcError(msg: string): string {
+  if (/rate limit|Too Many Requests|call rate limit exhausted|429/i.test(msg)) {
+    return 'rate_limit'
+  }
+  if (/could not be found/i.test(msg)) return 'receipt_not_found'
+  if (/Temporary internal error/i.test(msg)) return 'upstream_internal'
+  if (/timeout|timed out|ETIMEDOUT/i.test(msg)) return 'timeout'
+  if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|network/i.test(msg)) return 'network'
+  if (/eth_getLogs.*10 block range/i.test(msg)) return 'alchemy_getlogs_cap'
+  return 'other'
+}
+
+function extractRpcEndpoint(msg: string): string | null {
+  const m = msg.match(/https:\/\/[a-z0-9.-]+(?:\/[^\s"|)]*)?/i)
+  return m ? m[0] : null
+}
+
 function parseIntervalMs(): number {
   // env.NEERU_INDEXER_INTERVAL_MS is validated + defaulted by the zod schema
   // (zPositiveInt default 30_000). Boot fails fast on invalid values, so we
@@ -235,6 +256,9 @@ export async function startNeeruIndexer(
 
   let count = 0
   let consecutiveErrors = 0
+  let stuckSinceMs: number | null = null
+  let lastTickFromBlock: bigint | null = null
+  let lastTickToBlock: bigint | null = null
   try {
     for (;;) {
       if (maxIterations != null && count >= maxIterations) return
@@ -252,6 +276,8 @@ export async function startNeeruIndexer(
         try {
           const result = await runTick({ db, rpc })
           if (result.scanned) {
+            lastTickFromBlock = result.fromBlock ?? lastTickFromBlock
+            lastTickToBlock = result.toBlock ?? lastTickToBlock
             log.info(
               `tick complete: blocks=${result.fromBlock}..${result.toBlock} logs=${result.logCount}`,
             )
@@ -264,24 +290,38 @@ export async function startNeeruIndexer(
           })
         }
         consecutiveErrors = 0
+        stuckSinceMs = null
         await sleep(intervalMs)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         consecutiveErrors += 1
+        if (consecutiveErrors === 1) stuckSinceMs = Date.now()
         if (consecutiveErrors === ERROR_ESCALATION_THRESHOLD) {
           // First cross of the threshold - fire ONE Sentry event so alerts
           // ring exactly once per stuck-window instead of per tick after
           // the threshold. Subsequent ticks in the same window keep
           // logging error but do not re-capture; recovery resets
           // consecutiveErrors to 0 and primes the next crossing.
+          //
+          // Tags carry filterable dimensions (errorClass, rpcEndpoint,
+          // contract address). Extras carry the actionable snapshot
+          // (last-known scanned range, how long we've been stuck).
+          // Together enough to diagnose from Sentry alone.
           Sentry.captureMessage('neeru_indexer_stuck', {
             level: 'error',
             tags: {
               event: 'neeru_indexer_stuck',
               indexer: 'neeru',
+              contractAddress: CONTRACT_ADDRESS,
+              errorClass: classifyRpcError(message),
+              rpcEndpoint: extractRpcEndpoint(message) ?? 'unknown',
             },
             extra: {
               consecutiveErrors,
+              stuckSinceMs:
+                stuckSinceMs != null ? Date.now() - stuckSinceMs : null,
+              lastTickFromBlock: lastTickFromBlock?.toString() ?? null,
+              lastTickToBlock: lastTickToBlock?.toString() ?? null,
               lastError: message,
             },
           })

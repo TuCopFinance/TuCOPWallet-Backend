@@ -25,6 +25,34 @@ const DEFAULT_GENESIS_OFFSET = 25
 // monitoring can page on a stuck indexer vs transient RPC blips.
 const ERROR_ESCALATION_THRESHOLD = 5
 
+// Classify an RPC error message into a stable tag value. Keeps Sentry
+// grouping meaningful when the raw error string varies (different tx
+// hashes, endpoints, trace-ids). Ordered most-specific first.
+function classifyRpcError(msg: string): string {
+  if (/rate limit|Too Many Requests|call rate limit exhausted|429/i.test(msg)) {
+    return 'rate_limit'
+  }
+  if (/could not be found/i.test(msg)) return 'receipt_not_found'
+  if (/Temporary internal error/i.test(msg)) return 'upstream_internal'
+  if (/timeout|timed out|ETIMEDOUT/i.test(msg)) return 'timeout'
+  if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|network/i.test(msg)) return 'network'
+  if (/eth_getLogs.*10 block range/i.test(msg)) return 'alchemy_getlogs_cap'
+  return 'other'
+}
+
+function extractRpcEndpoint(msg: string): string | null {
+  const m = msg.match(/https:\/\/[a-z0-9.-]+(?:\/[^\s"|)]*)?/i)
+  return m ? m[0] : null
+}
+
+// Best-effort extraction of the tx hash embedded in a fallback executor
+// error message. Format is typically "getTransactionReceipt <0xhash>" or
+// the request body echoed back. Returns null when no hash is found.
+function extractTxHashInFlight(msg: string): string | null {
+  const m = msg.match(/0x[a-fA-F0-9]{64}/)
+  return m ? m[0] : null
+}
+
 // Minimal subset of the viem PublicClient we depend on. Defining it as an
 // interface lets the worker accept a mocked client in unit tests without
 // dragging in the full viem chain plumbing.
@@ -346,6 +374,15 @@ export async function startIndexer(
   let watched = await loadWatchedAddresses(db)
   let watchedLoadedAt = Date.now()
   let consecutiveErrors = 0
+  let stuckSinceMs: number | null = null
+  // Last known cursor + tip snapshot from the most recent successful tick
+  // (or attempted-but-failed tick). Hoisted out of the try block so the
+  // catch handler can include them in the Sentry event without needing to
+  // re-fetch (which would also fail if RPC is dead).
+  let lastAttemptFromBlock: bigint | null = null
+  let lastAttemptToBlock: bigint | null = null
+  let lastKnownCursor: bigint | null = null
+  let lastKnownTip: bigint | null = null
   let count = 0
 
   // Graceful stop: signal aborted = exit the loop AFTER the current tick.
@@ -377,6 +414,8 @@ export async function startIndexer(
 
         const tip = await rpc.getBlockNumber()
         const last = await getLastBlock(db, tip)
+        lastKnownCursor = last
+        lastKnownTip = tip
         // Refresh observability gauges on every tick whether or not we end up
         // doing work; /metrics scrapes between health route calls read these.
         // Cheap in-process gauge sets, no I/O.
@@ -394,6 +433,8 @@ export async function startIndexer(
         const cap = last + BigInt(maxBlocksPerTick)
         const target = tip < cap ? tip : cap
         const from = last + 1n
+        lastAttemptFromBlock = from
+        lastAttemptToBlock = target
 
         if (watched.size === 0) {
           // Nothing to ingest; advance the cursor so we don't refetch later.
@@ -431,6 +472,7 @@ export async function startIndexer(
           )
         }
         consecutiveErrors = 0
+        stuckSinceMs = null
       } finally {
         await releaseTransactionsIndexerLock(db).catch((err) => {
           log.warn(
@@ -443,6 +485,7 @@ export async function startIndexer(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       consecutiveErrors += 1
+      if (consecutiveErrors === 1) stuckSinceMs = Date.now()
       if (consecutiveErrors === ERROR_ESCALATION_THRESHOLD) {
         // First cross of the threshold - fire ONE Sentry event so alerts
         // ring exactly once per stuck-window instead of per tick after the
@@ -450,14 +493,34 @@ export async function startIndexer(
         // but do not re-capture; recovery resets consecutiveErrors to 0 and
         // primes the next crossing. Bursts of 100+ consecutive fails
         // (observed 2026-08-09) now surface immediately.
+        //
+        // Tags carry the filterable / grouping dimensions (errorClass,
+        // rpcEndpoint, network). Extras carry the actionable snapshot
+        // (cursor + tip + attempted range + tx hash in-flight + how long
+        // we've been stuck). Together these are enough to diagnose from
+        // Sentry alone without needing to correlate against Railway logs.
         Sentry.captureMessage('tx_indexer_stuck', {
           level: 'error',
           tags: {
             event: 'tx_indexer_stuck',
             indexer: 'transactions',
+            network: NETWORK_ID,
+            errorClass: classifyRpcError(message),
+            rpcEndpoint: extractRpcEndpoint(message) ?? 'unknown',
           },
           extra: {
             consecutiveErrors,
+            stuckSinceMs:
+              stuckSinceMs != null ? Date.now() - stuckSinceMs : null,
+            lastIndexedBlock: lastKnownCursor?.toString() ?? null,
+            celoTipBlock: lastKnownTip?.toString() ?? null,
+            lagBlocks:
+              lastKnownTip != null && lastKnownCursor != null
+                ? Number(lastKnownTip - lastKnownCursor)
+                : null,
+            attemptedFromBlock: lastAttemptFromBlock?.toString() ?? null,
+            attemptedToBlock: lastAttemptToBlock?.toString() ?? null,
+            txHashInFlight: extractTxHashInFlight(message),
             lastError: message,
           },
         })

@@ -298,12 +298,19 @@ router.get('/api/tokens/info', async (req: Request, res: Response) => {
       level: 'warning',
       tags: {
         event: 'tokens_info_all_upstream_providers_skipped',
-        networkIds: requested.join(','),
+        route: '/api/tokens/info',
+        // Single-value tag so Sentry can group per-network. `networkIds`
+        // plural retained in extra for the multi-network case.
+        network: requested[0] ?? 'unknown',
+        networkCount: String(requested.length),
       },
       extra: {
+        networkIds: requested,
         providersSkipped: fetchResult.skippedProviders,
         providersUsed: fetchResult.usedProviders,
         perProvider: providerCount,
+        tokenCount: tokens.length,
+        pricedCount: Object.values(body).filter((e) => e.priceUsd).length,
       },
     })
   }
@@ -312,12 +319,21 @@ router.get('/api/tokens/info', async (req: Request, res: Response) => {
       level: 'warning',
       tags: {
         event: 'tokens_info_unresolved_symbols',
-        networkIds: requested.join(','),
+        route: '/api/tokens/info',
+        network: requested[0] ?? 'unknown',
+        unresolvedCount: String(unresolvedSymbols.length),
+        // First unresolved symbol as a tag so it groups per-symbol
+        // (COPm-alone vs XAUt-alone vs both go to different Sentry issues).
+        firstUnresolvedSymbol: unresolvedSymbols[0] ?? 'unknown',
       },
       extra: {
+        networkIds: requested,
         unresolvedSymbols,
         providersUsed: fetchResult.usedProviders,
         providersSkipped: fetchResult.skippedProviders,
+        perProvider: providerCount,
+        tokenCount: tokens.length,
+        pricedCount: Object.values(body).filter((e) => e.priceUsd).length,
       },
     })
   }
