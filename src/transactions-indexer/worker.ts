@@ -94,10 +94,18 @@ export interface IndexerRpcClient {
   // address appears as topic1 (from/owner) or topic2 (to/spender). Used to
   // skip receipt fetches for the ~99% of tx in each block that do not
   // touch any watched address.
+  //
+  // `contractAddresses` narrows the query to logs emitted by the listed
+  // contracts (token addresses we care about + integrated dApps). REQUIRED
+  // by some public endpoints (celo.publicnode.com rejects unfiltered
+  // getLogs with "Please specify an address"). Empty array means no
+  // filter (may fail on strict endpoints, callers should provide the
+  // default list from env).
   getWatchedLogTxHashes(args: {
     fromBlock: bigint
     toBlock: bigint
     paddedTopics: readonly string[]
+    contractAddresses: readonly string[]
   }): Promise<Set<string>>
 }
 
@@ -139,7 +147,10 @@ function buildDefaultClient(): IndexerRpcClient {
       // Two queries: watched-as-topic1 (from/owner) union watched-as-topic2
       // (to/spender). Same pattern as backfill.ts. Filter on topic0 to
       // [TRANSFER, APPROVAL] keeps the response size small (excludes
-      // unrelated log events) while still matching logTouchesWatched.
+      // unrelated log events) while still matching the previous receipt-
+      // scan's logTouchesWatched logic. address filter narrows to known
+      // token/dApp contracts because celo.publicnode.com rejects
+      // unfiltered getLogs.
       const topic0Filter = [
         ERC20_TRANSFER_TOPIC0,
         ERC20_APPROVAL_TOPIC0,
@@ -147,12 +158,17 @@ function buildDefaultClient(): IndexerRpcClient {
       const paddedForRpc = args.paddedTopics as unknown as readonly `0x${string}`[]
       const fromHex = `0x${args.fromBlock.toString(16)}` as `0x${string}`
       const toHex = `0x${args.toBlock.toString(16)}` as `0x${string}`
+      const addressForRpc =
+        args.contractAddresses.length > 0
+          ? (args.contractAddresses as unknown as `0x${string}`[])
+          : undefined
       const [outbound, inbound] = await Promise.all([
         executor.withFallback('indexer:getLogs-outbound', async (c) => {
           return (await c.request({
             method: 'eth_getLogs',
             params: [
               {
+                ...(addressForRpc ? { address: addressForRpc } : {}),
                 topics: [
                   topic0Filter as unknown as `0x${string}`[],
                   paddedForRpc as unknown as `0x${string}`[],
@@ -168,6 +184,7 @@ function buildDefaultClient(): IndexerRpcClient {
             method: 'eth_getLogs',
             params: [
               {
+                ...(addressForRpc ? { address: addressForRpc } : {}),
                 topics: [
                   topic0Filter as unknown as `0x${string}`[],
                   null,
@@ -228,6 +245,11 @@ export interface IngestOptions {
   fromBlock: bigint
   toBlock: bigint
   watched: Set<string>
+  // Contract addresses passed to eth_getLogs as the address filter. Narrows
+  // the log-first pre-filter to known token contracts + integrated dApps
+  // and satisfies strict endpoints (e.g. celo.publicnode.com) that reject
+  // getLogs without an address filter. Empty array = no filter.
+  logContractAddresses: readonly string[]
 }
 
 export interface IngestResult {
@@ -309,6 +331,7 @@ export async function ingestRange(
     fromBlock: opts.fromBlock,
     toBlock: opts.toBlock,
     paddedTopics,
+    contractAddresses: opts.logContractAddresses,
   })
 
   for (let bn = opts.fromBlock; bn <= opts.toBlock; bn++) {
@@ -453,6 +476,16 @@ export async function startIndexer(
     options.pollIntervalMs ?? env.INDEXER_POLL_INTERVAL_MS
   const maxBlocksPerTick =
     options.maxBlocksPerTick ?? env.INDEXER_MAX_BLOCKS_PER_TICK
+  // Contract addresses passed to eth_getLogs as the address filter for the
+  // log-first pre-filter in ingestRange. Narrows the query to logs emitted
+  // by known token contracts + integrated dApps. Required by strict public
+  // endpoints (celo.publicnode.com rejects getLogs without address).
+  // Parsed from a comma-separated env; empty when unset (some endpoints
+  // then work, publicnode falls back).
+  const logContractAddresses = (env.TX_INDEXER_LOG_CONTRACT_ADDRESSES ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => /^0x[0-9a-f]{40}$/.test(s))
   const signal = options.signal
   const maxIterations = options.iterations
 
@@ -539,6 +572,7 @@ export async function startIndexer(
           fromBlock: from,
           toBlock: target,
           watched,
+          logContractAddresses,
         })
 
         // Cursor advance is at-least-once on purpose: ingestRange commits each
