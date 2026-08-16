@@ -90,36 +90,49 @@ export function getExtraRpcUrls(): readonly string[] {
 
 // Canonical fallback chain for Celo public-client reads.
 //
-// Order (most reliable first, per observation 2026-08-15):
-//   1. Alchemy - dedicated endpoint, own key, escapes the Cloudflare 1015
-//      pattern that forno-on-Railway-IP hits. 25 CU/s free-tier cap so
-//      callers hit it and then cascade.
-//   2. Public Node - free, no key, no visible rate limit under 20 concurrent.
+// Order rationale (2026-08-16 revision after live measurement):
+//
+// Publicnode is FIRST because it has no visible rate limit under a
+// 20-concurrent stress test and consistently returned every receipt we
+// asked for. Putting it in front lets the tick loops absorb their burst
+// there instead of hammering Alchemy's 25 CU/s free-tier cap on the
+// initial boot burst (observed 2026-08-15 - a fresh container flooded
+// Alchemy into a 5-min skip window within seconds of coming up, then
+// cascaded through everything else which was still cold, stalling the
+// tick until Alchemy came back).
+//
+// Alchemy is SECOND (still favored over the anonymous public
+// endpoints because we own the key). When publicnode absent it becomes
+// first by natural fallthrough.
+//
+// Order (best-first, 2026-08-16):
+//   1. Publicnode - free, unlimited-ish, no per-second cap observed.
+//   2. Alchemy - dedicated endpoint, own key, own quota (25 CU/s cap).
 //   3. Forno - canonical public Celo endpoint.
-//   4. Blockscout eth-rpc - indexer-backed, ARCHIVE receipts (returns txs
-//      that node-based providers drop). Slower per-call but critical for
-//      the tx-indexer soft-skip-avoidance path.
+//   4. Blockscout eth-rpc - indexer-backed, ARCHIVE receipts (returns
+//      txs that node-based providers drop). Slower per-call but critical
+//      for the tx-indexer soft-skip-avoidance path.
 //   5. Thirdweb - free public backup on a different backbone.
 //   6. Ankr - rate-limited around 10 req/s on free tier.
 //   7. DRPC - public endpoint does NOT support eth_getTransactionReceipt
 //      (JSON-RPC error `does not exist`), but still serves other methods.
 //   8. Primary (rpc.celocolombia.org) - kept last after 2026-08-03 silent
 //      degradation. See memory `rpc_fallback_silent_degradation.md`.
-//   9. Any `EXTRA_CELO_RPC_URLS` (comma-separated) - appended at the tail
-//      so operators can rotate new providers in without a deploy.
+//   9. Any `EXTRA_CELO_RPC_URLS` (comma-separated) - appended at the
+//      tail so operators can rotate new providers in without a deploy.
 //
 // Both the Neeru indexer (custom skip-after-failure supervisor) and the
 // transactions-indexer / Allbridge route (viem's fallback transport)
 // consume this list. Single source of truth - do NOT redefine in other
 // modules.
 export function getCeloRpcFallbackUrls(): readonly string[] {
-  const alchemy = getAlchemyRpcUrl()
   const publicnode = getPublicnodeRpcUrl()
+  const alchemy = getAlchemyRpcUrl()
   const blockscoutRpc = getBlockscoutRpcUrl()
   const thirdweb = getThirdwebRpcUrl()
   const urls: string[] = []
-  if (alchemy) urls.push(alchemy)
   if (publicnode) urls.push(publicnode)
+  if (alchemy) urls.push(alchemy)
   urls.push(getFornoUrl())
   if (blockscoutRpc) urls.push(blockscoutRpc)
   if (thirdweb) urls.push(thirdweb)
