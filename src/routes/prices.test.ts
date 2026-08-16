@@ -94,7 +94,14 @@ describe('GET /api/prices/xaut', () => {
       vs: 'usd',
       priceUsd: 3421.5,
       asOf: '2026-06-16T12:00:00.000Z',
+      source: 'dia',
     })
+    // Cache-Control matches the fresh Redis TTL so mobile OS + HTTP proxies
+    // may short-circuit repeat calls within the same minute.
+    expect(res.headers['cache-control']).toBe('max-age=60')
+    // X-Provider-Source lets the wallet render a "degraded" badge if the
+    // waterfall fell back to a lower tier (e.g. `hardcoded`, `stale-cache`).
+    expect(res.headers['x-provider-source']).toBe('dia')
   })
 
   it('defaults to usd when vs is omitted', async () => {
@@ -177,6 +184,7 @@ describe('GET /api/prices/xaut', () => {
         vs: 'usd',
         priceUsd: 4000,
         asOf: '2026-07-27T02:00:00.000Z',
+        source: 'coingecko',
       },
       60,
     )
@@ -188,6 +196,10 @@ describe('GET /api/prices/xaut', () => {
     expect(mockFetchSingleTokenPrice).not.toHaveBeenCalled()
     // Fresh path emits no stale headers.
     expect(res.headers['x-stale']).toBeUndefined()
+    // But it DOES emit Cache-Control + X-Provider-Source hydrated from the
+    // cached payload's `source` field.
+    expect(res.headers['cache-control']).toBe('max-age=60')
+    expect(res.headers['x-provider-source']).toBe('coingecko')
   })
 
   it('serves stale-cache with X-Stale headers when upstream fails but stale key exists', async () => {
@@ -215,6 +227,7 @@ describe('GET /api/prices/xaut', () => {
     expect(res.status).toBe(200)
     expect(res.body.priceUsd).toBe(4050)
     expect(res.headers['x-stale']).toBe('true')
+    expect(res.headers['x-provider-source']).toBe('stale-cache')
     // Stale age is at least 300s (5 min), with a bit of slack for test
     // execution time.
     const staleAge = Number(res.headers['x-stale-age'])

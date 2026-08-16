@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { createLogger } from '../lib/logger'
-import { fetchSingleTokenPrice } from '../lib/priceProviders'
+import { fetchSingleTokenPrice, type ProviderName } from '../lib/priceProviders'
 import { getRedis } from '../lib/redis'
 
 const router = Router()
@@ -20,6 +20,11 @@ interface CachedPayload {
   vs: 'usd'
   priceUsd: number
   asOf: string
+  // Which tier of the priceProviders waterfall served this price. Persisted
+  // in the cache payload so subsequent fresh-cache hits can still emit the
+  // X-Provider-Source header. Optional to stay backwards-compatible with
+  // stale keys written before this field existed.
+  source?: ProviderName
 }
 
 function staleAgeSeconds(asOf: string): number {
@@ -37,11 +42,17 @@ router.get('/api/prices/xaut', async (req, res) => {
 
   const cache = getRedis()
 
-  // Fast path: fresh cache hit.
+  // Fast path: fresh cache hit. Cache-Control matches the FRESH_TTL_SECONDS
+  // so intermediaries (mobile OS network layer, HTTP proxies) may
+  // short-circuit repeat calls within the same minute. Cache header set
+  // BEFORE the JSON write so it lands on the response.
   try {
     const cached = await cache?.get(CACHE_KEY_FRESH)
     if (cached) {
-      return res.json(JSON.parse(cached) as CachedPayload)
+      const parsed = JSON.parse(cached) as CachedPayload
+      res.setHeader('Cache-Control', `max-age=${FRESH_TTL_SECONDS}`)
+      if (parsed.source) res.setHeader('X-Provider-Source', parsed.source)
+      return res.json(parsed)
     }
   } catch (err) {
     log.warn('redis fresh read failed:', err instanceof Error ? err.message : err)
@@ -58,10 +69,11 @@ router.get('/api/prices/xaut', async (req, res) => {
       vs: 'usd',
       priceUsd: fresh.priceUsd,
       asOf: new Date(fresh.fetchedAtMs).toISOString(),
+      source: fresh.source,
     }
-    // Write both keys so the stale copy survives CMC outages longer than
-    // the fresh TTL. Failures on either write are non-fatal; the request
-    // still returns the fresh payload.
+    // Write both keys so the stale copy survives upstream outages longer
+    // than the fresh TTL. Failures on either write are non-fatal; the
+    // request still returns the fresh payload.
     try {
       await cache?.set(
         CACHE_KEY_FRESH,
@@ -88,18 +100,24 @@ router.get('/api/prices/xaut', async (req, res) => {
         err instanceof Error ? err.message : err,
       )
     }
+    res.setHeader('Cache-Control', `max-age=${FRESH_TTL_SECONDS}`)
+    res.setHeader('X-Provider-Source', fresh.source)
     return res.json(payload)
   } catch (err) {
     log.warn('upstream error:', err instanceof Error ? err.message : err)
     // Upstream down: try to serve the last-known-good price from the
     // long-TTL stale key. Better than a 502 that pushes the wallet to a
-    // hardcoded fallback that drifts from the real market.
+    // hardcoded fallback that drifts from the real market. X-Stale +
+    // X-Stale-Age lets the wallet render a "cotizacion desactualizada"
+    // badge. `Cache-Control: max-age=0, must-revalidate` prevents
+    // intermediaries from caching the stale value further.
     try {
       const staleRaw = await cache?.get(CACHE_KEY_STALE)
       if (staleRaw) {
         const stale = JSON.parse(staleRaw) as CachedPayload
         res.setHeader('X-Stale', 'true')
         res.setHeader('X-Stale-Age', String(staleAgeSeconds(stale.asOf)))
+        res.setHeader('X-Provider-Source', 'stale-cache')
         res.setHeader('Cache-Control', 'max-age=0, must-revalidate')
         return res.json(stale)
       }
