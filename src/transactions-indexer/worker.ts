@@ -89,6 +89,16 @@ export interface IndexerRpcClient {
       data: string
     }>
   }>
+  // Log-first pre-filter for ingestRange. Returns the tx hashes in a block
+  // range that emitted an ERC20 Transfer or Approval log where a watched
+  // address appears as topic1 (from/owner) or topic2 (to/spender). Used to
+  // skip receipt fetches for the ~99% of tx in each block that do not
+  // touch any watched address.
+  getWatchedLogTxHashes(args: {
+    fromBlock: bigint
+    toBlock: bigint
+    paddedTopics: readonly string[]
+  }): Promise<Set<string>>
 }
 
 // Wraps the shared Celo fallback executor into the minimal IndexerRpcClient
@@ -124,29 +134,66 @@ function buildDefaultClient(): IndexerRpcClient {
         c.getTransactionReceipt({ hash: args.hash }),
       ) as ReturnType<IndexerRpcClient['getTransactionReceipt']>
     },
+    async getWatchedLogTxHashes(args) {
+      if (args.paddedTopics.length === 0) return new Set()
+      // Two queries: watched-as-topic1 (from/owner) union watched-as-topic2
+      // (to/spender). Same pattern as backfill.ts. Filter on topic0 to
+      // [TRANSFER, APPROVAL] keeps the response size small (excludes
+      // unrelated log events) while still matching logTouchesWatched.
+      const topic0Filter = [
+        ERC20_TRANSFER_TOPIC0,
+        ERC20_APPROVAL_TOPIC0,
+      ] as const
+      const paddedForRpc = args.paddedTopics as unknown as readonly `0x${string}`[]
+      const fromHex = `0x${args.fromBlock.toString(16)}` as `0x${string}`
+      const toHex = `0x${args.toBlock.toString(16)}` as `0x${string}`
+      const [outbound, inbound] = await Promise.all([
+        executor.withFallback('indexer:getLogs-outbound', async (c) => {
+          return (await c.request({
+            method: 'eth_getLogs',
+            params: [
+              {
+                topics: [
+                  topic0Filter as unknown as `0x${string}`[],
+                  paddedForRpc as unknown as `0x${string}`[],
+                ],
+                fromBlock: fromHex,
+                toBlock: toHex,
+              },
+            ],
+          })) as Array<{ transactionHash: string }>
+        }),
+        executor.withFallback('indexer:getLogs-inbound', async (c) => {
+          return (await c.request({
+            method: 'eth_getLogs',
+            params: [
+              {
+                topics: [
+                  topic0Filter as unknown as `0x${string}`[],
+                  null,
+                  paddedForRpc as unknown as `0x${string}`[],
+                ],
+                fromBlock: fromHex,
+                toBlock: toHex,
+              },
+            ],
+          })) as Array<{ transactionHash: string }>
+        }),
+      ])
+      const out = new Set<string>()
+      for (const l of outbound) out.add(l.transactionHash.toLowerCase())
+      for (const l of inbound) out.add(l.transactionHash.toLowerCase())
+      return out
+    },
   }
 }
 
-function isWatchedTopic(topic: string | null, watched: Set<string>): boolean {
-  if (!topic || topic.length !== 66) return false
-  // topic encodes a 32-byte address (left-padded). Drop the leading 24 hex
-  // chars (12 bytes of zero padding) and lowercase the trailing 20-byte addr.
-  const addr = `0x${topic.slice(26).toLowerCase()}`
-  return watched.has(addr)
-}
-
-function logTouchesWatched(
-  topics: ReadonlyArray<string>,
-  watched: Set<string>,
-): boolean {
-  // For ERC20 Transfer/Approval, topic1 = from/owner and topic2 = to/spender.
-  // For other events we still check both slots defensively (cheap).
-  const t0 = topics[0]
-  if (t0 !== ERC20_TRANSFER_TOPIC0 && t0 !== ERC20_APPROVAL_TOPIC0) return false
-  return (
-    isWatchedTopic(topics[1] ?? null, watched) ||
-    isWatchedTopic(topics[2] ?? null, watched)
-  )
+// Encodes an address into a 32-byte log-topic-slot value: 12 bytes of
+// zero padding followed by the lowercased 20-byte address. Matches the
+// on-chain convention for indexed `address` args in ERC20 Transfer /
+// Approval and every other standard event.
+function paddedAddressTopic(address: string): string {
+  return '0x' + '0'.repeat(24) + address.slice(2).toLowerCase()
 }
 
 async function loadWatchedAddresses(db: Pool): Promise<Set<string>> {
@@ -231,14 +278,64 @@ export async function ingestRange(
   let txCount = 0
   let logCount = 0
 
+  // -----------------------------------------------------------------------
+  // Log-first pre-filter (2026-08-16 optimization).
+  //
+  // Before this refactor: fetched ALL transactions of ALL blocks in the
+  // range + one getReceipt per tx. For ~20 tx/block, that's ~21 RPC calls
+  // per block. At MAX_BLOCKS_PER_TICK=100, that's ~2100 calls per tick,
+  // saturating every free-tier RPC in the fallback chain and stalling the
+  // indexer indefinitely (observed 2026-08-05 to 2026-08-15 -> 927k block
+  // stall).
+  //
+  // After: query `eth_getLogs` ONCE per range with a topic filter for
+  // (Transfer|Approval) x watched addresses. Get back the small set of tx
+  // hashes that actually touch a watched address via ERC20 events. Then
+  // per block we still call getBlock (needed for tx metadata + native
+  // from/to detection so we do not miss pure CELO transfers), but only
+  // fetch receipts for the union of (log-matched + native-from/to)
+  // hashes. Typical Celo block has 0-1 relevant tx for our watch set of
+  // 47 addresses, so we drop from ~20 receipts to ~0-1 per block.
+  //
+  // Coverage is IDENTICAL to the previous per-block-receipts approach:
+  //   - log-matched hashes: catches every ERC20 Transfer/Approval (same
+  //     as the old logTouchesWatched call did after fetching receipts)
+  //   - native from/to hashes: catches raw CELO transfers + contract
+  //     calls where a watched address is the sender/receiver even when
+  //     the tx emits no ERC20-shaped log
+  // Union = same set of tx that persistTx used to see. Zero regression.
+  const paddedTopics = Array.from(opts.watched).map(paddedAddressTopic)
+  const logMatchedHashes = await rpc.getWatchedLogTxHashes({
+    fromBlock: opts.fromBlock,
+    toBlock: opts.toBlock,
+    paddedTopics,
+  })
+
   for (let bn = opts.fromBlock; bn <= opts.toBlock; bn++) {
     const block = await rpc.getBlock({ blockNumber: bn, includeTransactions: true })
     const blockTimestampMs = Number(block.timestamp) * 1000
 
-    // Pre-fetch all receipts in this block concurrently. Persisting still
-    // happens sequentially below so the existing tx-ordering invariants
-    // (cursor advance, log ordering) are preserved exactly.
-    //
+    // Union log-matched (already known from range pre-filter) with native
+    // from/to matches in this specific block.
+    const relevantHashes = new Set<string>()
+    for (const tx of block.transactions) {
+      const hashLower = tx.hash.toLowerCase()
+      const fromLower = tx.from.toLowerCase()
+      const toLower = tx.to ? tx.to.toLowerCase() : null
+      const isNativeTouched =
+        opts.watched.has(fromLower) ||
+        (toLower !== null && opts.watched.has(toLower))
+      if (isNativeTouched || logMatchedHashes.has(hashLower)) {
+        relevantHashes.add(hashLower)
+      }
+    }
+
+    if (relevantHashes.size === 0) continue
+
+    const txsToProcess = block.transactions.filter((tx) =>
+      relevantHashes.has(tx.hash.toLowerCase()),
+    )
+
     // "Receipt not found on all endpoints" is a soft-skip (returns null)
     // instead of throwing the whole tick to a stop. DRPC has been observed
     // 2026-08-15 to drop getTransactionReceipt for real confirmed txs
@@ -249,7 +346,7 @@ export async function ingestRange(
     // that one row in the feed but the next tick advances the cursor past
     // the problematic block.
     const receipts = await withConcurrency(
-      block.transactions,
+      txsToProcess,
       DEFAULT_RECEIPT_CONCURRENCY,
       async (tx) => {
         try {
@@ -267,18 +364,10 @@ export async function ingestRange(
       },
     )
 
-    for (let i = 0; i < block.transactions.length; i++) {
-      const tx = block.transactions[i]!
+    for (let i = 0; i < txsToProcess.length; i++) {
+      const tx = txsToProcess[i]!
       const receipt = receipts[i]
       if (receipt == null) continue
-      const from = tx.from.toLowerCase()
-      const to = tx.to ? tx.to.toLowerCase() : null
-      const directTouch = opts.watched.has(from) || (to !== null && opts.watched.has(to))
-      const logTouch =
-        !directTouch &&
-        receipt.logs.some((lg) => logTouchesWatched(lg.topics, opts.watched))
-
-      if (!directTouch && !logTouch) continue
 
       const client = await db.connect()
       try {
