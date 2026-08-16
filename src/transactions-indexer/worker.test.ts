@@ -58,6 +58,26 @@ function buildRpc(opts: {
         })),
       }
     },
+    // Test stub for the log-first pre-filter. Walks the fixture logs and
+    // returns hashes where any of the padded topics appears in the log's
+    // topic1 or topic2 slot. Mirrors production logic so ingestRange
+    // filtering behaves the same whether logs come from a real RPC or the
+    // fixture set.
+    getWatchedLogTxHashes: async ({ paddedTopics }) => {
+      const paddedSet = new Set(paddedTopics.map((t) => t.toLowerCase()))
+      const out = new Set<string>()
+      for (const tx of opts.transactions) {
+        for (const l of tx.logs) {
+          const t1 = l.topics[1]?.toLowerCase()
+          const t2 = l.topics[2]?.toLowerCase()
+          if ((t1 && paddedSet.has(t1)) || (t2 && paddedSet.has(t2))) {
+            out.add(tx.hash.toLowerCase())
+            break
+          }
+        }
+      }
+      return out
+    },
   }
 }
 
