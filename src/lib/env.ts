@@ -278,6 +278,15 @@ const envSchema = z.object({
   // bound on the cursor advance per iteration.
   INDEXER_POLL_INTERVAL_MS: zPositiveInt.optional().default(5_000),
   INDEXER_MAX_BLOCKS_PER_TICK: zPositiveInt.optional().default(200),
+  // Comma-separated Celo contract addresses passed as the `address` filter
+  // to eth_getLogs during the tick loop's log-first pre-filter. Narrows
+  // the query to logs emitted by known token contracts + integrated
+  // dApps. REQUIRED by strict public endpoints - celo.publicnode.com
+  // rejects unfiltered getLogs with "Please specify an address". Empty
+  // when unset (some endpoints tolerate no filter, publicnode falls back
+  // to the next RPC in the chain). Default set in Railway prod covers
+  // USDT/USDC/USDm/COPm/XAUt0/USAT + CELO wrapper + Neeru + Timelock.
+  TX_INDEXER_LOG_CONTRACT_ADDRESSES: z.string().optional(),
   // Historical backfill depth on first POST /api/transactions/watch. Default
   // 10_000 blocks (~14 h on Celo's 5 s blocks). Set to 0 to disable backfill.
   TX_INDEXER_BACKFILL_BLOCKS: zPositiveInt.optional().default(10_000),
