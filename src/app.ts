@@ -70,6 +70,15 @@ app.use(express.json({ limit: '16kb' }))
 
 app.use((req, _res, next) => {
   reqLog.info(`${req.method} ${req.path} ${JSON.stringify(req.query)}`)
+  // Per-request Sentry scope enrichment. Any captureException /
+  // captureMessage fired downstream (including the auto-captured
+  // unhandled errors via setupExpressErrorHandler at the bottom of this
+  // file) inherits these tags for filtering/grouping. Keeps route
+  // + method visible without touching each handler.
+  Sentry.getCurrentScope().setTags({
+    'http.method': req.method,
+    'http.route': req.path,
+  })
   next()
 })
 
