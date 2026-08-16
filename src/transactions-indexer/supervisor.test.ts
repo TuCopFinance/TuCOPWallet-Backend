@@ -85,6 +85,7 @@ function buildRpcStub(opts: { tip?: bigint } = {}): IndexerRpcClient {
       effectiveGasPrice: 0n,
       logs: [] as never[],
     })),
+    getWatchedLogTxHashes: jest.fn(async () => new Set<string>()),
   }
 }
 
