@@ -132,6 +132,20 @@ const envSchema = z.object({
   // embedded, e.g. `https://celo-mainnet.g.alchemy.com/v2/<key>`.
   ALCHEMY_RPC_URL: zHttpsUrl.optional(),
 
+  // Optional public Celo RPCs to add redundancy to the fallback chain. All
+  // free / no key. Position in the chain is defined in
+  // src/lib/celoClient.ts::getCeloRpcFallbackUrls. Each of these is
+  // optional so a deploy without any of them still cascades cleanly
+  // through the required four (alchemy? -> forno -> ankr -> drpc ->
+  // primary).
+  PUBLICNODE_RPC_URL: zHttpsUrl.optional(),
+  BLOCKSCOUT_RPC_URL: zHttpsUrl.optional(),
+  THIRDWEB_RPC_URL: zHttpsUrl.optional(),
+  // Escape hatch: comma-separated additional Celo RPC URLs, appended to
+  // the tail of the fallback chain. Lets operators plug in a new provider
+  // without a code change when the ecosystem shifts. Empty by default.
+  EXTRA_CELO_RPC_URLS: z.string().optional(),
+
   // Swap fallback: consider Uniswap V4 as an alternative quote source for
   // the USDT<->COPm pair. Mento suspends this pair on weekends and Squid
   // returns HTTP 502 during those windows; the Uniswap V4 pool operates

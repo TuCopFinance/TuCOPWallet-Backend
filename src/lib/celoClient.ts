@@ -45,10 +45,68 @@ export function getAlchemyRpcUrl(): string | undefined {
   return env.ALCHEMY_RPC_URL
 }
 
-// Canonical fallback chain for Celo public-client reads. Alchemy first when
-// available (dedicated endpoint, own rate limit, escapes the Cloudflare 1015
-// pattern that forno-on-Railway-IP hits). Falls back to the four public
-// endpoints in the order they've proven most reliable in our observation.
+// Public Node's aggregated Celo RPC. Free, no key, generous rate limits
+// (confirmed 2026-08-15: 20 concurrent eth_getTransactionReceipt fetches
+// all succeeded, 100-block eth_getLogs with address filter returned 55
+// events). Added to the fallback chain as the go-to backup when Alchemy
+// hits its 25 CU/s compute-unit cap. Optional so the deploy tolerates a
+// dead-DNS transient by simply skipping this position.
+export function getPublicnodeRpcUrl(): string | undefined {
+  return env.PUBLICNODE_RPC_URL
+}
+
+// Blockscout's RPC-compat endpoint. Indexer-backed (not a node), which
+// means it has archive-level data availability: confirmed 2026-08-15 to
+// return `eth_getTransactionReceipt` results for txs that forno + drpc +
+// celocolombia all drop. Critical insurance for the tx-indexer receipt-
+// fetch path.
+export function getBlockscoutRpcUrl(): string | undefined {
+  return env.BLOCKSCOUT_RPC_URL
+}
+
+// Thirdweb's public Celo RPC. Free, no key, works for baseline reads
+// (getBlockNumber verified 2026-08-15). Another cheap position in the
+// fallback chain that runs on a different backbone from the others.
+export function getThirdwebRpcUrl(): string | undefined {
+  return env.THIRDWEB_RPC_URL
+}
+
+// Extra ad-hoc RPC URLs, comma-separated. Escape hatch for adding new
+// providers without a code change when the ecosystem shifts.
+// Deduplicated + trimmed before being appended to the chain.
+export function getExtraRpcUrls(): readonly string[] {
+  const raw = env.EXTRA_CELO_RPC_URLS
+  if (!raw) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const u of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
+    if (!seen.has(u)) {
+      seen.add(u)
+      out.push(u)
+    }
+  }
+  return out
+}
+
+// Canonical fallback chain for Celo public-client reads.
+//
+// Order (most reliable first, per observation 2026-08-15):
+//   1. Alchemy - dedicated endpoint, own key, escapes the Cloudflare 1015
+//      pattern that forno-on-Railway-IP hits. 25 CU/s free-tier cap so
+//      callers hit it and then cascade.
+//   2. Public Node - free, no key, no visible rate limit under 20 concurrent.
+//   3. Forno - canonical public Celo endpoint.
+//   4. Blockscout eth-rpc - indexer-backed, ARCHIVE receipts (returns txs
+//      that node-based providers drop). Slower per-call but critical for
+//      the tx-indexer soft-skip-avoidance path.
+//   5. Thirdweb - free public backup on a different backbone.
+//   6. Ankr - rate-limited around 10 req/s on free tier.
+//   7. DRPC - public endpoint does NOT support eth_getTransactionReceipt
+//      (JSON-RPC error `does not exist`), but still serves other methods.
+//   8. Primary (rpc.celocolombia.org) - kept last after 2026-08-03 silent
+//      degradation. See memory `rpc_fallback_silent_degradation.md`.
+//   9. Any `EXTRA_CELO_RPC_URLS` (comma-separated) - appended at the tail
+//      so operators can rotate new providers in without a deploy.
 //
 // Both the Neeru indexer (custom skip-after-failure supervisor) and the
 // transactions-indexer / Allbridge route (viem's fallback transport)
@@ -56,13 +114,21 @@ export function getAlchemyRpcUrl(): string | undefined {
 // modules.
 export function getCeloRpcFallbackUrls(): readonly string[] {
   const alchemy = getAlchemyRpcUrl()
-  const publics = [
-    getAnkrRpcUrl(),
-    getFornoUrl(),
-    getDrpcRpcUrl(),
-    getPrimaryRpcUrl(),
-  ]
-  return alchemy ? [alchemy, ...publics] : publics
+  const publicnode = getPublicnodeRpcUrl()
+  const blockscoutRpc = getBlockscoutRpcUrl()
+  const thirdweb = getThirdwebRpcUrl()
+  const urls: string[] = []
+  if (alchemy) urls.push(alchemy)
+  if (publicnode) urls.push(publicnode)
+  urls.push(getFornoUrl())
+  if (blockscoutRpc) urls.push(blockscoutRpc)
+  if (thirdweb) urls.push(thirdweb)
+  urls.push(getAnkrRpcUrl())
+  urls.push(getDrpcRpcUrl())
+  urls.push(getPrimaryRpcUrl())
+  for (const extra of getExtraRpcUrls()) urls.push(extra)
+  // Dedupe in case someone accidentally sets two envs to the same URL.
+  return Array.from(new Set(urls))
 }
 
 // Cached singleton client for shared read-only probes (health checks,
