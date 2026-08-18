@@ -148,11 +148,25 @@ export function monthlyYieldPercent(rateRaw: bigint): number {
 
 // Colombian financial convention: quotes are monthly effective (M.V.); the
 // headline shown to users is the annual effective (E.A.) so it compares
-// against every other yield surface. Exact: E.A. = ((1 + M.V./100)^12 - 1) * 100.
+// against every other yield surface.
+//
+// The contract accrues by multiplying by a daily rate every day (dailyRateRay
+// scaled by RAY). After 365 days the accrued factor is dailyRate^365, so
+// effective annual = (1 + dailyRate)^365 - 1. Given monthlyPct is derived
+// from the same dailyRate via 30-day compounding, the equivalent expression
+// in monthly terms is:
+//
+//   E.A. = (1 + M.V./100)^(365/30) - 1
+//
+// This is 12.16..-power compounding, NOT the 12-power we used before
+// 2026-08-18. The 12-power formula implicitly assumed monthly compounding
+// (which the contract does NOT do) and under-quoted every category by
+// ~0.15pp vs the on-chain accrual and vs what neerufinance.xyz publishes.
+// Wallet team caught the drift 2026-08-18 during a cross-check.
 export function annualEffectivePercent(monthlyPct: number): number {
   if (!Number.isFinite(monthlyPct) || monthlyPct <= 0) return 0
   const monthly = monthlyPct / 100
-  const annual = (Math.pow(1 + monthly, 12) - 1) * 100
+  const annual = (Math.pow(1 + monthly, 365 / 30) - 1) * 100
   return Number(annual.toFixed(6))
 }
 
