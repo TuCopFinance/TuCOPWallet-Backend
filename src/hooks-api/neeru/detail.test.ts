@@ -245,10 +245,13 @@ describe('getNeeruPositionDetail', () => {
     expect(p.renewedFromPositionId).toBeNull()
     const monthly = ((1.0001) ** 30 - 1) * 100
     expect(p.monthlyRatePercentage).toBeCloseTo(monthly, 6)
-    // Annual effective = ((1 + monthly/100)^12 - 1) * 100. Precision is
-    // 4 (not 6) because the underlying monthly is already rounded before
-    // compounding, so the divergence compounds too.
-    const annual = ((1 + monthly / 100) ** 12 - 1) * 100
+    // Annual effective = ((1 + monthly/100)^(365/30) - 1) * 100. Matches
+    // the daily compounding the contract does (rateRay^365 = 1 + annual).
+    // Precision is 4 (not 6) because the underlying monthly is already
+    // rounded before compounding, so the divergence compounds too.
+    // Formula updated 2026-08-18 (PR after #206) to correct a
+    // ~0.15pp under-quote vs on-chain accrual and neerufinance.xyz.
+    const annual = ((1 + monthly / 100) ** (365 / 30) - 1) * 100
     expect(p.annualEffectivePercentage).toBeCloseTo(annual, 4)
 
     // Flexible category -> never early -> interestAfterPenalty == accrued.
