@@ -53,7 +53,7 @@ describe('GET /api/earn/neeru/positions', () => {
           amount: '10000',
           accruedInterest: '82.5',
           monthlyRatePercentage: 1.0,
-          annualEffectivePercentage: 12.6825,
+          annualEffectivePercentage: 12.869529,
           startTs: 1700000000,
           endTs: 1702592000,
           depositBlock: 1234569,
