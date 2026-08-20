@@ -54,6 +54,12 @@ process.env.NEERU_TERMS_URL =
 process.env.NEERU_CONTRACT_CREATED_AT_ISO =
   process.env.NEERU_CONTRACT_CREATED_AT_ISO ?? '2026-06-01T00:00:00.000Z'
 
+// Public origin used by /api/tokens/info to compose absolute imageUrl for
+// the wallet. Any https URL satisfies zHttpsUrl; production Railway sets
+// this to the real deploy origin.
+process.env.PUBLIC_BASE_URL =
+  process.env.PUBLIC_BASE_URL ?? 'https://backend.test'
+
 // Disable the WRI per-IP and global rate-limit tiers by default in jest so
 // the existing test suite (which sends many requests against the same mocked
 // IP and against null Redis) keeps working. Tests that exercise the new

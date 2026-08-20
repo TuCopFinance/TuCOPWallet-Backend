@@ -43,7 +43,7 @@ describe('GET /api/tokens/info', () => {
     expect(res.body.error).toBe('unsupported networkId')
   })
 
-  it('celo-mainnet: returns all 6 tokens with priceUsd from DIA', async () => {
+  it('celo-mainnet: returns all 7 tokens with priceUsd from DIA', async () => {
     mockFetchByHost({
       'api.diadata.org': (url) => {
         const addr = url.pathname.split('/').pop()!.toLowerCase()
@@ -53,15 +53,16 @@ describe('GET /api/tokens/info', () => {
           '0x765de816845861e75a25fca122bb6898b8b1282a': 1.0001,
           '0x8a567e2ae79ca692bd748ab832081c45de4041ea': 0.000307,
           '0x68749665ff8d2d112fa859aa293f07a622782f38': 4357.21,
+          '0x471ece3750da237f93b8e339c536989b8978a438': 0.0642,
         }
         return jsonRes({ Symbol: 'MOCK', Price: priceByAddr[addr] ?? null })
       },
     })
     const res = await request(app).get('/api/tokens/info?networkIds=celo-mainnet')
     expect(res.status).toBe(200)
-    // The 6 wallet tokens must all be present as keys
+    // The 7 wallet tokens must all be present as keys
     const keys = Object.keys(res.body)
-    expect(keys).toHaveLength(6)
+    expect(keys).toHaveLength(7)
     expect(keys).toEqual(
       expect.arrayContaining([
         'celo-mainnet:0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e',
@@ -70,6 +71,7 @@ describe('GET /api/tokens/info', () => {
         'celo-mainnet:0x8a567e2ae79ca692bd748ab832081c45de4041ea',
         'celo-mainnet:0xaf37e8b6c9ed7f6318979f56fc287d76c30847ff',
         'celo-mainnet:0xa2036f0538221a77a3937f1379699f44945018d0',
+        'celo-mainnet:0x471ece3750da237f93b8e339c536989b8978a438',
       ]),
     )
     // Wallet uses priceUsd as string
@@ -79,9 +81,17 @@ describe('GET /api/tokens/info', () => {
     // USAT hardcoded 1.0 since DIA has no entry
     const usat = res.body['celo-mainnet:0xa2036f0538221a77a3937f1379699f44945018d0']
     expect(usat.priceUsd).toBe('1')
+    // CELO priced from DIA, flagged isNative for the wallet
+    const celo = res.body['celo-mainnet:0x471ece3750da237f93b8e339c536989b8978a438']
+    expect(celo.symbol).toBe('CELO')
+    expect(celo.isNative).toBe(true)
+    expect(celo.priceUsd).toBe('0.0642')
+    // imageUrl composed from PUBLIC_BASE_URL + /tokens/<file>
+    expect(celo.imageUrl).toBe('https://backend.test/tokens/CELO.png')
+    expect(usdt.imageUrl).toBe('https://backend.test/tokens/USDT.png')
   })
 
-  it('preserves symbol quirks the wallet already handles (USD₮ unicode)', async () => {
+  it('symbols mirror on-chain: USD₮ unicode, USDm/COPm Mento rebrand', async () => {
     mockFetchByHost({
       'api.diadata.org': () => jsonRes({ Symbol: 'MOCK', Price: 1.0 }),
     })
@@ -89,9 +99,19 @@ describe('GET /api/tokens/info', () => {
     const usdt = res.body['celo-mainnet:0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e']
     expect(usdt.symbol).toBe('USD₮')
     const copm = res.body['celo-mainnet:0x8a567e2ae79ca692bd748ab832081c45de4041ea']
-    expect(copm.symbol).toBe('cCOP')
+    expect(copm.symbol).toBe('COPm')
+    expect(copm.name).toBe('Mento Colombian Peso')
     const usdm = res.body['celo-mainnet:0x765de816845861e75a25fca122bb6898b8b1282a']
-    expect(usdm.symbol).toBe('cUSD')
+    expect(usdm.symbol).toBe('USDm')
+    expect(usdm.name).toBe('Mento Dollar')
+  })
+
+  it('static route /tokens/<file>.png serves the self-hosted PNG', async () => {
+    const res = await request(app).get('/tokens/CELO.png')
+    expect(res.status).toBe(200)
+    expect(res.headers['content-type']).toMatch(/^image\/png/)
+    // PNG magic bytes: 89 50 4E 47
+    expect(res.body.slice(0, 4).toString('hex')).toBe('89504e47')
   })
 
   it('degraded scenario: DIA down + CoinGecko rate-limited -> hardcoded 1.0 fires for USD-pegged', async () => {

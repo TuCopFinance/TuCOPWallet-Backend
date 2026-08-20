@@ -130,6 +130,20 @@ app.use(
   }),
 )
 
+app.use(
+  '/tokens',
+  // Uses process.cwd() so the same path resolves in dev (tsx from repo root),
+  // tests (jest from repo root), and prod (`node dist/server.js` from /app).
+  // The /assets route above uses __dirname because the build copies
+  // public/assets into dist/; we keep tokens/ served from the repo-rooted
+  // public/ so PNGs are not duplicated across dist/.
+  express.static(path.join(process.cwd(), 'public', 'tokens'), {
+    maxAge: '7d',
+    immutable: true,
+    fallthrough: true,
+  }),
+)
+
 // Health + metrics router replaces the inline /health handler. It defines
 // /health (liveness), /ready (deps probe), /health/relay, and /metrics.
 app.use(healthRouter)
