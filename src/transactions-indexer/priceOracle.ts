@@ -21,17 +21,16 @@ interface TokenMeta {
   peggedTo: string | null
 }
 
-// Canonical Celo mainnet registry. Sourced from Celopedia
-// `references/builder-guide.md` (CIP-64 Allowed Fee Currencies) + the Mento
-// deployment addresses. Anything outside this set falls back to raw-wei
+// TuCop mainnet token registry. Colombian-market wallet scope: only tokens
+// TuCop actually ships (USDm + COPm on the Mento side, USDC + USDT
+// non-Mento, CELO native). Anything outside this set falls back to raw-wei
 // emission with a `decimals: null` marker so the wallet knows the value is
-// unnormalized (see `decimalizeValueForClassifier` below).
+// unnormalized (see `decimalizeValueForClassifier` below). Mento's EUR/BRL/
+// XOF/etc. stables are intentionally out of scope.
 const TOKEN_REGISTRY: Record<string, TokenMeta> = {
   '0x471ece3750da237f93b8e339c536989b8978a438': { symbol: 'CELO', decimals: 18, peggedTo: null },
   '0x765de816845861e75a25fca122bb6898b8b1282a': { symbol: 'USDm', decimals: 18, peggedTo: 'USD' },
   '0x8a567e2ae79ca692bd748ab832081c45de4041ea': { symbol: 'COPm', decimals: 18, peggedTo: 'COP' },
-  '0xd8763cba276a3738e6de85b4b3bf5fded6d6ca73': { symbol: 'EURm', decimals: 18, peggedTo: 'EUR' },
-  '0xe8537a3d056da446677b9e9d6c5db704eaab4787': { symbol: 'BRLm', decimals: 18, peggedTo: 'BRL' },
   '0xceba9300f2b948710d2653dd7b07f33a8b32118c': { symbol: 'USDC', decimals: 6, peggedTo: 'USD' },
   '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e': { symbol: 'USDT', decimals: 6, peggedTo: 'USD' },
 }
@@ -134,8 +133,8 @@ export function decimalizeValueForClassifier(
 //
 //  1. `feeCurrency == null` -> native CELO fee. Uses the CELO ERC20 contract
 //     id and the raw wei from the receipt as-is.
-//  2. `feeCurrency` is a Mento native fee token (USDm / COPm / EURm / BRLm)
-//     -> use it directly. Value is already in the token's decimals.
+//  2. `feeCurrency` is a Mento native fee token (USDm / COPm) -> use it
+//     directly. Value is already in the token's decimals.
 //  3. `feeCurrency` is an adapter (USDC / USDT) -> surface the underlying
 //     token id + underlying decimals so the wallet renders "you paid X USDC
 //     in gas". The receipt reports fee in 18-decimal-normalised adapter
