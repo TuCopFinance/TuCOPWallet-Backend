@@ -202,6 +202,11 @@ const envSchema = z.object({
     .optional()
     .default('false')
     .transform((v) => v === 'true'),
+  // Absolute base URL used to build wallet-visible asset URLs (e.g. token
+  // logos served from /tokens/*.png). MUST be set in Railway prod to the
+  // public backend origin. If unset, /api/tokens/info responses omit
+  // `imageUrl` for every token; wallet is defensive to missing imageUrl.
+  PUBLIC_BASE_URL: zHttpsUrl.optional(),
   BLOCKSCOUT_API_KEY: z.string().optional(),
   BLOCKSCOUT_BASE_URL: zHttpsUrl.optional(),
   BLOCKSCOUT_ALLOWED_HOSTS: z.string().optional().default(''),

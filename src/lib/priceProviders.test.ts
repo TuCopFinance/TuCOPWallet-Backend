@@ -185,21 +185,22 @@ describe('symbol table coverage', () => {
   it('every wallet-facing symbol has at least one provider or a hardcoded fallback', async () => {
     // Empty upstream mocks => nothing responds. Symbols with hardcoded
     // fallback should still resolve; symbols without hardcoded (COPm,
-    // XAUt) should be missing but the call must not throw.
+    // XAUt, CELO) should be missing but the call must not throw.
     mockFetchByHost({
       'api.diadata.org': () => jsonRes({ Symbol: 'MOCK', Price: null }),
       'api.coingecko.com': () => jsonRes({}),
       'pro-api.coinmarketcap.com': () => jsonRes({ data: {} }),
     })
-    const all: PriceSymbol[] = ['USDT', 'USDC', 'USDm', 'COPm', 'XAUt', 'USAT']
+    const all: PriceSymbol[] = ['USDT', 'USDC', 'USDm', 'COPm', 'XAUt', 'USAT', 'CELO']
     const r = await fetchTokenPrices(all)
     // Hardcoded resolves USDT/USDC/USDm/USAT
     expect(r.prices.get('USDT')?.source).toBe('hardcoded')
     expect(r.prices.get('USDC')?.source).toBe('hardcoded')
     expect(r.prices.get('USDm')?.source).toBe('hardcoded')
     expect(r.prices.get('USAT')?.source).toBe('hardcoded')
-    // No hardcoded for COPm / XAUt on purpose
+    // No hardcoded for COPm / XAUt / CELO on purpose
     expect(r.prices.get('COPm')).toBeUndefined()
     expect(r.prices.get('XAUt')).toBeUndefined()
+    expect(r.prices.get('CELO')).toBeUndefined()
   })
 })

@@ -39,7 +39,7 @@ const EXHAUSTED_SKIP_MS = 60 * 60 * 1000 // 1 hour when quota is exhausted
 // Symbols the wallet actually consumes. Anything outside this list is
 // returned without priceUsd from the endpoint (the wallet already has
 // hardcoded fallbacks for unknown tokens).
-export type PriceSymbol = 'USDT' | 'USDC' | 'USDm' | 'COPm' | 'XAUt' | 'USAT'
+export type PriceSymbol = 'USDT' | 'USDC' | 'USDm' | 'COPm' | 'XAUt' | 'USAT' | 'CELO'
 
 // Per-symbol mapping to the ids/addresses each provider understands.
 // Kept as a single source of truth so a new provider only wires the
@@ -100,6 +100,14 @@ const SYMBOL_TABLE: Record<PriceSymbol, SymbolProviderIds> = {
     // stablecoin, 1:1 USD pegged by design (100% T-bills + cash). The
     // wallet has hardcoded fallback = 1.0 for this and we mirror it.
     hardcodedUsd: 1.0,
+  },
+  CELO: {
+    cmcSymbol: 'CELO',
+    coingeckoId: 'celo',
+    diaBlockchain: 'Celo',
+    diaAddress: '0x471EcE3750Da237f93B8E339c536989b8978a438',
+    // NO hardcoded: CELO price fluctuates; missing priceUsd is preferable to
+    // fabricating a stale value the wallet would display as "Pagada en CELO ~$X".
   },
 }
 

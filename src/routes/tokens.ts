@@ -18,6 +18,7 @@
 // for USD-pegged. Cached in Redis for CACHE_TTL_SECONDS per networkIds slug.
 
 import { Router, Request, Response } from 'express'
+import { env } from '../lib/env'
 import { createLogger } from '../lib/logger'
 import {
   fetchTokenPrices,
@@ -53,6 +54,7 @@ interface TokenCatalogueEntry {
   symbol: string
   name: string
   networkId: string
+  isNative?: boolean
   isCoreToken?: boolean
   isFeeCurrency?: boolean
   isSwappable?: boolean
@@ -60,7 +62,10 @@ interface TokenCatalogueEntry {
   isCashInEligible?: boolean
   isCashOutEligible?: boolean
   showZeroBalance?: boolean
-  imageUrl?: string
+  // Basename of the PNG served from /tokens/<file>. Composed with
+  // env.PUBLIC_BASE_URL into the response `imageUrl` field. Kept as
+  // basename here so the catalogue stays independent of the deploy origin.
+  imageFilename?: string
   feeCurrencyAdapterAddress?: string
   feeCurrencyAdapterDecimals?: number
   minimumAppVersionToSwap?: string
@@ -68,9 +73,9 @@ interface TokenCatalogueEntry {
 }
 
 // Address casing: wallet's tokenId is `${networkId}:${lowercase_address}`.
-// Symbol values preserve the current Valora quirks (USD₮ unicode, cCOP
-// legacy) so the wallet doesn't see a shape drift on switchover. Legacy
-// names can be normalized later coordinated with the wallet team.
+// Symbols mirror what each token's on-chain `symbol()` returns today:
+// USD₮ (Tether uses U+20AE), USDm and COPm (Mento rebrand of cUSD/cCOP).
+// Names mirror on-chain `name()`: "Mento Dollar" / "Mento Colombian Peso".
 const CELO_MAINNET_TOKENS: TokenCatalogueEntry[] = [
   {
     address: '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e',
@@ -84,7 +89,7 @@ const CELO_MAINNET_TOKENS: TokenCatalogueEntry[] = [
     isSwappable: true,
     isCashInEligible: true,
     isCashOutEligible: true,
-    imageUrl: 'https://raw.githubusercontent.com/valora-inc/address-metadata/main/assets/tokens/USDT.png',
+    imageFilename: 'USDT.png',
     feeCurrencyAdapterAddress: '0x0e2a3e05bc9a16f5292a6170456a710cb89c6f72',
     feeCurrencyAdapterDecimals: 6,
     priceSymbol: 'USDT',
@@ -101,7 +106,7 @@ const CELO_MAINNET_TOKENS: TokenCatalogueEntry[] = [
     isSwappable: true,
     isCashInEligible: true,
     isCashOutEligible: true,
-    imageUrl: 'https://raw.githubusercontent.com/valora-inc/address-metadata/main/assets/tokens/USDC.png',
+    imageFilename: 'USDC.png',
     feeCurrencyAdapterAddress: '0x2f25deb3848c207fc8e0c34035b3ba7fc157602b',
     feeCurrencyAdapterDecimals: 6,
     priceSymbol: 'USDC',
@@ -109,8 +114,8 @@ const CELO_MAINNET_TOKENS: TokenCatalogueEntry[] = [
   {
     address: '0x765de816845861e75a25fca122bb6898b8b1282a',
     decimals: 18,
-    symbol: 'cUSD',
-    name: 'Celo Dollar',
+    symbol: 'USDm',
+    name: 'Mento Dollar',
     networkId: 'celo-mainnet',
     isCoreToken: true,
     isFeeCurrency: true,
@@ -118,21 +123,21 @@ const CELO_MAINNET_TOKENS: TokenCatalogueEntry[] = [
     isSwappable: true,
     isCashInEligible: true,
     isCashOutEligible: true,
-    imageUrl: 'https://raw.githubusercontent.com/valora-inc/address-metadata/main/assets/tokens/cUSD.png',
+    imageFilename: 'USDm.png',
     priceSymbol: 'USDm',
   },
   {
     address: '0x8a567e2ae79ca692bd748ab832081c45de4041ea',
     decimals: 18,
-    symbol: 'cCOP',
-    name: 'Celo Colombian Peso',
+    symbol: 'COPm',
+    name: 'Mento Colombian Peso',
     networkId: 'celo-mainnet',
     isCoreToken: true,
     isStableCoin: true,
     isSwappable: true,
     isCashInEligible: true,
     isCashOutEligible: true,
-    imageUrl: 'https://raw.githubusercontent.com/valora-inc/address-metadata/main/assets/tokens/cCOP.png',
+    imageFilename: 'COPm.png',
     priceSymbol: 'COPm',
   },
   {
@@ -145,7 +150,7 @@ const CELO_MAINNET_TOKENS: TokenCatalogueEntry[] = [
     isSwappable: true,
     isCashInEligible: false,
     isCashOutEligible: false,
-    imageUrl: 'https://raw.githubusercontent.com/valora-inc/address-metadata/main/assets/tokens/XAUt0.png',
+    imageFilename: 'XAUt0.png',
     priceSymbol: 'XAUt',
   },
   {
@@ -156,7 +161,20 @@ const CELO_MAINNET_TOKENS: TokenCatalogueEntry[] = [
     networkId: 'celo-mainnet',
     isStableCoin: true,
     isSwappable: false,
+    imageFilename: 'USAT.png',
     priceSymbol: 'USAT',
+  },
+  {
+    address: '0x471ece3750da237f93b8e339c536989b8978a438',
+    decimals: 18,
+    symbol: 'CELO',
+    name: 'Celo native asset',
+    networkId: 'celo-mainnet',
+    isNative: true,
+    isCoreToken: true,
+    isFeeCurrency: true,
+    imageFilename: 'CELO.png',
+    priceSymbol: 'CELO',
   },
 ]
 
@@ -245,7 +263,10 @@ router.get('/api/tokens/info', async (req: Request, res: Response) => {
       networkId: t.networkId,
       tokenId,
     }
-    if (t.imageUrl) entry.imageUrl = t.imageUrl
+    if (t.imageFilename && env.PUBLIC_BASE_URL) {
+      entry.imageUrl = `${env.PUBLIC_BASE_URL.replace(/\/+$/, '')}/tokens/${t.imageFilename}`
+    }
+    if (t.isNative !== undefined) entry.isNative = t.isNative
     if (t.isFeeCurrency !== undefined) entry.isFeeCurrency = t.isFeeCurrency
     if (t.isStableCoin !== undefined) entry.isStableCoin = t.isStableCoin
     if (t.isSwappable !== undefined) entry.isSwappable = t.isSwappable
