@@ -51,6 +51,7 @@ jest.mock('../lib/uniswapV4Executor', () => {
 const USER = '0x3333333333333333333333333333333333333333'
 const USDC = '0xceba9300f2b948710d2653dd7b07f33a8b32118c'
 const USDT = '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e'
+const USDM = '0x765de816845861e75a25fca122bb6898b8b1282a'
 const SWAP_TARGET = '0x1111111111111111111111111111111111111111'
 
 function paramsTo(overrides: Record<string, string> = {}): string {
@@ -183,6 +184,100 @@ describe('GET /api/swap/quote', () => {
       slippage: 0.5,
       quoteOnly: false,
     })
+  })
+
+  it('Squid path guaranteedPrice: cross-decimal USDT (6-dec) -> USDm (18-dec) stays human-readable (regression for wallet approve() sizing bug)', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          route: {
+            estimate: {
+              fromAmount: '1000000',
+              toAmount: '994454241988839083',
+              toAmountMin: '989481970778894887',
+              exchangeRate: '0.994454241988839083',
+              aggregatePriceImpact: '0.0',
+              estimatedRouteDuration: 30,
+              feeCosts: [],
+              gasCosts: [{ amount: '0', limit: '200000' }],
+            },
+            transactionRequest: {
+              target: SWAP_TARGET,
+              data: '0xabcdef',
+              value: '0',
+              gasLimit: '300000',
+            },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    )
+    const res = await request(app).get(
+      '/api/swap/quote?' + paramsTo({ sellToken: USDT, buyToken: USDM, sellAmount: '1000000' }),
+    )
+    expect(res.status).toBe(200)
+    const price = Number(res.body.unvalidatedSwapTransaction.price)
+    const guaranteedPrice = Number(res.body.unvalidatedSwapTransaction.guaranteedPrice)
+    expect(price).toBeGreaterThan(0.9)
+    expect(price).toBeLessThan(1.1)
+    expect(guaranteedPrice).toBeGreaterThan(0.9)
+    expect(guaranteedPrice).toBeLessThan(1.1)
+    expect(guaranteedPrice).toBeLessThanOrEqual(price)
+    expect(guaranteedPrice).toBeGreaterThan(price * 0.99)
+  })
+
+  it('Squid path guaranteedPrice: cross-decimal USDm (18-dec) -> USDT (6-dec) stays human-readable', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          route: {
+            estimate: {
+              fromAmount: '1000000000000000000',
+              toAmount: '994500',
+              toAmountMin: '989527',
+              exchangeRate: '0.9945',
+              aggregatePriceImpact: '0.0',
+              estimatedRouteDuration: 30,
+              feeCosts: [],
+              gasCosts: [{ amount: '0', limit: '200000' }],
+            },
+            transactionRequest: {
+              target: SWAP_TARGET,
+              data: '0xabcdef',
+              value: '0',
+              gasLimit: '300000',
+            },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    )
+    const res = await request(app).get(
+      '/api/swap/quote?' + paramsTo({
+        sellToken: USDM,
+        buyToken: USDT,
+        sellAmount: '1000000000000000000',
+      }),
+    )
+    expect(res.status).toBe(200)
+    const price = Number(res.body.unvalidatedSwapTransaction.price)
+    const guaranteedPrice = Number(res.body.unvalidatedSwapTransaction.guaranteedPrice)
+    expect(price).toBeGreaterThan(0.9)
+    expect(price).toBeLessThan(1.1)
+    expect(guaranteedPrice).toBeGreaterThan(0.9)
+    expect(guaranteedPrice).toBeLessThan(1.1)
+    expect(guaranteedPrice).toBeLessThanOrEqual(price)
+  })
+
+  it('Squid path guaranteedPrice: same-decimal USDC->USDT stays correct (regression guard on the fix)', async () => {
+    fetchSpy.mockResolvedValueOnce(squidResponse())
+    const res = await request(app).get('/api/swap/quote?' + paramsTo())
+    expect(res.status).toBe(200)
+    expect(res.body.unvalidatedSwapTransaction.price).toBe('0.998')
+    const gp = Number(res.body.unvalidatedSwapTransaction.guaranteedPrice)
+    expect(gp).toBeGreaterThan(0.99)
+    expect(gp).toBeLessThan(0.998)
+    expect(gp).toBeCloseTo(0.993, 3)
   })
 
   it('forwards quoteOnly=true to upstream (planning phase, no per-wallet bucket charge)', async () => {
