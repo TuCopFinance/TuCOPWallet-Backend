@@ -87,15 +87,55 @@ function safeBigInt(value: string | undefined): bigint | null {
   }
 }
 
+// Parse a decimal string like "0.9945" or "3242.712" into a bigint scaled
+// by PRICE_SCALE (1e18). Returns null on any parse error. Truncates
+// fractional beyond 18 digits (matches PRICE_SCALE precision).
+function parseDecimalToScaled(value: string): bigint | null {
+  if (!value) return null
+  const negative = value.startsWith('-')
+  const cleaned = negative ? value.slice(1) : value
+  if (!/^\d+(?:\.\d+)?$/.test(cleaned)) return null
+  const parts = cleaned.split('.')
+  const wholePart = parts[0] ?? '0'
+  const fracPart = parts[1] ?? ''
+  const fracPadded = fracPart.padEnd(18, '0').slice(0, 18)
+  try {
+    const scaled = BigInt(wholePart) * PRICE_SCALE + BigInt(fracPadded || '0')
+    return negative ? -scaled : scaled
+  } catch {
+    return null
+  }
+}
+
+// Compute `guaranteedPrice` (worst-case exchange rate after slippage) as a
+// human-readable decimal string matching the shape of the `price` field.
+// Both `toAmountMin` and `toAmount` are wei of the SAME token (the buy
+// token), so `toAmountMin / toAmount` is a pure decimal ratio independent
+// of either token's decimals. Multiplying that ratio by the already-
+// normalized `price` (whole/whole from Squid's `est.exchangeRate`) yields
+// the normalized `guaranteedPrice` without needing per-token decimals
+// lookup. Callsite passes buy-side wei for both amounts.
+//
+// Bug context: the previous implementation computed `toAmountMin /
+// fromAmount` (buy-wei / sell-wei) directly, which produces a wei/wei
+// ratio inflated by 10^(sellDecimals - buyDecimals) any time the two
+// tokens have different decimals (e.g. USDT 6-dec -> USDm 18-dec off by
+// 10^12). Wallet consumes `guaranteedPrice` for approve() sizing on
+// buy-mode swaps, so a wrong value asks for a colossal allowance. Same
+// class of bug as PR #177 fixed for the Uniswap V4 path; this closes the
+// Squid path.
 function computeGuaranteedPrice(
   toAmountMin: string | undefined,
-  fromAmount: string,
-  fallback: string,
+  toAmount: string,
+  price: string,
 ): string {
   const min = safeBigInt(toAmountMin)
-  const from = safeBigInt(fromAmount)
-  if (min === null || from === null || from === 0n) return fallback
-  const scaled = (min * PRICE_SCALE) / from
+  const total = safeBigInt(toAmount)
+  const priceScaled = parseDecimalToScaled(price)
+  if (min === null || total === null || total === 0n || priceScaled === null) {
+    return price
+  }
+  const scaled = (priceScaled * min) / total
   const whole = scaled / PRICE_SCALE
   const frac = (scaled % PRICE_SCALE).toString().padStart(18, '0').replace(/0+$/, '')
   return frac.length === 0 ? whole.toString() : `${whole.toString()}.${frac}`
@@ -137,9 +177,7 @@ function shapeResponse(
   const toAmountMin = est.toAmountMin
 
   const price = est.exchangeRate ?? '0'
-  // Use bigint fixed-point (1e18 scale) to keep precision on token amounts
-  // above 2^53 wei. `Number(...) / Number(...)` lost precision above ~9 USDT.
-  const guaranteedPrice = computeGuaranteedPrice(toAmountMin, fromAmount, price)
+  const guaranteedPrice = computeGuaranteedPrice(toAmountMin, toAmount, price)
 
   const swapTx: Record<string, unknown> = {
     swapType,
