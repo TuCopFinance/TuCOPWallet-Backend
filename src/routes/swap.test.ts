@@ -147,7 +147,10 @@ describe('GET /api/swap/quote', () => {
 
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({
-      details: { swapProvider: 'squid' },
+      details: {
+        swapProvider: 'squid',
+        worstCaseSellAmount: '1000000',
+      },
       unvalidatedSwapTransaction: {
         swapType: 'same-chain',
         chainId: 42220,
@@ -278,6 +281,48 @@ describe('GET /api/swap/quote', () => {
     expect(gp).toBeGreaterThan(0.99)
     expect(gp).toBeLessThan(0.998)
     expect(gp).toBeCloseTo(0.993, 3)
+  })
+
+  it('Squid path: details.worstCaseSellAmount equals fromAmount (dedicated approve-size field)', async () => {
+    // Wallet team feedback (2026-08-21): the existing `guaranteedPrice`
+    // wire field cannot be used to derive `amountToApprove` on cross-
+    // decimal pairs without per-token decimals lookup wallet-side. The
+    // backend now emits `details.worstCaseSellAmount` = fromAmount so
+    // the wallet's useSwapQuote.ts approve path can consume a single
+    // pre-computed wei-SELL value regardless of pair decimals.
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          route: {
+            estimate: {
+              fromAmount: '1000000',
+              toAmount: '994454241988839083',
+              toAmountMin: '989481970778894887',
+              exchangeRate: '0.994454241988839083',
+              aggregatePriceImpact: '0.0',
+              feeCosts: [],
+              gasCosts: [{ amount: '0', limit: '200000' }],
+            },
+            transactionRequest: {
+              target: SWAP_TARGET,
+              data: '0xabcdef',
+              value: '0',
+              gasLimit: '300000',
+            },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    )
+    const res = await request(app).get(
+      '/api/swap/quote?' + paramsTo({ sellToken: USDT, buyToken: USDM, sellAmount: '1000000' }),
+    )
+    expect(res.status).toBe(200)
+    expect(res.body.details.swapProvider).toBe('squid')
+    expect(res.body.details.worstCaseSellAmount).toBe('1000000')
+    // Wallet-side integration: approve amount is now a direct BigInt of
+    // this field. No math against guaranteedPrice, no per-token decimals.
+    expect(BigInt(res.body.details.worstCaseSellAmount)).toBe(1000000n)
   })
 
   it('forwards quoteOnly=true to upstream (planning phase, no per-wallet bucket charge)', async () => {
@@ -675,6 +720,7 @@ describe('GET /api/swap/quote', () => {
 
       expect(res.status).toBe(200)
       expect(res.body.details.swapProvider).toBe('uniswap-v4')
+      expect(res.body.details.worstCaseSellAmount).toBe('2000000')
       expect(res.body.unvalidatedSwapTransaction.data).toBe('0x')
       expect(res.body.unvalidatedSwapTransaction.allowanceTarget).toBe(
         '0x000000000022d473030f116ddee9f6b43ac78ba3',
