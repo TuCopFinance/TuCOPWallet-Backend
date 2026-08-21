@@ -59,8 +59,8 @@ router.get('/api/prices/xaut', async (req, res) => {
   }
 
   // Slow path: try upstream via multi-provider waterfall (DIA -> CoinGecko
-  // -> CMC -> hardcoded). Sole-CMC dependency removed 2026-08-15; XAUt now
-  // benefits from DIA-first (free, no quota) and CG fallback before CMC.
+  // -> CMC -> hardcoded). DIA-first (free, no quota) with CG + CMC as
+  // fallbacks so CMC monthly quota is reserved for real outages.
   try {
     const fresh = await fetchSingleTokenPrice('XAUt')
     if (!fresh) throw new Error('no provider returned a price for XAUt')
