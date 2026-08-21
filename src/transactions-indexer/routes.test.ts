@@ -59,7 +59,7 @@ jest.mock('../lib/celoClient', () => {
   const actual = jest.requireActual('../lib/celoClient')
   return {
     ...actual,
-    getCeloPublicClient: () => ({ getBlockNumber: mockGetBlockNumber }),
+    getSharedCeloClient: () => ({ getBlockNumber: mockGetBlockNumber }),
   }
 })
 

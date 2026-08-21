@@ -4,7 +4,7 @@
 // must update both.
 import { Router, Request, Response } from 'express'
 import { isNeeruWarmupReady } from '../hooks-api/neeru/warmup'
-import { getCeloPublicClient } from '../lib/celoClient'
+import { getSharedCeloClient } from '../lib/celoClient'
 import { getDb } from '../lib/db'
 import { createLogger } from '../lib/logger'
 import { metricsRegistry, refreshRelayBalanceMetric } from '../lib/metrics'
@@ -25,12 +25,17 @@ interface ProbeResult {
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`${label}: timeout ${ms}ms`)), ms),
-    ),
-  ])
+  // Cleared as soon as the wrapped promise resolves so the timer does not
+  // keep the event loop from being idle on the fast path. Also unref'd so
+  // a still-pending timeout does not block clean shutdown.
+  let timer: NodeJS.Timeout | null = null
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}: timeout ${ms}ms`)), ms)
+    timer.unref?.()
+  })
+  return Promise.race([p, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
 }
 
 async function probeDb(): Promise<ProbeResult> {
@@ -67,7 +72,7 @@ async function probeRpc(): Promise<ProbeResult> {
     const client =
       process.env.NEERU_INDEXER_ENABLED === 'true'
         ? getSharedNeeruRpc()
-        : getCeloPublicClient()
+        : getSharedCeloClient()
     // Widen the timeout when using the shared client because the fallback
     // path can legitimately take a couple of seconds when the primary is
     // being cascaded. Keep it tight for the legacy single-endpoint probe.

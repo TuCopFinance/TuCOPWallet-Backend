@@ -51,15 +51,14 @@ function buildMockClients(opts: MockClientOptions): MockClients {
   }
 }
 
-// Chain order after the 2026-08-03 reorder: forno -> drpc -> ankr ->
-// primary (celocolombia). Forno is tried first because it has been the
-// most reliable endpoint in production; primary is kept at the tail with
-// its 3-failure skip window so a silently-degraded celocolombia (has been
-// observed returning block=0 while 200-OK) does not thrash retries when
-// the healthy upstreams could serve the request.
+// Chain order aligned with the shared `getCeloRpcFallbackUrls()` (see
+// `src/lib/celoClient.ts` for the full 8-endpoint order + rationale).
+// In tests only the env-defaulted URLs (forno/ankr/drpc/primary) plus
+// injected overrides get populated, so the effective test chain is
+// [alchemy?, forno, ankr, drpc, primary]. Publicnode/blockscout/thirdweb
+// are optional and stay unset in tests.
 describe('createNeeruRpc', () => {
-  // Order (2026-08-04): [ankr, forno, drpc, primary]. See rpc.ts header
-  // comment for the ordering rationale.
+  // Effective test chain: [alchemy?, forno, ankr, drpc, primary].
   it('when Alchemy client is injected, tries Alchemy first + never falls through', async () => {
     // Guards the 2026-08-08 change that inserts Alchemy at position 0 of
     // the chain when ALCHEMY_RPC_URL is set. All other endpoints throw so
@@ -92,7 +91,7 @@ describe('createNeeruRpc', () => {
     expect(mocks.calls).toEqual(['alchemy'])
   })
 
-  it('when Alchemy fails, cascades to Ankr and preserves the rest of the chain', async () => {
+  it('when Alchemy fails, cascades to Forno and preserves the rest of the chain', async () => {
     const mocks = buildMockClients({
       alchemyBehavior: async () => {
         throw new Error('alchemy 503')
@@ -100,10 +99,10 @@ describe('createNeeruRpc', () => {
       primaryBehavior: async () => {
         throw new Error('should not be called')
       },
-      fornoBehavior: async () => {
+      fornoBehavior: async () => 111n,
+      ankrBehavior: async () => {
         throw new Error('should not be called')
       },
-      ankrBehavior: async () => 111n,
       drpcBehavior: async () => {
         throw new Error('should not be called')
       },
@@ -118,21 +117,22 @@ describe('createNeeruRpc', () => {
       },
     })
     expect(await rpc.getBlockNumber()).toBe(111n)
-    expect(mocks.calls).toEqual(['alchemy', 'ankr'])
+    expect(mocks.calls).toEqual(['alchemy', 'forno'])
   })
 
-  it('when no Alchemy client is injected, chain matches the pre-Alchemy behavior', async () => {
+  it('when no Alchemy client is injected, chain starts at Forno', async () => {
     // Backwards-compat guard. When ALCHEMY_RPC_URL is not set in the env
     // AND options.endpoints.alchemy is not passed, the chain must be
-    // exactly the same as before this change: [ankr, forno, drpc, primary].
+    // exactly the shared-chain order minus the optional slots:
+    // [forno, ankr, drpc, primary].
     const mocks = buildMockClients({
       primaryBehavior: async () => {
         throw new Error('should not be called')
       },
-      fornoBehavior: async () => {
+      fornoBehavior: async () => 42n,
+      ankrBehavior: async () => {
         throw new Error('should not be called')
       },
-      ankrBehavior: async () => 42n,
       drpcBehavior: async () => {
         throw new Error('should not be called')
       },
@@ -146,18 +146,18 @@ describe('createNeeruRpc', () => {
       },
     })
     expect(await rpc.getBlockNumber()).toBe(42n)
-    expect(mocks.calls).toEqual(['ankr'])
+    expect(mocks.calls).toEqual(['forno'])
   })
 
-  it('tries Ankr first, succeeds, never falls through', async () => {
+  it('tries Forno first, succeeds, never falls through', async () => {
     const mocks = buildMockClients({
       primaryBehavior: async () => {
         throw new Error('should not be called')
       },
-      fornoBehavior: async () => {
+      fornoBehavior: async () => 100n,
+      ankrBehavior: async () => {
         throw new Error('should not be called')
       },
-      ankrBehavior: async () => 100n,
       drpcBehavior: async () => {
         throw new Error('should not be called')
       },
@@ -171,18 +171,18 @@ describe('createNeeruRpc', () => {
       },
     })
     expect(await rpc.getBlockNumber()).toBe(100n)
-    expect(mocks.calls).toEqual(['ankr'])
+    expect(mocks.calls).toEqual(['forno'])
   })
 
-  it('falls back to Forno when Ankr fails once', async () => {
+  it('falls back to Ankr when Forno fails once', async () => {
     const mocks = buildMockClients({
       primaryBehavior: async () => {
         throw new Error('should not be called')
       },
-      fornoBehavior: async () => 200n,
-      ankrBehavior: async () => {
-        throw new Error('ankr 503')
+      fornoBehavior: async () => {
+        throw new Error('forno 503')
       },
+      ankrBehavior: async () => 200n,
       drpcBehavior: async () => {
         throw new Error('should not be called')
       },
@@ -196,7 +196,7 @@ describe('createNeeruRpc', () => {
       },
     })
     expect(await rpc.getBlockNumber()).toBe(200n)
-    expect(mocks.calls).toEqual(['ankr', 'forno'])
+    expect(mocks.calls).toEqual(['forno', 'ankr'])
   })
 
   it('cascades all the way to primary (last-resort celocolombia) when the first three fail', async () => {
@@ -221,7 +221,7 @@ describe('createNeeruRpc', () => {
       },
     })
     expect(await rpc.getBlockNumber()).toBe(300n)
-    expect(mocks.calls).toEqual(['ankr', 'forno', 'drpc', 'primary'])
+    expect(mocks.calls).toEqual(['forno', 'ankr', 'drpc', 'primary'])
   })
 
   it('cascades past an endpoint that returns block=0 as if it threw', async () => {
@@ -231,14 +231,15 @@ describe('createNeeruRpc', () => {
     // valid successful result and never cascaded. Now the sanity check
     // in getBlockNumber turns the bad-data case into a throw and the
     // iterator continues to the next endpoint. Same guard applies
-    // regardless of position, so this test uses ankr as the degraded
-    // endpoint to reflect the current chain order.
+    // regardless of position, so this test uses forno as the degraded
+    // endpoint (position 0 in the shared chain) to reflect the current
+    // order.
     const mocks = buildMockClients({
       primaryBehavior: async () => {
         throw new Error('should not be called')
       },
-      fornoBehavior: async () => 400n, // healthy fallback
-      ankrBehavior: async () => 0n, // degraded silently
+      fornoBehavior: async () => 0n, // degraded silently
+      ankrBehavior: async () => 400n, // healthy fallback
       drpcBehavior: async () => {
         throw new Error('should not be called')
       },
@@ -252,7 +253,7 @@ describe('createNeeruRpc', () => {
       },
     })
     expect(await rpc.getBlockNumber()).toBe(400n)
-    expect(mocks.calls).toEqual(['ankr', 'forno'])
+    expect(mocks.calls).toEqual(['forno', 'ankr'])
   })
 
   it('throws when all four endpoints fail, with all error contexts', async () => {
@@ -409,31 +410,29 @@ describe('createNeeruRpc', () => {
   })
 
   it('universal skip-window: any endpoint that fails 3x in a row gets skipped for 5 min, then retried', async () => {
-    // Before 2026-08-08 this test was primary-only ("after 3 consecutive
-    // primary failures, skips it..."). Refactored to reflect the new
-    // universal skip semantics: ANY endpoint that fails 3x consecutive
+    // Universal skip semantics: ANY endpoint that fails 3x consecutive
     // gets skipped for ENDPOINT_SKIP_DURATION_MS, not just primary.
     //
-    // Scenario: ankr (position 0 in the current chain) fails 3x and gets
-    // skipped. Forno takes over and succeeds. After the skip window
-    // elapses, ankr is retried and now succeeds too. Primary + drpc
+    // Scenario: forno (position 0 in the current chain) fails 3x and
+    // gets skipped. Ankr takes over and succeeds. After the skip window
+    // elapses, forno is retried and now succeeds too. Primary + drpc
     // remain untouched.
-    let ankrCalls = 0
     let fornoCalls = 0
+    let ankrCalls = 0
     let nowMs = 1_000_000
 
-    const ankr = {
+    const forno = {
       getBlockNumber: async () => {
-        ankrCalls += 1
-        if (ankrCalls <= 3) {
-          throw new Error('ankr 503')
+        fornoCalls += 1
+        if (fornoCalls <= 3) {
+          throw new Error('forno 503')
         }
         return 100n
       },
     } as unknown as PublicClient
-    const forno = {
+    const ankr = {
       getBlockNumber: async () => {
-        fornoCalls += 1
+        ankrCalls += 1
         return 200n
       },
     } as unknown as PublicClient
@@ -453,30 +452,30 @@ describe('createNeeruRpc', () => {
       now: () => nowMs,
     })
 
-    // Ticks 1-3: ankr fails each time, forno takes over. After the 3rd
-    // ankr failure the skip window opens.
+    // Ticks 1-3: forno fails each time, ankr takes over. After the 3rd
+    // forno failure the skip window opens.
     for (let i = 1; i <= 3; i++) {
       expect(await rpc.getBlockNumber()).toBe(200n)
     }
-    expect(ankrCalls).toBe(3)
     expect(fornoCalls).toBe(3)
+    expect(ankrCalls).toBe(3)
 
-    // Tick 4: ankr is now skipped. Only forno is called.
+    // Tick 4: forno is now skipped. Only ankr is called.
     nowMs += 1000
     expect(await rpc.getBlockNumber()).toBe(200n)
-    expect(ankrCalls).toBe(3) // unchanged
-    expect(fornoCalls).toBe(4)
+    expect(fornoCalls).toBe(3) // unchanged
+    expect(ankrCalls).toBe(4)
 
     // Tick 5: still inside the skip window.
     nowMs += ENDPOINT_SKIP_DURATION_MS - 2000
     expect(await rpc.getBlockNumber()).toBe(200n)
-    expect(ankrCalls).toBe(3) // still skipped
+    expect(fornoCalls).toBe(3) // still skipped
 
-    // Tick 6: past the skip mark, ankr is retried and now succeeds
-    // (behavior flip on ankrCalls > 3). Forno not called this time.
+    // Tick 6: past the skip mark, forno is retried and now succeeds
+    // (behavior flip on fornoCalls > 3). Ankr not called this time.
     nowMs += 3000
     expect(await rpc.getBlockNumber()).toBe(100n)
-    expect(ankrCalls).toBe(4)
-    expect(fornoCalls).toBe(5) // unchanged from tick 5
+    expect(fornoCalls).toBe(4)
+    expect(ankrCalls).toBe(5) // unchanged from tick 5
   })
 })

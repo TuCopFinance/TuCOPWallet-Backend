@@ -127,7 +127,7 @@ async function boot(): Promise<void> {
   }
 
   if (process.env.NEERU_INDEXER_ENABLED === 'true') {
-    startNeeruIndexer({ db: getDb()! }).catch((err) => {
+    startNeeruIndexer({ db: getDb()!, signal: indexerAbort.signal }).catch((err) => {
       log.error(`neeru indexer crashed: ${err instanceof Error ? err.message : String(err)}`)
     })
     // Internal warmup ticks every 20s so external requests to the neeru
@@ -150,7 +150,7 @@ async function boot(): Promise<void> {
   }
 
   if (process.env.NEERU_TIMELOCK_ENABLED === 'true') {
-    startTimelockIndexer({ db: getDb()! }).catch((err) => {
+    startTimelockIndexer({ db: getDb()!, signal: indexerAbort.signal }).catch((err) => {
       log.error(`neeru timelock indexer crashed: ${err instanceof Error ? err.message : String(err)}`)
     })
   }
