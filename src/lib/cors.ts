@@ -54,9 +54,11 @@ export function getWriteAllowedOrigins(): readonly string[] {
 //     chain so the global corsRead doesn't re-apply.
 //   - Origin in allowlist                                  -> echo Origin, end
 //     preflight inline, fall through actual requests via next() with END marker.
-//   - Origin not in allowlist                              -> no Allow-Origin
-//     header set, end preflight 204, return next() for non-preflight (the
-//     handler will run but the browser blocks the response).
+//   - Origin not in allowlist                              -> preflight returns
+//     204 with no Allow-Origin header; non-preflight returns 403 immediately
+//     instead of running the handler (defence in depth: the current write
+//     endpoints already carry independent auth, but relying on the browser
+//     to block would be fragile if a future endpoint forgot to add its own).
 //
 // The END marker is `res.locals.corsWriteHandled = true`, which the chain
 // check below uses to skip the corsRead middleware.
@@ -66,13 +68,10 @@ export const corsWrite: RequestHandler = (req, res, next) => {
   const isPreflight =
     req.method === 'OPTIONS' && !!req.headers['access-control-request-method']
 
-  if (origin) {
-    const allowed = getWriteAllowedOrigins()
-    if (allowed.includes(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin)
-      res.setHeader('Vary', 'Origin')
-    }
-    // Disallowed origin: no Allow-Origin header set; browser will block.
+  const originAllowed = origin ? getWriteAllowedOrigins().includes(origin) : true
+  if (origin && originAllowed) {
+    res.setHeader('Access-Control-Allow-Origin', origin)
+    res.setHeader('Vary', 'Origin')
   }
 
   if (isPreflight) {
@@ -83,6 +82,10 @@ export const corsWrite: RequestHandler = (req, res, next) => {
     )
     res.setHeader('Access-Control-Max-Age', '600')
     res.status(204).end()
+    return
+  }
+  if (!originAllowed) {
+    res.status(403).json({ error: 'origin not allowed' })
     return
   }
   return next()

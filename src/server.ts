@@ -108,6 +108,10 @@ async function boot(): Promise<void> {
     })
   }
 
+  // Feature-gate startup for the three workers via direct process.env reads
+  // (rather than the zod-frozen env module) so tests can flip the flag at
+  // runtime without re-parsing the whole schema. Zod validates the shape at
+  // boot in env.ts so a bad value would have crashed before this point.
   if (process.env.INDEXER_ENABLED === 'true') {
     startIndexer({ signal: indexerAbort.signal }).catch((err) => {
       log.error(`indexer crashed: ${err instanceof Error ? err.message : String(err)}`)
@@ -127,7 +131,7 @@ async function boot(): Promise<void> {
   }
 
   if (process.env.NEERU_INDEXER_ENABLED === 'true') {
-    startNeeruIndexer({ db: getDb()! }).catch((err) => {
+    startNeeruIndexer({ db: getDb()!, signal: indexerAbort.signal }).catch((err) => {
       log.error(`neeru indexer crashed: ${err instanceof Error ? err.message : String(err)}`)
     })
     // Internal warmup ticks every 20s so external requests to the neeru
@@ -150,7 +154,7 @@ async function boot(): Promise<void> {
   }
 
   if (process.env.NEERU_TIMELOCK_ENABLED === 'true') {
-    startTimelockIndexer({ db: getDb()! }).catch((err) => {
+    startTimelockIndexer({ db: getDb()!, signal: indexerAbort.signal }).catch((err) => {
       log.error(`neeru timelock indexer crashed: ${err instanceof Error ? err.message : String(err)}`)
     })
   }

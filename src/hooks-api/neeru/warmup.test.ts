@@ -95,8 +95,8 @@ describe('startNeeruWarmup', () => {
     const rpc = buildFakeRpc()
 
     const handle = startNeeruWarmup({ db, rpc, intervalMs: 100 })
-    // Immediate tick is scheduled but async — flush microtasks so the
-    // first tick's awaits resolve.
+    // Immediate tick is scheduled but async, so flush microtasks first
+    // to let the tick's awaits resolve.
     await Promise.resolve()
     await Promise.resolve()
     expect(queries).toEqual(['SELECT 1'])
@@ -180,7 +180,7 @@ describe('startNeeruWarmup', () => {
     const handle = startNeeruWarmup({ db, rpc, intervalMs: 100 })
     await Promise.resolve()
     await Promise.resolve()
-    // First tick called and threw — recorded once. Next tick should fire.
+    // First tick called and threw, recorded once. Next tick should fire.
     jest.advanceTimersByTime(100)
     await Promise.resolve()
     await Promise.resolve()

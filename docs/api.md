@@ -134,7 +134,7 @@ Drop-in replacement for Valora's `getSwapQuote` cloud function. Backend POSTs to
 | `sellAmount` | yes | decimal integer (smallest unit / wei) | |
 | `userAddress` | yes | `0x` + 40 lowercase hex | EOA used for `fromAddress` and `toAddress` upstream |
 | `slippagePercentage` | no | decimal in `[0, 100]` | defaults to `0.5` |
-| `quoteOnly` | no | `'true'` or `'false'` | defaults to `'false'`. Set to `'true'` for planning quotes (multi-step `dollarsSpend` flows that fan out 3-5 parallel quotes for the same user); Squid skips the `transactionRequest` build, and per their team this path does NOT charge the wallet-based 10 RPS bucket. Refetch with `quoteOnly=false` (or omit it) on commit, once the user picks a route — that single call IS the one that counts against the bucket. |
+| `quoteOnly` | no | `'true'` or `'false'` | defaults to `'false'`. Set to `'true'` for planning quotes (multi-step `dollarsSpend` flows that fan out 3-5 parallel quotes for the same user); Squid skips the `transactionRequest` build, and per their team this path does NOT charge the wallet-based 10 RPS bucket. Refetch with `quoteOnly=false` (or omit it) on commit once the user picks a route; that single call IS the one that counts against the bucket. |
 
 **Success response (shape):**
 
@@ -209,12 +209,8 @@ One-time, sponsored EIP-7702 delegation setup for TuCop's Wallet Relay Infrastru
 **Operational invariants:**
 
 - If the user's EOA code already starts with `0xef0100` followed by the BatchExecutor address, the endpoint short-circuits with `{ "status": "already_delegated" }` and submits no tx.
-- **Three-tier rate limiting** (each independent; all must pass):
-  - **Per-IP:** `WRI_RELAY_PER_IP_LIMIT` requests per minute per source IP (default `20`). Blocks address-spraying from a single source. Set to `0` to disable.
-  - **Global token bucket:** `WRI_RELAY_GLOBAL_LIMIT` requests per minute total across ALL addresses + IPs (default `60`). Defense against distributed spraying. Requires Redis; fail-closed (returns 503 `rate limiter unavailable`) when Redis is down. Set to `0` to disable.
-  - **Per-address:** 1 successful relay per 5 minutes per `userAddress` (Redis-backed when `REDIS_URL` is configured; bounded in-process Map otherwise, capped at 10k entries with the same 5 minute TTL).
-- The global 300 req/min/IP ceiling from `app.ts` still applies on top of these.
-- Relay hot-wallet health check: if balance is below `WRI_RELAY_MIN_CELO_BALANCE`, returns 503 and logs an alert.
+- Server-side rate limiting is enforced across three tiers (per-IP, global, per-address). Callers should honor `Retry-After` headers returned on `429`.
+- Relay hot-wallet health check gates the endpoint; when the relay balance falls below the configured minimum the endpoint returns `503`.
 
 **Success response (delegation submitted and confirmed):**
 
@@ -247,12 +243,6 @@ One-shot, sponsored `approve(adapter, MAX_UINT256)` on each adapter-only stable 
 ```json
 { "address": "0x..." }
 ```
-
-**Required env:**
-
-- `WRI_FEE_BOOTSTRAP_ENABLED=true` (kill switch; default `false` returns `503`).
-- `WRI_RELAY_PK` (same hot wallet as `/api/wri/delegate-relay`).
-- `WRI_FEE_ADAPTER_USDC` and/or `WRI_FEE_ADAPTER_USDT`: the adapter contract address for each adapter-only token. Tokens whose env var is unset are silently skipped (`status: "skipped_no_adapter"`).
 
 **Idempotency:** for each token, if `allowance(user, adapter) >= 2**200` the endpoint short-circuits with `status: "already_approved"` and submits no tx. Re-calling after a successful bootstrap is therefore a free read-path no-op.
 
@@ -290,38 +280,15 @@ Per-token `status` values: `approved`, `already_approved`, `skipped_no_balance`,
 - `400` `{ "error": "invalid address" }`
 - `412` `{ "error": "precondition failed: user not delegated to BatchExecutor" }`
 - `500` `{ "error": "internal" }`
-- `503` `{ "error": "fee bootstrap disabled" }` (kill switch) / `relay temporarily unavailable` (relay PK missing) / `no adapter tokens configured` (none of the `WRI_FEE_ADAPTER_*` vars are set)
-
-**Out of scope:** this endpoint reuses the global 300 req/min/IP ceiling from `app.ts`. A dedicated three-tier limit matching `/api/wri/delegate-relay` is tracked as a follow-up.
+- `503` `{ "error": "fee bootstrap disabled" }` (kill switch) / `relay temporarily unavailable` (relay unavailable) / `no adapter tokens configured`
 
 ### Transaction feed (WRI Track C)
 
 Backend-owned replacement for Valora's `getWalletTransactions`. Indexes Celo blocks for opted-in addresses and classifies into the same `TokenTransaction` shape the wallet already consumes, with an extension for EIP-7702 atomic batches (which Valora omits).
 
-**Required env to enable on Railway:** `DATABASE_URL` (Postgres; migrations run on boot) and `INDEXER_ENABLED=true`. Without these the routes return `503` and the indexer loop is a no-op.
+Registers an address for indexing on first `POST /watch` and returns `503` when the feature is not enabled on the deployment.
 
-**Historical backfill (`POST /watch` triggers, resumable across restarts):**
-
-- `TX_INDEXER_BACKFILL_BLOCKS` (default `10000`, tunable up to millions of blocks). Depth of the historical scan window measured from the current tip at first-watch time.
-- `TX_INDEXER_BACKFILL_CHUNK_DELAY_MS` (default `150`). Baseline sleep between eth_getLogs chunks. Doubles up to `TX_INDEXER_BACKFILL_MAX_DELAY_MS` (default `5000`) on RPC failure and decays back down on success.
-- `TX_INDEXER_BACKFILL_ENABLED` (default `true`). Kill switch for the backfill loop specifically; `/watch` still registers addresses when disabled but no historical scan runs.
-
-The backfill uses the same primary -> forno -> ankr -> drpc fallback chain the Neeru indexer ships (see `src/lib/celoRpcFallback.ts`); a circuit breaker per endpoint (3 fails -> skip 5 min) transparently rotates around Cloudflare 1015 / 429s / timeouts. Progress is checkpointed per chunk (`watched_address.backfill_cursor_block` advances inside the same transaction that persists the chunk's tx rows), so a Railway redeploy mid-scan resumes exactly where it left off. The boot path calls `resumePendingBackfills(db)` to auto-restart every `backfill_completed_at IS NULL AND backfill_cursor_block IS NOT NULL` row.
-
-Grafana metrics for the backfill loop:
-
-```text
-transactions_indexer_backfill_chunks_total{outcome="ok|persist_error|rpc_error"}
-transactions_indexer_backfill_active_jobs
-transactions_indexer_backfill_blocks_remaining
-```
-
-**Kill switches (evaluated per-request; flip takes effect on next request without a restart):**
-
-- `TX_FEED_ENABLED` (default `true`). Set to the literal string `false` to gate `/api/transactions/feed` to a `503 { "error": "feed disabled" }` response.
-- `TX_WATCH_ENABLED` (default `true`). Same for `/api/transactions/watch` -> `503 { "error": "watch disabled" }`.
-
-The forward worker is NOT disabled by these switches; it keeps advancing `indexer_state` so a re-flip lands on a fresh cursor. To pause the worker itself, unset `INDEXER_ENABLED` (requires a Railway restart).
+**Historical backfill:** the first `POST /watch` triggers an asynchronous historical scan (resumable across restarts). Progress is checkpointed per chunk so a redeploy mid-scan resumes where it left off.
 
 **Response shape (`TokenTransaction`) - important post-2026-07-06:**
 
@@ -386,33 +353,9 @@ Operator probe for the indexer worker. Reports the last indexed block, current C
 }
 ```
 
-`celoTipBlock` and `lagBlocks` are `null` when the RPC tip probe fails (1.5 s timeout) so the route stays responsive during Forno blips. `lastIndexedBlock` is `null` before the worker has written its first cursor. The same numbers are exported as Prometheus gauges `transactions_indexer_lag_blocks` and `transactions_indexer_watched_addresses` (labelled by `network_id`) for Grafana alerts; the worker also refreshes them on every tick so `/metrics` stays current when no one is calling the health route.
+`celoTipBlock` and `lagBlocks` are `null` when the RPC tip probe fails so the route stays responsive during upstream blips. `lastIndexedBlock` is `null` before the worker has written its first cursor.
 
-Errors: `503 database not configured`, `500 internal` (when the indexer_state query itself fails).
-
-#### `POST /api/admin/reset-backfill`
-
-Ops-only endpoint. Clears a single address's backfill state so the next `POST /watch` call re-initialises it from scratch. Use when the initial re-open scanned an incorrect range (block-time slippage, RPC silent-fail) and the `reopen-if-deeper` heuristic cannot reach the affected blocks (it only extends the window deeper, never re-scans between the current `initial_from` and the previous `end_block`).
-
-Auth: `Authorization: Bearer <TX_ADMIN_TOKEN>` header, compared in constant time. The route gates to `503 admin not configured` when the env var is unset, so a leaked production URL cannot force expensive re-scans without the token. Rotate the token via Railway env whenever needed.
-
-```json
-{ "address": "0x81dCf9160237D0EF0d4db27CFb2EA9743547f882" }
-```
-
-Response `200`:
-
-```json
-{
-  "ok": true,
-  "address": "0x81dcf9160237d0ef0d4db27cfb2ea9743547f882",
-  "message": "backfill state cleared - next /watch will re-init"
-}
-```
-
-Effect on `watched_address` (single row, filtered by address): `backfill_completed_at = NULL`, `backfill_cursor_block = NULL`, `backfill_end_block = NULL`, `backfill_initial_from_block = NULL`, `backfill_last_error = NULL`. The row itself is preserved, so `backfill_started_at` and any historical audit fields survive.
-
-Errors: `401 unauthorized`, `400 invalid address`, `404 address not watched`, `503 admin not configured` / `database not configured`, `500 database error`.
+Errors: `503 database not configured`, `500 internal`.
 
 #### `GET /api/transactions/feed`
 
@@ -469,7 +412,7 @@ Postgres-backed indexer for a partner integration on Celo. Stores per-position s
 
 Tables created by the migration: `neeru_positions`, `neeru_indexer_state`.
 
-RPC fallback chain (`src/neeru-indexer/rpc.ts`): tries `https://rpc.celocolombia.org` (primary) first, then `https://forno.celo.org`, then `https://rpc.ankr.com/celo`, then `https://celo.drpc.org`. After 3 consecutive primary failures the indexer skips the primary for 5 minutes before retrying.
+The indexer uses a shared Celo RPC fallback chain with per-endpoint skip windows on transient failures. Endpoint list and skip semantics are internal implementation detail.
 
 Runs a daily reconciliation job at 03:00 UTC.
 

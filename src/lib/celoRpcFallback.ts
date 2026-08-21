@@ -124,7 +124,7 @@ export function createCeloFallbackExecutor(
 // per-address backfill loop) shares ONE endpoint skip state. Without this
 // each backfill creates a fresh executor whose alchemy/forno counters
 // start at zero, so 43+ concurrent backfills each pay the "3 initial
-// failures then skip" cost independently — measured in prod on
+// failures then skip" cost independently, measured in prod on
 // 2026-08-08 (deploy 70352169) as ~130 wasted alchemy roundtrips over
 // 60s of boot burst. Sharing the executor collapses that to a single
 // skip cycle per endpoint chain-wide.

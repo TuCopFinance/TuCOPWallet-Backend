@@ -13,3 +13,15 @@ export async function fetchWithTimeout(
     clearTimeout(timer)
   }
 }
+
+// Strip common API key query params from any string before it lands in logs
+// or Sentry. Etherscan's `message` field frequently echoes the request URL
+// (including `apikey=...`), and Blockscout can do the same on 4xx bodies.
+// Applies to `apikey`, `api_key`, `access_token`, and `token` (Etherscan v1
+// + v2 + a few adjacent providers). Keeps the param name for grep-ability
+// so operators can still tell WHICH key was on the URL.
+const API_KEY_QUERY_RE = /((?:apikey|api_key|access_token|token)=)[^&\s"']+/gi
+
+export function redactUpstreamString(input: string): string {
+  return input.replace(API_KEY_QUERY_RE, '$1<redacted>')
+}

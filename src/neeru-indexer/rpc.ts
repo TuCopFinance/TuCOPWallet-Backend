@@ -12,9 +12,13 @@ import {
   createCeloPublicClient,
   getAlchemyRpcUrl,
   getAnkrRpcUrl,
+  getBlockscoutRpcUrl,
   getDrpcRpcUrl,
+  getExtraRpcUrls,
   getFornoUrl,
   getPrimaryRpcUrl,
+  getPublicnodeRpcUrl,
+  getThirdwebRpcUrl,
 } from '../lib/celoClient'
 import { createLogger } from '../lib/logger'
 
@@ -95,7 +99,16 @@ export interface NeeruIndexerRpcClient {
   call(args: NeeruCallArgs): Promise<NeeruCallOutcome>
 }
 
-type EndpointName = 'alchemy' | 'primary' | 'forno' | 'ankr' | 'drpc'
+type EndpointName =
+  | 'publicnode'
+  | 'alchemy'
+  | 'forno'
+  | 'blockscout'
+  | 'thirdweb'
+  | 'ankr'
+  | 'drpc'
+  | 'primary'
+  | `extra-${number}`
 
 interface Endpoint {
   name: EndpointName
@@ -114,11 +127,14 @@ function makeClient(url: string): PublicClient {
 
 export interface CreateNeeruRpcOptions {
   endpoints?: {
+    publicnode?: PublicClient
     alchemy?: PublicClient
-    primary?: PublicClient
     forno?: PublicClient
+    blockscout?: PublicClient
+    thirdweb?: PublicClient
     ankr?: PublicClient
     drpc?: PublicClient
+    primary?: PublicClient
   }
   now?: () => number
 }
@@ -155,64 +171,44 @@ export function createNeeruRpc(
   const ankrUrl = getAnkrRpcUrl()
   const drpcUrl = getDrpcRpcUrl()
   const alchemyUrl = getAlchemyRpcUrl()
+  const publicnodeUrl = getPublicnodeRpcUrl()
+  const blockscoutUrl = getBlockscoutRpcUrl()
+  const thirdwebUrl = getThirdwebRpcUrl()
+  const extraUrls = getExtraRpcUrls()
 
-  // Order matters: withFallback iterates this array and returns the first
-  // client that answers without throwing.
+  // Order matches `getCeloRpcFallbackUrls()` (single source of truth in
+  // `src/lib/celoClient.ts`) so a Railway env addition propagates uniformly
+  // to the tx-indexer, allbridge, /ready probe, AND this Neeru indexer
+  // instead of drifting across bespoke lists. See that docstring for the
+  // order rationale (publicnode-first, alchemy-second, ...).
   //
-  // History:
-  //   * Original: [primary(celocolombia), forno, ankr, drpc]
-  //   * PR #157 (2026-08-03): [forno, drpc, ankr, primary] - celocolombia
-  //     had silent degradation (200 OK with block=0), forno promoted.
-  //   * PR #159 (2026-08-04): added getBlockNumber/getBlock sanity checks so
-  //     silent degradation cascades regardless of position.
-  //   * PR #166 (2026-08-05): [ankr, forno, drpc, primary] - forno started
-  //     rate-limiting our Railway egress IP with Cloudflare 1015 (429 on
-  //     every call), causing 24s cold-hits as the fallback cascade + retry
-  //     backoff stacked. Ankr promoted because it was the only endpoint
-  //     responding cleanly from Railway.
-  //   * THIS PR (2026-08-08): [alchemy?, ankr, forno, drpc, primary] -
-  //     added TuCop's OWN Alchemy dedicated endpoint at position 0 when the
-  //     ALCHEMY_RPC_URL env is set. Alchemy has its own API key so the
-  //     Cloudflare-1015-per-Railway-IP pattern that hits the public
-  //     endpoints does not apply. Public four remain as fallback for
-  //     resilience if Alchemy hits its own limits or goes down.
-  //
-  // If Alchemy starts degrading, unset ALCHEMY_RPC_URL in Railway and the
-  // chain automatically reverts to [ankr, forno, drpc, primary]. The skip
-  // window remains attached by `name === 'primary'`, not by array position.
-  const publicEndpoints: Endpoint[] = [
-    {
-      name: 'ankr',
-      url: ankrUrl,
-      client: options.endpoints?.ankr ?? makeClient(ankrUrl),
-    },
-    {
-      name: 'forno',
-      url: fornoUrl,
-      client: options.endpoints?.forno ?? makeClient(fornoUrl),
-    },
-    {
-      name: 'drpc',
-      url: drpcUrl,
-      client: options.endpoints?.drpc ?? makeClient(drpcUrl),
-    },
-    {
-      name: 'primary',
-      url: primaryUrl,
-      client: options.endpoints?.primary ?? makeClient(primaryUrl),
-    },
-  ]
-  const endpoints: Endpoint[] =
-    alchemyUrl || options.endpoints?.alchemy
-      ? [
-          {
-            name: 'alchemy',
-            url: alchemyUrl ?? 'https://celo-mainnet.g.alchemy.com/v2/test',
-            client: options.endpoints?.alchemy ?? makeClient(alchemyUrl!),
-          },
-          ...publicEndpoints,
-        ]
-      : publicEndpoints
+  // Test-injected clients via `options.endpoints.<name>` still override the
+  // corresponding position when present, so existing rpc.test.ts fixtures
+  // continue to work unchanged.
+  const endpoints: Endpoint[] = []
+  const pushIf = (
+    name: EndpointName,
+    url: string | undefined,
+    override?: PublicClient,
+  ): void => {
+    if (!url && !override) return
+    endpoints.push({
+      name,
+      url: url ?? '',
+      client: override ?? makeClient(url!),
+    })
+  }
+  pushIf('publicnode', publicnodeUrl, options.endpoints?.publicnode)
+  pushIf('alchemy', alchemyUrl, options.endpoints?.alchemy)
+  pushIf('forno', fornoUrl, options.endpoints?.forno)
+  pushIf('blockscout', blockscoutUrl, options.endpoints?.blockscout)
+  pushIf('thirdweb', thirdwebUrl, options.endpoints?.thirdweb)
+  pushIf('ankr', ankrUrl, options.endpoints?.ankr)
+  pushIf('drpc', drpcUrl, options.endpoints?.drpc)
+  pushIf('primary', primaryUrl, options.endpoints?.primary)
+  extraUrls.forEach((url, i) => {
+    pushIf(`extra-${i}` as EndpointName, url)
+  })
 
   // Per-endpoint skip state. When any endpoint fails N times in a row it
   // gets skipped for M ms so subsequent requests stop paying the roundtrip

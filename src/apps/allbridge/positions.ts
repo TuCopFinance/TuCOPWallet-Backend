@@ -41,7 +41,7 @@ import {
   ALLBRIDGE_TERMS_URL,
   NETWORK_ID_TO_ALLBRIDGE_CHAIN,
 } from './constants'
-import { getCeloPublicClient } from './rpc'
+import { getCeloFallbackPublicClient } from './rpc'
 import {
   ClaimType,
   type AppTokenPosition,
@@ -104,7 +104,7 @@ async function readPoolMetrics(
   tokenInfo: TokenInfo,
   address: string | undefined,
 ): Promise<ReadResults> {
-  const client = getCeloPublicClient()
+  const client = getCeloFallbackPublicClient()
   const pool: Address = tokenInfo.poolAddress
 
   const reads = await Promise.all([

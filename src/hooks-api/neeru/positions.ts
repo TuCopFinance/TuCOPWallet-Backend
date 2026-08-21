@@ -73,9 +73,7 @@ export function _resetHooksApiNeeruCacheForTests(): void {
 }
 
 // Fetches USD price of one COPm token via the multi-provider waterfall
-// (DIA -> CoinGecko -> CMC -> Mento on-chain). Sole-CMC dependency
-// removed 2026-08-15; positions endpoint now tolerates CMC monthly
-// exhaustion because DIA + CG + Mento cover COPm too. Fails soft to '0'
+// (DIA -> CoinGecko -> CMC -> Mento on-chain). Fails soft to '0'
 // so a total-blackout does not break the whole positions endpoint;
 // wallet then shows the "$ 0.00" state that existed before this
 // endpoint was priced.

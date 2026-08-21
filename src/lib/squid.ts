@@ -1,6 +1,56 @@
 import { fetchWithTimeout } from './http'
+import { createLogger } from './logger'
+
+const log = createLogger('lib:squid')
 
 const SQUID_ROUTE_URL = 'https://apiplus.squidrouter.com/v2/route'
+
+// Circuit breaker for the shared Squid upstream. Same pattern as
+// `priceProviders.ts` and `celoRpcFallback.ts`: after N consecutive
+// upstream failures, short-circuit subsequent calls with a synthetic
+// 502 for `SKIP_DURATION_MS` so the request queue does not pay the
+// 8s per-call timeout while Squid is 500-sustained. A single success
+// resets the counter. When the breaker is OPEN the caller sees
+// `SquidUpstreamError(502)` immediately; the existing shapeResponse
+// error path (which already falls through to the Uniswap V4 fallback
+// for USDT<->COPm) handles it transparently.
+const BREAKER_SKIP_AFTER_FAILURES = 5
+const BREAKER_SKIP_DURATION_MS = 30 * 1000
+interface BreakerState {
+  consecutiveFailures: number
+  skipUntilMs: number | null
+}
+const breaker: BreakerState = { consecutiveFailures: 0, skipUntilMs: null }
+
+function isBreakerOpen(): boolean {
+  if (breaker.skipUntilMs == null) return false
+  if (Date.now() >= breaker.skipUntilMs) {
+    breaker.skipUntilMs = null
+    breaker.consecutiveFailures = 0
+    return false
+  }
+  return true
+}
+
+function recordFailure(): void {
+  breaker.consecutiveFailures += 1
+  if (breaker.consecutiveFailures >= BREAKER_SKIP_AFTER_FAILURES) {
+    breaker.skipUntilMs = Date.now() + BREAKER_SKIP_DURATION_MS
+    log.warn(
+      `squid circuit breaker open for ${BREAKER_SKIP_DURATION_MS}ms after ${breaker.consecutiveFailures} consecutive failures`,
+    )
+  }
+}
+
+function recordSuccess(): void {
+  breaker.consecutiveFailures = 0
+  breaker.skipUntilMs = null
+}
+
+export function _resetSquidBreakerForTests(): void {
+  breaker.consecutiveFailures = 0
+  breaker.skipUntilMs = null
+}
 
 export class SquidUpstreamError extends Error {
   constructor(
@@ -86,15 +136,24 @@ export async function squidRoute(
   body: SquidRouteRequest,
   integratorId: string,
 ): Promise<SquidRouteResponse> {
-  const res = await fetchWithTimeout(SQUID_ROUTE_URL, {
-    method: 'POST',
-    headers: {
-      'x-integrator-id': integratorId,
-      'Content-Type': 'application/json',
-      accept: 'application/json',
-    },
-    body: JSON.stringify(body),
-  })
+  if (isBreakerOpen()) {
+    throw new SquidUpstreamError(502, undefined, 'circuit breaker open')
+  }
+  let res: Response
+  try {
+    res = await fetchWithTimeout(SQUID_ROUTE_URL, {
+      method: 'POST',
+      headers: {
+        'x-integrator-id': integratorId,
+        'Content-Type': 'application/json',
+        accept: 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
+  } catch (err) {
+    recordFailure()
+    throw err
+  }
   if (!res.ok) {
     const retryAfter = res.headers.get('retry-after') ?? undefined
     let bodyHint: string | undefined
@@ -104,7 +163,12 @@ export async function squidRoute(
     } catch {
       // body unreadable; status alone is enough
     }
+    // 429 is a rate-limit pass-through, not a service outage; do NOT
+    // trip the breaker on it (the caller may retry, or another wallet
+    // may succeed immediately). 5xx counts toward the breaker.
+    if (res.status >= 500) recordFailure()
     throw new SquidUpstreamError(res.status, retryAfter, bodyHint)
   }
+  recordSuccess()
   return (await res.json()) as SquidRouteResponse
 }

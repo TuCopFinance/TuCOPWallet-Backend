@@ -47,7 +47,11 @@ function getPerIpLimit(): number {
   return Number(parseEnvBigInt('WRI_RELAY_PER_IP_LIMIT', DEFAULT_PER_IP_LIMIT))
 }
 
-const perIpLimiter = rateLimit({
+// Exported so the sibling /api/wri/fee-adapter-bootstrap route can share the
+// same per-IP tier (both endpoints ultimately pay gas from the same relay
+// hot wallet, so a shared tier is appropriate). Env var name stays
+// WRI_RELAY_PER_IP_LIMIT for continuity.
+export const perIpLimiter = rateLimit({
   windowMs: PER_IP_WINDOW_MS,
   limit: getPerIpLimit,
   // Skip when the configured limit is 0. Returning true bypasses the limiter

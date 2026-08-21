@@ -33,7 +33,7 @@ import type {
   TriggerResult,
   WithdrawTriggerArgs,
 } from './types'
-import { getCeloPublicClient } from './rpc'
+import { getCeloFallbackPublicClient } from './rpc'
 
 const NETWORK_ID = 'celo-mainnet' as const
 
@@ -97,7 +97,7 @@ export async function triggerDeposit(args: DepositTriggerArgs): Promise<TriggerR
   const spender = positionAddress as Address
   const token = tokenAddress as Address
 
-  const client = getCeloPublicClient()
+  const client = getCeloFallbackPublicClient()
   const allowance = (await client.readContract({
     address: token,
     abi: erc20Abi,

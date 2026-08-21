@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
 import type { PublicClient } from 'viem'
-import { getCeloPublicClient } from '../lib/celoClient'
+import { getSharedCeloClient } from '../lib/celoClient'
 import { createLogger } from '../lib/logger'
 import {
   REVERT_SELECTORS,
@@ -37,7 +37,7 @@ router.get('/api/tx/status', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'invalid hash' })
   }
   const hash = raw.toLowerCase() as `0x${string}`
-  const client = getCeloPublicClient()
+  const client = getSharedCeloClient()
 
   let receipt: Awaited<ReturnType<PublicClient['getTransactionReceipt']>>
   try {

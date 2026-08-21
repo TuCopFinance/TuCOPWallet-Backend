@@ -1,5 +1,5 @@
 import { env } from './env'
-import { fetchWithTimeout } from './http'
+import { fetchWithTimeout, redactUpstreamString } from './http'
 import { buildSafeQueryString, stripReservedParams } from './query'
 
 const DEFAULT_BASE = 'https://celo.blockscout.com'
@@ -28,7 +28,9 @@ export async function blockscoutGet({ path, query = {} }: BlockscoutGetInput): P
     } catch {
       // body unreadable; status alone is enough
     }
-    throw new Error(`Blockscout error: ${res.status} ${bodyHint}`.trim())
+    throw new Error(
+      `Blockscout error: ${res.status} ${redactUpstreamString(bodyHint)}`.trim(),
+    )
   }
 
   return (await res.json()) as unknown
