@@ -153,9 +153,19 @@ function shapeResponse(
       echoed ?? collectFees.feeValue.toString()
   }
 
+  // Pre-computed max wei of sell token the router might pull for this quote.
+  // For Squid sell-mode quotes (which is how we always call Squid) this is
+  // fromAmount itself - the router never pulls more than the user's supplied
+  // sellAmount. Exposed as a dedicated field so wallets do NOT have to
+  // derive it from `buyAmount * guaranteedPrice`, a formula that only holds
+  // for same-decimal pairs and breaks by 10^(sellDec - buyDec) on cross-
+  // decimal pairs. Wallet-side approve() should size on this field.
   return {
     unvalidatedSwapTransaction: swapTx,
-    details: { swapProvider: 'squid' },
+    details: {
+      swapProvider: 'squid',
+      worstCaseSellAmount: fromAmount,
+    },
   }
 }
 
@@ -380,6 +390,7 @@ async function shapeUniswapV4Response(input: {
       unvalidatedSwapTransaction: swapTx,
       details: {
         swapProvider: 'uniswap-v4',
+        worstCaseSellAmount: input.sellAmount,
         // BatchExecutor.execute() consumes THIS array as-is. The wallet
         // does NOT need to prepend anything, check allowances, or split
         // by concern - just forward each entry as a call. The array
@@ -420,6 +431,7 @@ async function shapeUniswapV4Response(input: {
     unvalidatedSwapTransaction: swapTx,
     details: {
       swapProvider: 'uniswap-v4',
+      worstCaseSellAmount: input.sellAmount,
       // The wallet MUST:
       //   1. eth_signTypedData_v4 on `permit2.typedData`.
       //   2. If `existingAllowance.amount < sellAmount` OR
