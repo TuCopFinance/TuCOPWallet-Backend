@@ -9,6 +9,7 @@ import {
   EIP_7702_DELEGATED_CODE_PREFIX,
 } from '../lib/networks'
 import { getRelayClients } from '../lib/wriRelay'
+import { perIpLimiter } from './wri'
 
 // POST /api/wri/fee-adapter-bootstrap
 //
@@ -332,7 +333,7 @@ export async function bootstrapFeeAdapters(
   return { ok: true, results }
 }
 
-router.post('/api/wri/fee-adapter-bootstrap', async (req: Request, res: Response) => {
+router.post('/api/wri/fee-adapter-bootstrap', perIpLimiter, async (req: Request, res: Response) => {
   if (!env.WRI_FEE_BOOTSTRAP_ENABLED) {
     return res.status(503).json({ error: 'fee bootstrap disabled' })
   }

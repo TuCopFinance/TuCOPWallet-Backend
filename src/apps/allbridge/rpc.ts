@@ -4,7 +4,7 @@ import { getCeloRpcFallbackUrls } from '../../lib/celoClient'
 
 let cached: PublicClient | null = null
 
-export function getCeloPublicClient(): PublicClient {
+export function getCeloFallbackPublicClient(): PublicClient {
   if (cached) return cached
   const transport = fallback(
     getCeloRpcFallbackUrls().map((url) =>

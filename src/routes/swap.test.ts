@@ -602,7 +602,7 @@ describe('GET /api/swap/quote', () => {
     })
 
     it('flag ON + USDT->COPm + Squid 429: preserves 429 pass-through even with shadow active', async () => {
-      // The 429 path is separate from the 502 path — wallet team said rate-limit
+      // The 429 path is separate from the 502 path; wallet team said rate-limit
       // "probably NO gatilla Uniswap sino retry". Verify shadow doesn't change
       // the 429 semantics.
       process.env.SWAP_FALLBACK_UNISWAP_V4_ENABLED = 'true'

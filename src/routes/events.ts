@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { HEX_ADDRESS_RE, HEX_BYTES32_RE } from '../lib/hex'
-import { fetchWithTimeout } from '../lib/http'
+import { fetchWithTimeout, redactUpstreamString } from '../lib/http'
 import { createLogger } from '../lib/logger'
 import { CELO_MAINNET_CHAIN_ID } from '../lib/networks'
 
@@ -80,9 +80,10 @@ router.get('/events', async (req: Request, res: Response) => {
     const data = (await upstream.json()) as { status: string; message: string; result: unknown }
 
     if (data.status !== '1' && data.message !== 'No records found') {
-      // The Etherscan message can echo back the request including the apikey.
-      // Log it server-side, never return it to the client.
-      log.warn('etherscan error:', data.message)
+      // The Etherscan message can echo back the request including the apikey
+      // in the query string. Redact before logging so it never lands in
+      // Sentry breadcrumbs or Railway stdout.
+      log.warn('etherscan error:', redactUpstreamString(data.message ?? ''))
       return res.status(502).json({ error: 'etherscan error' })
     }
 

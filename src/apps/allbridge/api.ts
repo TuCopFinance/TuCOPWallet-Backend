@@ -6,8 +6,7 @@
 // (https://core.api.allbridgecoreapi.net/token-info), same SDK agent
 // header. Differences from upstream:
 //
-// - LRU import removed (uses a single-entry, time-boxed cache inline; one
-//   dependency less, behavior identical).
+// - Uses a single-entry, time-boxed cache inline instead of an LRU dep.
 // - Optional API key read from the zod-validated env (env.ALLBRIDGE_API_KEY)
 //   instead of a config object, matches the conventions in this repo.
 // - Narrowed to the chain symbols this backend supports (Celo only).

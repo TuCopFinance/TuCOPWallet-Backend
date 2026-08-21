@@ -1,11 +1,11 @@
 import type { Pool } from 'pg'
+import { ZERO_ADDRESS } from '../lib/env'
 import { createLogger } from '../lib/logger'
 import { CONTRACT_ADDRESS, READ_ABI } from './abi'
 import type { NeeruIndexerRpcClient } from './rpc'
 
 const log = createLogger('neeru-indexer:reorg')
 
-const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const MULTICALL_CHUNK_SIZE = 100
 // On a failed multicall entry, retry the row as a single readContract before
 // concluding it should be deleted. allowFailure mixes "tx reverted on chain"

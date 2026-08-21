@@ -108,6 +108,10 @@ async function boot(): Promise<void> {
     })
   }
 
+  // Feature-gate startup for the three workers via direct process.env reads
+  // (rather than the zod-frozen env module) so tests can flip the flag at
+  // runtime without re-parsing the whole schema. Zod validates the shape at
+  // boot in env.ts so a bad value would have crashed before this point.
   if (process.env.INDEXER_ENABLED === 'true') {
     startIndexer({ signal: indexerAbort.signal }).catch((err) => {
       log.error(`indexer crashed: ${err instanceof Error ? err.message : String(err)}`)

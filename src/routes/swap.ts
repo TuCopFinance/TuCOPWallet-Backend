@@ -116,14 +116,11 @@ function parseDecimalToScaled(value: string): bigint | null {
 // the normalized `guaranteedPrice` without needing per-token decimals
 // lookup. Callsite passes buy-side wei for both amounts.
 //
-// Bug context: the previous implementation computed `toAmountMin /
-// fromAmount` (buy-wei / sell-wei) directly, which produces a wei/wei
-// ratio inflated by 10^(sellDecimals - buyDecimals) any time the two
-// tokens have different decimals (e.g. USDT 6-dec -> USDm 18-dec off by
-// 10^12). Wallet consumes `guaranteedPrice` for approve() sizing on
-// buy-mode swaps, so a wrong value asks for a colossal allowance. Same
-// class of bug as PR #177 fixed for the Uniswap V4 path; this closes the
-// Squid path.
+// Invariant: computing `toAmountMin / fromAmount` (buy-wei / sell-wei)
+// directly is UNSAFE because it produces a wei/wei ratio inflated by
+// 10^(sellDecimals - buyDecimals) any time the two tokens have different
+// decimals. The wallet sizes `approve()` off this field on buy-mode
+// swaps, so the wrong value asks for a colossal allowance.
 function computeGuaranteedPrice(
   toAmountMin: string | undefined,
   toAmount: string,
@@ -318,9 +315,9 @@ async function shapeUniswapV4Response(input: {
   })
 
   // Token decimals for the USDT<->COPm pair. USDT is 6, COPm is 18. The
-  // `price` field must be human-readable (whole/whole), NOT wei/wei — the
-  // wallet renderer bails on magnitudes that don't match the sellToken
-  // amount in whole units (bug caught by wallet team 2026-08-10).
+  // `price` field must be human-readable (whole/whole), NOT wei/wei; the
+  // wallet renderer bails on magnitudes that do not match the sellToken
+  // amount in whole units.
   const [sellDecimals, buyDecimals] =
     input.direction === 'USDT_TO_COPM' ? [6, 18] : [18, 6]
   const price =
@@ -531,7 +528,7 @@ async function shapeUniswapV4Response(input: {
 //
 // Wire contract: the returned string is a decimal representation of the
 // exchange rate in whole units. E.g. for 1 USDT (6 decimals) -> 3242 COPm
-// (18 decimals), returns "3242.xxx" — NOT "3.24e15" (wei/wei ratio).
+// (18 decimals), returns "3242.xxx", NOT "3.24e15" (wei/wei ratio).
 function computeExchangeRate(
   buyAmountWei: bigint,
   buyDecimals: number,
@@ -566,7 +563,7 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
   // env flip does NOT serve stale responses across the transition. Without
   // this, a cached quote taken with the flag OFF (no fee applied, no
   // appFeePercentageIncludedInPrice field) could be served for 30s after
-  // the flag flipped ON — the wallet would show no fee line but the user
+  // the flag flipped ON, so the wallet would show no fee line but the user
   // would actually be charged. Same failure in reverse when flipping off.
   // Two suffixes keep the two states in separate cache buckets.
   const feesOn = process.env.ENABLE_SQUID_INTEGRATOR_FEES === 'true'
@@ -736,7 +733,7 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
       : null
     // Emit the shadow comparison even when Squid failed: this is exactly
     // the weekend-Mento pattern we want data on. Captures "Squid returned
-    // 502 but Uniswap V4 had a real quote of X COPm" — the value-of-Fase-2
+    // 502 but Uniswap V4 had a real quote of X COPm", the value-of-Fase-2
     // signal.
     if (uniswapShadowActive && uniswapResultOnSquidFail !== null) {
       logQuoteComparison({
@@ -839,7 +836,7 @@ function logQuoteComparison(input: {
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/swap/build-tx — Fase 2 Uniswap V4 executor
+// POST /api/swap/build-tx - Fase 2 Uniswap V4 executor
 // ---------------------------------------------------------------------------
 //
 // Called by the wallet AFTER it has signed the Permit2 typed data returned
