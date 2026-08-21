@@ -150,6 +150,10 @@ export interface StartTimelockIndexerOptions {
   intervalMs?: number
   iterations?: number
   errorBackoffMs?: number
+  // When aborted the loop breaks at the next iteration boundary + after
+  // any in-flight sleep, so Railway SIGTERM does not leave a batch
+  // half-committed.
+  signal?: AbortSignal
 }
 
 export async function startTimelockIndexer(
@@ -169,12 +173,14 @@ export async function startTimelockIndexer(
   const maxIterations = options.iterations
   const errorBackoffMs =
     options.errorBackoffMs ?? env.NEERU_TIMELOCK_ERROR_BACKOFF_MS
+  const signal = options.signal
 
   log.info(`starting timelock indexer (intervalMs=${intervalMs})`)
 
   let count = 0
   let consecutiveErrors = 0
   for (;;) {
+    if (signal?.aborted) return
     if (maxIterations != null && count >= maxIterations) return
     count += 1
 
@@ -182,6 +188,7 @@ export async function startTimelockIndexer(
       const haveLock = await tryAcquireTimelockLock(db)
       if (!haveLock) {
         await sleep(intervalMs)
+        if (signal?.aborted) return
         continue
       }
       try {
@@ -200,6 +207,7 @@ export async function startTimelockIndexer(
       }
       consecutiveErrors = 0
       await sleep(intervalMs)
+      if (signal?.aborted) return
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       consecutiveErrors += 1
@@ -212,6 +220,7 @@ export async function startTimelockIndexer(
       }
       await recordTimelockError(db, message)
       await sleep(errorBackoffMs)
+      if (signal?.aborted) return
     }
   }
 }

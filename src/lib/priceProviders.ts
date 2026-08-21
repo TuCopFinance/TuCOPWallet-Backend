@@ -28,6 +28,7 @@
 // -> skip for SKIP_DURATION_MS. Exhaustion signals bump the skip window to
 // EXHAUSTED_SKIP_MS so we don't hammer a dead provider hourly.
 
+import { fetchWithTimeout } from './http'
 import { createLogger } from './logger'
 
 const log = createLogger('lib:price-providers')
@@ -166,7 +167,7 @@ const cmcBatchFetch: ProviderBatchFetch = async (symbols) => {
   const url = new URL('https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest')
   url.searchParams.set('symbol', cmcSymbols.join(','))
   url.searchParams.set('convert', 'USD')
-  const res = await fetch(url.toString(), {
+  const res = await fetchWithTimeout(url.toString(), {
     headers: { 'X-CMC_PRO_API_KEY': key },
   })
   const json = (await res.json()) as {
@@ -210,7 +211,7 @@ const coingeckoBatchFetch: ProviderBatchFetch = async (symbols) => {
   url.searchParams.set('vs_currencies', 'usd')
   const headers: Record<string, string> = {}
   if (key) headers['x-cg-demo-api-key'] = key
-  const res = await fetch(url.toString(), { headers })
+  const res = await fetchWithTimeout(url.toString(), { headers })
   if (res.status === 429) {
     throw new ProviderExhaustedError('coingecko', 'rate limit 429')
   }
@@ -254,7 +255,7 @@ const diaBatchFetch: ProviderBatchFetch = async (symbols) => {
     eligible.map(async ({ symbol, blockchain, address }) => {
       try {
         const url = `https://api.diadata.org/v1/assetQuotation/${blockchain}/${address}`
-        const res = await fetch(url)
+        const res = await fetchWithTimeout(url)
         if (!res.ok) return
         const j = (await res.json()) as { Price?: number }
         if (typeof j.Price === 'number' && Number.isFinite(j.Price) && j.Price > 0) {
@@ -300,7 +301,7 @@ async function mentoCopmPriceUsd(): Promise<number | null> {
     const copPerCelo = Number(numerator) / Number(denominator)
     if (!Number.isFinite(copPerCelo) || copPerCelo <= 0) return null
     // Side-channel CELO/USD fetch (short-circuit if network fails):
-    const cgRes = await fetch(
+    const cgRes = await fetchWithTimeout(
       'https://api.coingecko.com/api/v3/simple/price?ids=celo&vs_currencies=usd',
     )
     if (!cgRes.ok) return null

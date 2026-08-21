@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { erc20Abi } from 'viem'
-import { getCeloPublicClient } from '../lib/celoClient'
+import { getSharedCeloClient } from '../lib/celoClient'
 import { NEERU_DEPOSIT_TOKEN_ADDRESS } from '../hooks-api/config'
 import { CATEGORY_READ_FN_ABI, CONTRACT_ADDRESS } from '../neeru-indexer/abi'
 import { buildProvisionalDeposit } from '../hooks-api/neeru/notify'
@@ -68,7 +68,7 @@ router.post(
       return res.status(400).json({ error: 'invalid tx' })
     }
 
-    const client = getCeloPublicClient()
+    const client = getSharedCeloClient()
 
     // Preload the tranches catalogue + deposit decimals from cache or
     // on demand. Both are cheap on-chain reads; caching keeps the notify
@@ -122,7 +122,7 @@ router.post(
 )
 
 async function getCatalogue(
-  client: ReturnType<typeof getCeloPublicClient>,
+  client: ReturnType<typeof getSharedCeloClient>,
 ): Promise<CatalogueSnapshot> {
   const now = Date.now()
   if (
@@ -155,7 +155,7 @@ async function getCatalogue(
 }
 
 async function getDepositDecimals(
-  client: ReturnType<typeof getCeloPublicClient>,
+  client: ReturnType<typeof getSharedCeloClient>,
 ): Promise<number> {
   const now = Date.now()
   if (decimalsCache && now - decimalsCache.fetchedAtMs < DECIMALS_TTL_MS) {

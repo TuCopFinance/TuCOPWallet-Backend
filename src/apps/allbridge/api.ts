@@ -14,6 +14,7 @@
 
 import type { Address } from 'viem'
 import { env } from '../../lib/env'
+import { fetchWithTimeout } from '../../lib/http'
 import { createLogger } from '../../lib/logger'
 import type { NetworkId } from './types'
 
@@ -108,7 +109,7 @@ export async function getAllbridgeTokenInfo({
       headers['valora-allbridge-core'] = env.ALLBRIDGE_API_KEY
     }
 
-    const res = await fetch(TOKEN_INFO_URL, { headers })
+    const res = await fetchWithTimeout(TOKEN_INFO_URL, { headers })
     if (!res.ok) {
       log.warn(`allbridge token-info ${res.status}`)
       return undefined

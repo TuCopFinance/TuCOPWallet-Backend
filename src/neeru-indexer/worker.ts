@@ -184,6 +184,10 @@ export interface StartNeeruIndexerOptions {
   // var NEERU_INDEXER_ERROR_BACKOFF_MS, default 5min). Used by tests so an
   // iterations:N run doesn't actually sleep 5min between every failure.
   errorBackoffMs?: number
+  // When aborted the loop breaks at the next iteration boundary + after
+  // any in-flight sleep, so Railway SIGTERM does not leave a batch
+  // half-committed. See src/server.ts wiring.
+  signal?: AbortSignal
 }
 
 interface ReorgJobState {
@@ -243,6 +247,7 @@ export async function startNeeruIndexer(
   const enableReorgJob = options.enableReorgJob ?? true
   const errorBackoffMs =
     options.errorBackoffMs ?? env.NEERU_INDEXER_ERROR_BACKOFF_MS
+  const signal = options.signal
 
   log.info(`starting neeru indexer (intervalMs=${intervalMs})`)
 
@@ -261,6 +266,7 @@ export async function startNeeruIndexer(
   let lastTickToBlock: bigint | null = null
   try {
     for (;;) {
+      if (signal?.aborted) return
       if (maxIterations != null && count >= maxIterations) return
       count += 1
 
@@ -271,6 +277,7 @@ export async function startNeeruIndexer(
         const haveLock = await tryAcquireIndexerLock(db)
         if (!haveLock) {
           await sleep(intervalMs)
+          if (signal?.aborted) return
           continue
         }
         try {
@@ -292,6 +299,7 @@ export async function startNeeruIndexer(
         consecutiveErrors = 0
         stuckSinceMs = null
         await sleep(intervalMs)
+        if (signal?.aborted) return
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         consecutiveErrors += 1
@@ -335,6 +343,7 @@ export async function startNeeruIndexer(
         }
         await recordIndexerError(db, message)
         await sleep(errorBackoffMs)
+        if (signal?.aborted) return
       }
     }
   } finally {

@@ -1,4 +1,10 @@
-import { createPublicClient, http, type PublicClient, type Transport } from 'viem'
+import {
+  createPublicClient,
+  fallback,
+  http,
+  type PublicClient,
+  type Transport,
+} from 'viem'
 import { celo } from 'viem/chains'
 import { env } from './env'
 
@@ -144,9 +150,37 @@ export function getCeloRpcFallbackUrls(): readonly string[] {
   return Array.from(new Set(urls))
 }
 
-// Cached singleton client for shared read-only probes (health checks,
-// metrics, occasional one-shot reads). Long-running consumers (indexer,
-// WRI relay) still build their own client with custom fallback chains.
+// Cached singleton client wired with viem's built-in `fallback` transport
+// across the full RPC chain (`getCeloRpcFallbackUrls()`). Every read
+// automatically fails over to the next endpoint on RPC error, so hot-path
+// handlers (tx-status, positions-notify, tx-indexer routes, /ready probe)
+// stay alive when Forno pegs Cloudflare 1015 or Alchemy hits its 25 CU/s
+// cap. Uses the shared chain order so a Railway env addition propagates
+// uniformly.
+//
+// viem's fallback lacks the custom skip-window semantics that
+// `getSharedCeloFallbackExecutor()` layers on top; that stays the choice
+// for tight-loop consumers (indexer tick, backfill) where a persistently
+// dead endpoint would otherwise be retried on every call. For sporadic
+// request-time reads, viem's per-call fallover is enough.
+let cachedSharedClient: PublicClient | null = null
+
+export function getSharedCeloClient(): PublicClient {
+  if (!cachedSharedClient) {
+    const urls = getCeloRpcFallbackUrls()
+    const transports = urls.map((u) => http(u))
+    cachedSharedClient = createPublicClient({
+      chain: celo,
+      transport: fallback(transports),
+    }) as unknown as PublicClient
+  }
+  return cachedSharedClient
+}
+
+// Cached singleton client bound to Forno only. Kept for the narrow set of
+// consumers that specifically need a single-URL client (e.g. WRI relay
+// paths that already carry their own fallback wrapper around the wallet
+// client). Prefer `getSharedCeloClient()` for new call sites.
 let cachedClient: PublicClient | null = null
 
 export function getCeloPublicClient(): PublicClient {
@@ -158,4 +192,5 @@ export function getCeloPublicClient(): PublicClient {
 
 export function _resetCeloClientForTests(): void {
   cachedClient = null
+  cachedSharedClient = null
 }

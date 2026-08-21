@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express'
-import { getCeloPublicClient } from '../lib/celoClient'
+import { getSharedCeloClient } from '../lib/celoClient'
 import { getDb } from '../lib/db'
 import { env } from '../lib/env'
 import { HEX_ADDRESS_RE } from '../lib/hex'
@@ -220,7 +220,7 @@ router.post('/api/transactions/watch', async (req: Request, res: Response) => {
     // failure inside reopenBackfillIfDeeper is confined and logged.
     void (async () => {
       try {
-        const client = getCeloPublicClient()
+        const client = getSharedCeloClient()
         const tip = await client.getBlockNumber()
         const reopened = await reopenBackfillIfDeeper(
           db,
@@ -384,12 +384,17 @@ router.get('/api/transactions/feed', async (req: Request, res: Response) => {
 })
 
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`${label}: timeout ${ms}ms`)), ms),
-    ),
-  ])
+  // Cleared as soon as the wrapped promise resolves so the timer does not
+  // keep the event loop from being idle on the fast path. Also unref'd so
+  // a still-pending timeout does not block clean shutdown.
+  let timer: NodeJS.Timeout | null = null
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}: timeout ${ms}ms`)), ms)
+    timer.unref?.()
+  })
+  return Promise.race([p, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
 }
 
 router.get('/api/transactions/indexer/health', async (_req: Request, res: Response) => {
@@ -426,7 +431,7 @@ router.get('/api/transactions/indexer/health', async (_req: Request, res: Respon
   let lagBlocks: number | null = null
   try {
     const tip = await withTimeout(
-      getCeloPublicClient().getBlockNumber(),
+      getSharedCeloClient().getBlockNumber(),
       HEALTH_RPC_TIMEOUT_MS,
       'rpc',
     )
