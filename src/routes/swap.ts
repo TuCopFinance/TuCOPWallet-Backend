@@ -15,14 +15,12 @@ import {
 import {
   getUniswapV4Quote,
   isUsdtCopmPair,
-  POOL_USDT_COPM,
   type UniswapV4Direction,
 } from '../lib/uniswapV4'
 import {
   buildEip7702BatchedSwapCalls,
   buildPermit2TypedData,
   buildSafeErc20ApproveCalls,
-  buildV4SwapCalldata,
   CELO_CHAIN_ID,
   getErc20Allowance,
   getPermit2AllowanceInfo,
@@ -32,11 +30,11 @@ import {
 } from '../lib/uniswapV4Executor'
 import { firstZodIssueAsError } from './schemas/common'
 import {
-  swapBuildTxSchema,
   swapQuoteQuerySchema,
-  type SwapBuildTxInput,
   type SwapQuoteInput,
 } from './schemas/swap'
+import buildTxRouter from './swap/build-tx'
+import { computeExchangeRate, computeGuaranteedPrice } from './swap/pricing'
 
 const router = Router()
 const log = createLogger('routes:swap')
@@ -73,69 +71,6 @@ function validate(req: Request): { ok: true; input: ValidatedInput } | { ok: fal
     ok: true,
     input: { ...parsed.data, fromChainId, toChainId },
   }
-}
-
-const PRICE_SCALE = 1_000_000_000_000_000_000n // 1e18
-
-function safeBigInt(value: string | undefined): bigint | null {
-  if (!value) return null
-  try {
-    const v = BigInt(value)
-    return v >= 0n ? v : null
-  } catch {
-    return null
-  }
-}
-
-// Parse a decimal string like "0.9945" or "3242.712" into a bigint scaled
-// by PRICE_SCALE (1e18). Returns null on any parse error. Truncates
-// fractional beyond 18 digits (matches PRICE_SCALE precision).
-function parseDecimalToScaled(value: string): bigint | null {
-  if (!value) return null
-  const negative = value.startsWith('-')
-  const cleaned = negative ? value.slice(1) : value
-  if (!/^\d+(?:\.\d+)?$/.test(cleaned)) return null
-  const parts = cleaned.split('.')
-  const wholePart = parts[0] ?? '0'
-  const fracPart = parts[1] ?? ''
-  const fracPadded = fracPart.padEnd(18, '0').slice(0, 18)
-  try {
-    const scaled = BigInt(wholePart) * PRICE_SCALE + BigInt(fracPadded || '0')
-    return negative ? -scaled : scaled
-  } catch {
-    return null
-  }
-}
-
-// Compute `guaranteedPrice` (worst-case exchange rate after slippage) as a
-// human-readable decimal string matching the shape of the `price` field.
-// Both `toAmountMin` and `toAmount` are wei of the SAME token (the buy
-// token), so `toAmountMin / toAmount` is a pure decimal ratio independent
-// of either token's decimals. Multiplying that ratio by the already-
-// normalized `price` (whole/whole from Squid's `est.exchangeRate`) yields
-// the normalized `guaranteedPrice` without needing per-token decimals
-// lookup. Callsite passes buy-side wei for both amounts.
-//
-// Invariant: computing `toAmountMin / fromAmount` (buy-wei / sell-wei)
-// directly is UNSAFE because it produces a wei/wei ratio inflated by
-// 10^(sellDecimals - buyDecimals) any time the two tokens have different
-// decimals. The wallet sizes `approve()` off this field on buy-mode
-// swaps, so the wrong value asks for a colossal allowance.
-function computeGuaranteedPrice(
-  toAmountMin: string | undefined,
-  toAmount: string,
-  price: string,
-): string {
-  const min = safeBigInt(toAmountMin)
-  const total = safeBigInt(toAmount)
-  const priceScaled = parseDecimalToScaled(price)
-  if (min === null || total === null || total === 0n || priceScaled === null) {
-    return price
-  }
-  const scaled = (priceScaled * min) / total
-  const whole = scaled / PRICE_SCALE
-  const frac = (scaled % PRICE_SCALE).toString().padStart(18, '0').replace(/0+$/, '')
-  return frac.length === 0 ? whole.toString() : `${whole.toString()}.${frac}`
 }
 
 // Reads the 3 integrator-fee env vars each call so a Railway env flip takes
@@ -516,34 +451,6 @@ async function shapeUniswapV4Response(input: {
   }
 }
 
-// Computes the human-readable exchange rate `buyAmount / sellAmount`
-// accounting for token decimals. Both amounts are raw wei of their
-// respective tokens.
-//
-//   price = (buyWei / 10^buyDec) / (sellWei / 10^sellDec)
-//         = buyWei * 10^sellDec / (sellWei * 10^buyDec)
-//
-// Scales by 1e18 for output precision, keeps bigint throughout to avoid
-// Number precision loss above 2^53.
-//
-// Wire contract: the returned string is a decimal representation of the
-// exchange rate in whole units. E.g. for 1 USDT (6 decimals) -> 3242 COPm
-// (18 decimals), returns "3242.xxx", NOT "3.24e15" (wei/wei ratio).
-function computeExchangeRate(
-  buyAmountWei: bigint,
-  buyDecimals: number,
-  sellAmountWei: bigint,
-  sellDecimals: number,
-): string {
-  if (sellAmountWei === 0n) return '0'
-  const numer = buyAmountWei * 10n ** BigInt(sellDecimals) * PRICE_SCALE
-  const denom = sellAmountWei * 10n ** BigInt(buyDecimals)
-  const scaled = numer / denom
-  const whole = scaled / PRICE_SCALE
-  const frac = (scaled % PRICE_SCALE).toString().padStart(18, '0').replace(/0+$/, '')
-  return frac.length === 0 ? whole.toString() : `${whole.toString()}.${frac}`
-}
-
 router.get('/api/swap/quote', async (req: Request, res: Response) => {
   // Read process.env directly (rather than via the zod-frozen env proxy) so
   // tests can flip the value at runtime; zod already validated at boot.
@@ -835,90 +742,10 @@ function logQuoteComparison(input: {
   )
 }
 
-// ---------------------------------------------------------------------------
-// POST /api/swap/build-tx - Fase 2 Uniswap V4 executor
-// ---------------------------------------------------------------------------
-//
-// Called by the wallet AFTER it has signed the Permit2 typed data returned
-// from GET /api/swap/quote (uniswap-v4 path). Body carries the signature
-// plus the exact PermitSingle values the wallet signed. Backend re-validates,
-// asserts the pair matches the USDT<->COPm pool + the signed token matches
-// the sell token, then rebuilds the UniversalRouter.execute() calldata
-// server-side and returns the final tx bytes {to, data, value}.
-//
-// Gated behind SWAP_FALLBACK_UNISWAP_V4_ACTIVE. Returns 503 when off,
-// 400 on any input mismatch, 200 with the tx on success.
-router.post('/api/swap/build-tx', async (req: Request, res: Response) => {
-  if (process.env.SWAP_FALLBACK_UNISWAP_V4_ACTIVE !== 'true') {
-    return res.status(503).json({ error: 'uniswap v4 executor not enabled' })
-  }
-  const parsed = swapBuildTxSchema.safeParse(req.body)
-  if (!parsed.success) {
-    return res.status(400).json({ error: firstZodIssueAsError(parsed.error) })
-  }
-  const body: SwapBuildTxInput = parsed.data
-
-  // Pair sanity check. The direction + permitToken combination must map to
-  // the known USDT<->COPm pool.
-  const expectedSellToken =
-    body.direction === 'USDT_TO_COPM'
-      ? POOL_USDT_COPM.currency0
-      : POOL_USDT_COPM.currency1
-  if (body.permitToken !== expectedSellToken) {
-    return res
-      .status(400)
-      .json({ error: 'permitToken does not match direction sell token' })
-  }
-  // The permit amount must cover the swap. If the wallet signed less than
-  // sellAmount, the swap would revert at SETTLE_ALL.
-  if (BigInt(body.permitAmount) < BigInt(body.sellAmount)) {
-    return res
-      .status(400)
-      .json({ error: 'permitAmount is less than sellAmount' })
-  }
-
-  try {
-    const tx = buildV4SwapCalldata({
-      direction: body.direction,
-      recipient: body.userAddress as `0x${string}`,
-      sellAmount: BigInt(body.sellAmount),
-      minBuyAmount: BigInt(body.minBuyAmount),
-      deadline: BigInt(body.deadline),
-      permit2Signature: body.permit2Signature as `0x${string}`,
-      permitDetails: {
-        token: body.permitToken as `0x${string}`,
-        amount: BigInt(body.permitAmount),
-        expiration: body.permitExpiration,
-        nonce: body.permitNonce,
-      },
-      permitSigDeadline: BigInt(body.permitSigDeadline),
-    })
-    // Emit a structured audit log symmetric to the squid_integrator_fee log
-    // so we can reconcile Uniswap swap volume + fee routing off-chain.
-    log.warn(
-      JSON.stringify({
-        event: 'uniswap_v4_build_tx',
-        direction: body.direction,
-        userAddress: body.userAddress,
-        sellAmount: body.sellAmount,
-        minBuyAmount: body.minBuyAmount,
-        deadline: body.deadline,
-        permitNonce: body.permitNonce,
-        permitAmount: body.permitAmount,
-      }),
-    )
-    return res.json({
-      to: tx.to,
-      data: tx.data,
-      value: tx.value.toString(),
-    })
-  } catch (err) {
-    log.warn(
-      'buildV4SwapCalldata failed:',
-      err instanceof Error ? err.message : err,
-    )
-    return res.status(400).json({ error: 'invalid build-tx params' })
-  }
-})
+// The POST /api/swap/build-tx endpoint (Fase 2 Uniswap V4 executor) lives
+// in its own module to keep this file focused on the Squid + V4 quote
+// path. Mounted as a sub-router so `import router from './swap'` still
+// serves both endpoints.
+router.use(buildTxRouter)
 
 export default router
