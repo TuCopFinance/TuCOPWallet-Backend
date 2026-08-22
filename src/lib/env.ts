@@ -256,6 +256,13 @@ const envSchema = z.object({
   // Observability
   SENTRY_DSN: z.string().url().optional(),
   SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).optional(),
+  // Statsig server-side SDK secret. When unset the backend Statsig
+  // client is a no-op (dev / local runs). Required for backend
+  // `logEvent` (business event stream) + `checkGate` (kill switches)
+  // to actually reach Statsig cloud. Loaded via the
+  // tucop-finance-statsig-loader.zsh chpwd hook on the user's laptop;
+  // set explicitly in Railway env for prod.
+  STATSIG_SERVER_SECRET: z.string().optional(),
 
   // Indexer enable flags
   INDEXER_ENABLED: z

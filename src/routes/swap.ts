@@ -6,6 +6,7 @@ import { createLogger } from '../lib/logger'
 import { NATIVE_TOKEN_SENTINEL, networkIdToChainId } from '../lib/networks'
 import { buildCacheKey } from '../lib/query'
 import { getRedis } from '../lib/redis'
+import { logStatsigEvent } from '../lib/statsig'
 import { Sentry } from '../lib/sentry'
 import {
   squidRoute,
@@ -668,6 +669,21 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
     } catch (err) {
       log.warn('redis write failed:', err instanceof Error ? err.message : err)
     }
+
+    logStatsigEvent({
+      walletAddress: input.userAddress,
+      event: 'swap_quote_returned',
+      value: upstream.route?.estimate?.toAmount ?? '0',
+      metadata: {
+        provider: shouldRouteUniswap ? 'uniswap-v4' : 'squid',
+        fromChain: String(input.fromChainId),
+        toChain: String(input.toChainId),
+        sellToken: input.sellToken,
+        buyToken: input.buyToken,
+        sellAmount: input.sellAmount,
+        quoteOnly: input.quoteOnly,
+      },
+    })
 
     res.json(payload)
   } catch (err) {

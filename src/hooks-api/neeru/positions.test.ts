@@ -103,6 +103,14 @@ function buildFakeDb(rows: ReadonlyArray<{
   }
 }
 
+// This suite hits the price provider waterfall + Sentry span
+// instrumentation added in PR #223. First-tick module load in a jest
+// worker can push individual test runs past the default 5s ceiling when
+// the worker was cold-started for this file. Widening to 15s eliminates
+// the flake without masking real regressions (the actual logic is
+// sub-millisecond bigint math).
+jest.setTimeout(15_000)
+
 describe('getNeeruEarnPositions', () => {
   beforeEach(() => {
     _resetHooksApiNeeruCacheForTests()
