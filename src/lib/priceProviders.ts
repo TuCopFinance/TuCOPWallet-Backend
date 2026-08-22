@@ -30,6 +30,8 @@
 
 import { fetchWithTimeout } from './http'
 import { createLogger } from './logger'
+import { priceProviderTierUsedTotal } from './metrics'
+import { Sentry } from './sentry'
 
 const log = createLogger('lib:price-providers')
 
@@ -409,17 +411,41 @@ export async function fetchTokenPrices(
   const used: ProviderName[] = []
   const skipped: ProviderName[] = []
 
-  for (const provider of PROVIDERS) {
+  for (let i = 0; i < PROVIDERS.length; i++) {
+    const provider = PROVIDERS[i]!
+    const tier = String(i + 1)
     if (remaining.size === 0) break
     if (isSkipped(provider.name, nowMs)) {
       skipped.push(provider.name)
+      priceProviderTierUsedTotal
+        .labels({ provider: provider.name, tier, outcome: 'skip' })
+        .inc(remaining.size)
       continue
     }
     const requestSymbols = Array.from(remaining)
+    // Sentry span per tier so a slow tier shows up on the trace waterfall.
+    // Wrapped with startSpan (callback form) so the span auto-closes on
+    // resolve/reject; nested spans inside the provider fetch (if any)
+    // become children automatically.
     try {
-      const partial = await provider.fetch(requestSymbols, now)
+      const partial = await Sentry.startSpan(
+        {
+          name: `price.tier.${provider.name}`,
+          op: 'http.client',
+          attributes: {
+            provider: provider.name,
+            tier,
+            symbols: requestSymbols.join(','),
+            symbolCount: requestSymbols.length,
+          },
+        },
+        () => provider.fetch(requestSymbols, now),
+      )
       used.push(provider.name)
       recordSuccess(provider.name)
+      priceProviderTierUsedTotal
+        .labels({ provider: provider.name, tier, outcome: 'ok' })
+        .inc(partial.size)
       for (const [symbol, price] of partial.entries()) {
         prices.set(symbol, {
           priceUsd: price,
@@ -431,6 +457,9 @@ export async function fetchTokenPrices(
     } catch (err) {
       const isExhausted = err instanceof ProviderExhaustedError
       recordFailure(provider.name, isExhausted, nowMs)
+      priceProviderTierUsedTotal
+        .labels({ provider: provider.name, tier, outcome: 'error' })
+        .inc(requestSymbols.length)
       log.warn(
         `provider ${provider.name} failed (exhausted=${isExhausted}): ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`,
       )

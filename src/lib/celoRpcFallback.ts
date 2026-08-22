@@ -4,6 +4,8 @@ import {
   getCeloRpcFallbackUrls,
 } from './celoClient'
 import { createLogger } from './logger'
+import { celoRpcEndpointUsedTotal } from './metrics'
+import { Sentry } from './sentry'
 
 // Shared Celo RPC fallback executor for consumers that need every read to
 // survive Cloudflare 1015 / 429s / timeouts against any single endpoint.
@@ -30,6 +32,23 @@ const log = createLogger('lib:celo-rpc-fallback')
 
 const SKIP_AFTER_FAILURES = 3
 const SKIP_DURATION_MS = 5 * 60 * 1000
+
+// Derive a low-cardinality provider name for metrics/spans from a URL so
+// per-endpoint outcomes group nicely on Grafana + Sentry without leaking
+// full URLs into label values. Unknown URLs fall back to 'other' rather
+// than blowing up label cardinality with random hostnames.
+function providerNameFromUrl(url: string): string {
+  const lower = url.toLowerCase()
+  if (lower.includes('publicnode.com')) return 'publicnode'
+  if (lower.includes('alchemy.com')) return 'alchemy'
+  if (lower.includes('forno.celo.org')) return 'forno'
+  if (lower.includes('blockscout.com')) return 'blockscout'
+  if (lower.includes('thirdweb.com')) return 'thirdweb'
+  if (lower.includes('ankr.com')) return 'ankr'
+  if (lower.includes('drpc.org')) return 'drpc'
+  if (lower.includes('celocolombia')) return 'primary'
+  return 'other'
+}
 
 export interface FallbackExecutor {
   withFallback<T>(
@@ -97,15 +116,40 @@ export function createCeloFallbackExecutor(
     async withFallback(label, invoke) {
       const errors: Array<{ url: string; error: string }> = []
       for (const e of endpoints) {
-        if (isSkipped(e)) continue
+        if (isSkipped(e)) {
+          celoRpcEndpointUsedTotal
+            .labels({ provider: providerNameFromUrl(e.url), outcome: 'skip' })
+            .inc()
+          continue
+        }
+        const provider = providerNameFromUrl(e.url)
         try {
-          const result = await invoke(e.client)
+          // Sentry span per endpoint attempt. Nested spans (e.g. the viem
+          // http transport internals) attach as children automatically.
+          const result = await Sentry.startSpan(
+            {
+              name: `rpc.${label}`,
+              op: 'http.client',
+              attributes: {
+                provider,
+                url: e.url,
+                method: label,
+              },
+            },
+            () => invoke(e.client),
+          )
           recordSuccess(e)
+          celoRpcEndpointUsedTotal
+            .labels({ provider, outcome: 'ok' })
+            .inc()
           return result
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           errors.push({ url: e.url, error: message })
           recordFailure(e)
+          celoRpcEndpointUsedTotal
+            .labels({ provider, outcome: 'error' })
+            .inc()
           log.warn(`RPC ${label} failed on ${e.url}: ${message} - falling back`)
         }
       }
