@@ -1,5 +1,6 @@
 import { fetchWithTimeout } from './http'
 import { createLogger } from './logger'
+import { squidUpstreamOutcomeTotal } from './metrics'
 import { Sentry } from './sentry'
 
 const log = createLogger('lib:squid')
@@ -154,38 +155,60 @@ export async function squidRoute(
   integratorId: string,
 ): Promise<SquidRouteResponse> {
   if (isBreakerOpen()) {
+    squidUpstreamOutcomeTotal.labels({ outcome: 'breaker_open' }).inc()
     throw new SquidUpstreamError(502, undefined, 'circuit breaker open')
   }
-  let res: Response
-  try {
-    res = await fetchWithTimeout(SQUID_ROUTE_URL, {
-      method: 'POST',
-      headers: {
-        'x-integrator-id': integratorId,
-        'Content-Type': 'application/json',
-        accept: 'application/json',
+  return Sentry.startSpan(
+    {
+      name: 'squid.route',
+      op: 'http.client',
+      attributes: {
+        provider: 'squid',
+        fromChain: body.fromChain,
+        toChain: body.toChain,
       },
-      body: JSON.stringify(body),
-    })
-  } catch (err) {
-    recordFailure()
-    throw err
-  }
-  if (!res.ok) {
-    const retryAfter = res.headers.get('retry-after') ?? undefined
-    let bodyHint: string | undefined
-    try {
-      const text = await res.text()
-      bodyHint = text.length > 200 ? `${text.slice(0, 200)}...` : text
-    } catch {
-      // body unreadable; status alone is enough
-    }
-    // 429 is a rate-limit pass-through, not a service outage; do NOT
-    // trip the breaker on it (the caller may retry, or another wallet
-    // may succeed immediately). 5xx counts toward the breaker.
-    if (res.status >= 500) recordFailure()
-    throw new SquidUpstreamError(res.status, retryAfter, bodyHint)
-  }
-  recordSuccess()
-  return (await res.json()) as SquidRouteResponse
+    },
+    async () => {
+      let res: Response
+      try {
+        res = await fetchWithTimeout(SQUID_ROUTE_URL, {
+          method: 'POST',
+          headers: {
+            'x-integrator-id': integratorId,
+            'Content-Type': 'application/json',
+            accept: 'application/json',
+          },
+          body: JSON.stringify(body),
+        })
+      } catch (err) {
+        recordFailure()
+        const errName = err instanceof Error ? err.name : 'unknown'
+        squidUpstreamOutcomeTotal
+          .labels({ outcome: errName === 'AbortError' ? 'timeout' : 'other' })
+          .inc()
+        throw err
+      }
+      if (!res.ok) {
+        const retryAfter = res.headers.get('retry-after') ?? undefined
+        let bodyHint: string | undefined
+        try {
+          const text = await res.text()
+          bodyHint = text.length > 200 ? `${text.slice(0, 200)}...` : text
+        } catch {
+          // body unreadable; status alone is enough
+        }
+        // 429 is a rate-limit pass-through, not a service outage; do NOT
+        // trip the breaker on it (the caller may retry, or another wallet
+        // may succeed immediately). 5xx counts toward the breaker.
+        if (res.status >= 500) recordFailure()
+        const outcome =
+          res.status === 429 ? '429' : res.status >= 500 ? '5xx' : 'other'
+        squidUpstreamOutcomeTotal.labels({ outcome }).inc()
+        throw new SquidUpstreamError(res.status, retryAfter, bodyHint)
+      }
+      recordSuccess()
+      squidUpstreamOutcomeTotal.labels({ outcome: 'ok' }).inc()
+      return (await res.json()) as SquidRouteResponse
+    },
+  )
 }
