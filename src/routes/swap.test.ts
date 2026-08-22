@@ -52,6 +52,7 @@ const USER = '0x3333333333333333333333333333333333333333'
 const USDC = '0xceba9300f2b948710d2653dd7b07f33a8b32118c'
 const USDT = '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e'
 const USDM = '0x765de816845861e75a25fca122bb6898b8b1282a'
+const COPM = '0x8a567e2ae79ca692bd748ab832081c45de4041ea'
 const SWAP_TARGET = '0x1111111111111111111111111111111111111111'
 
 function paramsTo(overrides: Record<string, string> = {}): string {
@@ -384,13 +385,41 @@ describe('GET /api/swap/quote', () => {
     })
   })
 
-  it('returns 502 when upstream returns 5xx (not rate-limit)', async () => {
+  it('returns 502 enriched envelope when upstream returns 5xx (not rate-limit)', async () => {
     fetchSpy.mockResolvedValueOnce(new Response('', { status: 500 }))
 
     const res = await request(app).get('/api/swap/quote?' + paramsTo())
 
     expect(res.status).toBe(502)
-    expect(res.body.error).toBe('squid upstream unavailable')
+    expect(res.body).toMatchObject({
+      error: 'squid_unavailable',
+      message: 'squid upstream unavailable',
+      route: expect.stringMatching(/->/),
+      retry_after_seconds: null,
+    })
+    // fallback_hint may be a string or null depending on pair; both are valid.
+    expect('fallback_hint' in res.body).toBe(true)
+  })
+
+  it('502 envelope suggests USDT fallback_hint for USDC<->COPm', async () => {
+    fetchSpy.mockResolvedValueOnce(new Response('', { status: 502 }))
+    const res = await request(app).get(
+      '/api/swap/quote?' + paramsTo({ sellToken: USDC, buyToken: COPM }),
+    )
+    expect(res.status).toBe(502)
+    expect(res.body.error).toBe('squid_unavailable')
+    expect(res.body.route).toBe('USDC->COPm')
+    expect(res.body.fallback_hint).toBe('USDT')
+  })
+
+  it('502 envelope null fallback_hint for USDT<->COPm (V4 would rescue)', async () => {
+    // V4 shadow flag off so this hits the plain-Squid failure path
+    fetchSpy.mockResolvedValueOnce(new Response('', { status: 502 }))
+    const res = await request(app).get(
+      '/api/swap/quote?' + paramsTo({ sellToken: USDT, buyToken: COPM }),
+    )
+    expect(res.status).toBe(502)
+    expect(res.body.fallback_hint).toBeNull()
   })
 
   it('passes through 429 + Retry-After header when Squid rate-limits us', async () => {
@@ -401,7 +430,9 @@ describe('GET /api/swap/quote', () => {
     const res = await request(app).get('/api/swap/quote?' + paramsTo())
 
     expect(res.status).toBe(429)
-    expect(res.body.error).toMatch(/rate limited/i)
+    expect(res.body.error).toBe('squid_rate_limited')
+    expect(res.body.message).toMatch(/rate limited/i)
+    expect(res.body.retry_after_seconds).toBe(7)
     expect(res.headers['retry-after']).toBe('7')
   })
 
@@ -628,7 +659,12 @@ describe('GET /api/swap/quote', () => {
       const res = await request(app).get('/api/swap/quote?' + usdtCopmParams())
 
       expect(res.status).toBe(502)
-      expect(res.body).toEqual({ error: 'squid upstream unavailable' })
+      // Enriched envelope shipped with the fallback_hint field so the
+      // wallet can render an actionable message; older-shape check
+      // (`{error: 'squid upstream unavailable'}`) was replaced by the
+      // machine-parseable `squid_unavailable` code.
+      expect(res.body.error).toBe('squid_unavailable')
+      expect(res.body.route).toMatch(/->/)
       // Uniswap was still called + comparison log emitted.
       expect(mockGetUniswapV4Quote).toHaveBeenCalledTimes(1)
     })
