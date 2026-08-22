@@ -736,13 +736,116 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
       })
       return res.json(payload)
     }
-    if (err instanceof SquidUpstreamError && err.status === 429) {
-      if (err.retryAfter) res.setHeader('Retry-After', err.retryAfter)
-      return res.status(429).json({ error: 'rate limited by squid, retry' })
+    // Enriched error envelope for /api/swap/quote when Squid fails and no
+    // V4 fallback rescued the request. Machine-parseable fields so the
+    // wallet can (a) render an actionable message ("cambio a USDC no
+    // disponible, prueba USDT"), (b) know how long to wait before retry,
+    // (c) suggest an alternative pair when one exists (currently only
+    // USDT<->COPm has V4 fallback per the 2026-08-22 on-chain probe of
+    // USDC-COPm and USDm-COPm which have no V4 pool AND drained V3 pools).
+    // Fields intentionally NEVER leak internal detail (no "circuit breaker
+    // open" string, no upstream 5xx body echoes).
+    const errorEnvelope = buildSwapErrorEnvelope({
+      status: err instanceof SquidUpstreamError ? err.status : 502,
+      retryAfter: err instanceof SquidUpstreamError ? err.retryAfter : undefined,
+      sellToken: input.sellToken,
+      buyToken: input.buyToken,
+    })
+    if (errorEnvelope.retryAfterSeconds) {
+      res.setHeader('Retry-After', String(errorEnvelope.retryAfterSeconds))
     }
-    res.status(502).json({ error: 'squid upstream unavailable' })
+    return res.status(errorEnvelope.httpStatus).json(errorEnvelope.body)
   }
 })
+
+// Enriched-error envelope builder. Pure function so it can be unit tested
+// independently of the whole swap handler. Emitted only on the failure
+// path (successful quotes never reach this code); returned body carries
+// stable fields the wallet renderer keys off:
+//   - `error`: machine-parseable code ('squid_unavailable' | 'squid_rate_limited')
+//   - `message`: english fallback for older wallets that render `error` verbatim
+//   - `route`: the pair the request tried (e.g. "USDT->COPm")
+//   - `fallback_hint`: alternative pair the wallet can suggest to the user
+//     that has a V4 fallback (only USDT<->COPm today; null for other pairs)
+//   - `retry_after_seconds`: null when the upstream did not send Retry-After
+function buildSwapErrorEnvelope(input: {
+  status: number
+  retryAfter: string | undefined
+  sellToken: string
+  buyToken: string
+}): {
+  httpStatus: number
+  retryAfterSeconds: number | null
+  body: Record<string, unknown>
+} {
+  const isRateLimit = input.status === 429
+  const routeLabel = pairLabel(input.sellToken, input.buyToken)
+  const fallbackHint = suggestFallbackPair(input.sellToken, input.buyToken)
+  const retryAfterSeconds = parseRetryAfterSeconds(input.retryAfter)
+  return {
+    httpStatus: isRateLimit ? 429 : 502,
+    retryAfterSeconds,
+    body: {
+      error: isRateLimit ? 'squid_rate_limited' : 'squid_unavailable',
+      message: isRateLimit
+        ? 'rate limited by squid, retry'
+        : 'squid upstream unavailable',
+      route: routeLabel,
+      fallback_hint: fallbackHint,
+      retry_after_seconds: retryAfterSeconds,
+    },
+  }
+}
+
+// Cross-check the ONLY pair TuCop currently has V4 fallback for
+// (USDT<->COPm) and suggest it as an alternative when the requested pair
+// is broken AND involves COPm. Any other pair returns null (no viable
+// same-side alternative in the current AMM landscape on Celo). The
+// wallet renderer decides whether to show the hint to the user.
+function suggestFallbackPair(sellToken: string, buyToken: string): string | null {
+  const sell = sellToken.toLowerCase()
+  const buy = buyToken.toLowerCase()
+  const USDT = '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e'
+  const USDC = '0xceba9300f2b948710d2653dd7b07f33a8b32118c'
+  const USDM = '0x765de816845861e75a25fca122bb6898b8b1282a'
+  const COPM = '0x8a567e2ae79ca692bd748ab832081c45de4041ea'
+  // Requested pair already has V4 fallback: no hint (V4 would have
+  // rescued if it had a valid quote).
+  if ((sell === USDT && buy === COPM) || (sell === COPM && buy === USDT)) {
+    return null
+  }
+  // COPm to/from USDC or USDm: suggest USDT as the V4-covered leg.
+  if (
+    (buy === COPM && (sell === USDC || sell === USDM)) ||
+    (sell === COPM && (buy === USDC || buy === USDM))
+  ) {
+    return 'USDT'
+  }
+  return null
+}
+
+function pairLabel(sellToken: string, buyToken: string): string {
+  const label = (t: string): string => {
+    const lower = t.toLowerCase()
+    if (lower === '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e') return 'USDT'
+    if (lower === '0xceba9300f2b948710d2653dd7b07f33a8b32118c') return 'USDC'
+    if (lower === '0x765de816845861e75a25fca122bb6898b8b1282a') return 'USDm'
+    if (lower === '0x8a567e2ae79ca692bd748ab832081c45de4041ea') return 'COPm'
+    if (lower === '0x471ece3750da237f93b8e339c536989b8978a438') return 'CELO'
+    return t.slice(0, 8)
+  }
+  return `${label(sellToken)}->${label(buyToken)}`
+}
+
+// Parse HTTP Retry-After header value. Squid sends either delta-seconds
+// (integer) or HTTP-date; only the integer form is common in practice.
+// Returns null when the header is absent or unparseable.
+function parseRetryAfterSeconds(raw: string | undefined): number | null {
+  if (!raw) return null
+  const n = Number(raw)
+  if (Number.isFinite(n) && n > 0 && n < 3600) return Math.floor(n)
+  return null
+}
 
 // Structured shadow log emitted at WARN level (INFO is noop'd in prod, see
 // logger.ts). One line per USDT<->COPm quote request when the fallback flag
