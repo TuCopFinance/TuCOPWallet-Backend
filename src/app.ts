@@ -73,14 +73,78 @@ app.use((req, _res, next) => {
   // Per-request Sentry scope enrichment. Any captureException /
   // captureMessage fired downstream (including the auto-captured
   // unhandled errors via setupExpressErrorHandler at the bottom of this
-  // file) inherits these tags for filtering/grouping. Keeps route
-  // + method visible without touching each handler.
-  Sentry.getCurrentScope().setTags({
+  // file) inherits these tags + context for filtering/grouping.
+  //
+  // `http.route` uses `req.path` because Express only resolves the route
+  // template AFTER the handler runs; setting the tag here avoids
+  // touching every route. Cardinality is bounded by the static route
+  // set (24 endpoints) except for the Blockscout proxy which embeds a
+  // tx hash. The proxy path is normalized below to keep tag cardinality
+  // low: `/api/v2/transactions/0xabc...` collapses to
+  // `/api/v2/transactions/:hash`, likewise for the two other v2 param
+  // paths. Wallet address, tx hash, and full unnormalised URL still
+  // live in `request` context so per-user drill-down works from the
+  // issue detail sidebar.
+  const scope = Sentry.getCurrentScope()
+  scope.setTags({
     'http.method': req.method,
-    'http.route': req.path,
+    'http.route': normalizeRouteForTag(req.path),
+  })
+  const walletAddress = extractWalletAddress(req)
+  scope.setContext('request', {
+    path: req.path,
+    query: req.query,
+    walletAddress,
   })
   next()
 })
+
+// Route templates for endpoints that embed dynamic segments; used to
+// collapse Sentry `http.route` cardinality so the tag store does not
+// explode. Extend as new dynamic routes ship. Order matters (first hit
+// wins) so more-specific patterns must come first when they share a
+// prefix.
+const DYNAMIC_ROUTE_PATTERNS: ReadonlyArray<[RegExp, string]> = [
+  [/^\/api\/v2\/transactions\/0x[0-9a-fA-F]+$/, '/api/v2/transactions/:hash'],
+  [/^\/api\/v2\/addresses\/0x[0-9a-fA-F]+\/transactions$/, '/api/v2/addresses/:address/transactions'],
+  [/^\/api\/v2\/addresses\/0x[0-9a-fA-F]+\/token-transfers$/, '/api/v2/addresses/:address/token-transfers'],
+  [/^\/tokens\/[A-Za-z0-9._-]+$/, '/tokens/:filename'],
+  [/^\/assets\/neeru\/category-\d+\.png$/, '/assets/neeru/category-N.png'],
+]
+
+function normalizeRouteForTag(path: string): string {
+  for (const [re, template] of DYNAMIC_ROUTE_PATTERNS) {
+    if (re.test(path)) return template
+  }
+  return path
+}
+
+// Best-effort wallet address extraction from common request shapes.
+// Sentry sidebar surfaces this via the `request` context so operators
+// can drill into every issue by userAddress = 0x... across the whole
+// backend. Prefers query > body > params in that order.
+function extractWalletAddress(
+  req: { query?: unknown; body?: unknown; params?: unknown },
+): string | undefined {
+  const HEX_ADDR = /^0x[a-fA-F0-9]{40}$/
+  const candidates: unknown[] = []
+  const q = req.query as Record<string, unknown> | undefined
+  if (q) {
+    candidates.push(q.address, q.userAddress, q.from, q.owner)
+  }
+  const b = req.body as Record<string, unknown> | undefined
+  if (b) {
+    candidates.push(b.address, b.userAddress, b.from)
+  }
+  const p = req.params as Record<string, unknown> | undefined
+  if (p) {
+    candidates.push(p.address)
+  }
+  for (const c of candidates) {
+    if (typeof c === 'string' && HEX_ADDR.test(c)) return c.toLowerCase()
+  }
+  return undefined
+}
 
 // Retry-After on 503s. Wraps res.status so that when a handler down the
 // chain sets a 503 (dependency down, feature gated off, upstream 503
