@@ -3,6 +3,11 @@
 import { initSentry } from './lib/sentry'
 initSentry()
 
+// Statsig backend SDK is initialised at boot too (fire-and-forget, awaited
+// below inside `boot()` before the app starts listening). Placed here so
+// any init error surfaces via Sentry.
+import { initStatsig, shutdownStatsig } from './lib/statsig'
+
 // Typed env validation runs BEFORE any other import that reads env at module
 // load time. parseEnv() throws a multi-issue error if any required var is
 // missing or any var is malformed; we exit non-zero so a misconfigured
@@ -76,6 +81,13 @@ if (blockscoutBaseUrl) {
 }
 
 async function boot(): Promise<void> {
+  // Statsig backend SDK. Awaited so gate checks (when we start using them)
+  // are synchronous local reads by the time the app starts listening. No-op
+  // when STATSIG_SERVER_SECRET is unset. Non-fatal on failure (logged via
+  // internal error path); the app still starts, checkGate returns false,
+  // logEvent no-ops.
+  await initStatsig()
+
   if (env.DATABASE_URL && env.DATABASE_URL !== 'disabled') {
     try {
       const result = await runMigrations()
@@ -105,6 +117,12 @@ async function boot(): Promise<void> {
     process.once(sig, () => {
       log.info(`${sig} received; aborting indexer + draining`)
       indexerAbort.abort()
+      // Flush buffered Statsig events before Railway kills the container.
+      // Fire-and-forget: if shutdown takes longer than the Railway drain
+      // window we just lose in-flight events, which is fine.
+      shutdownStatsig().catch((err) => {
+        log.warn(`shutdownStatsig failed: ${err instanceof Error ? err.message : String(err)}`)
+      })
     })
   }
 

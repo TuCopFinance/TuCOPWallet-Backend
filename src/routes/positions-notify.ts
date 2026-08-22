@@ -5,6 +5,7 @@ import { NEERU_DEPOSIT_TOKEN_ADDRESS } from '../hooks-api/config'
 import { CATEGORY_READ_FN_ABI, CONTRACT_ADDRESS } from '../neeru-indexer/abi'
 import { buildProvisionalDeposit } from '../hooks-api/neeru/notify'
 import { createLogger } from '../lib/logger'
+import { logStatsigEvent } from '../lib/statsig'
 
 const router = Router()
 const log = createLogger('routes:positions-notify')
@@ -103,6 +104,11 @@ router.post(
 
     switch (outcome.kind) {
       case 'ok':
+        logStatsigEvent({
+          walletAddress: address.toLowerCase(),
+          event: 'neeru_position_notified',
+          metadata: { txHash: tx },
+        })
         return res.json({ data: outcome.response })
       case 'invalid_body':
         return res.status(400).json({ error: outcome.error })
