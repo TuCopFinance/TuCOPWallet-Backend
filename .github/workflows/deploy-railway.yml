@@ -134,7 +134,6 @@ jobs:
       # a strict 40-hex commit SHA; passed via env: (never interpolated
       # into a shell string) per GH Actions injection-safety guidance.
       - name: Mark Sentry deploy
-        if: ${{ secrets.SENTRY_AUTH_TOKEN != '' }}
         continue-on-error: true
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -143,8 +142,14 @@ jobs:
           SENTRY_RELEASE: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          if [ -z "${SENTRY_ORG:-}" ] || [ -z "${SENTRY_PROJECT:-}" ]; then
-            echo "SENTRY_ORG / SENTRY_PROJECT not set; skipping marker."
+          # Skip cleanly when any Sentry secret is missing. Cannot use
+          # `if: ${{ secrets.X != '' }}` at step level - the `secrets`
+          # context is not available in `if:` expressions, only in
+          # `env:` / `with:` / `run:`. Guarding inside the script keeps
+          # missing secrets = clean skip vs pipeline fail (which is
+          # what tripped the first attempt at this step).
+          if [ -z "${SENTRY_AUTH_TOKEN:-}" ] || [ -z "${SENTRY_ORG:-}" ] || [ -z "${SENTRY_PROJECT:-}" ]; then
+            echo "Sentry secrets (SENTRY_AUTH_TOKEN/ORG/PROJECT) not set; skipping marker."
             exit 0
           fi
           curl -sSL https://sentry.io/get-cli/ | bash
