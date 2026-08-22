@@ -122,3 +122,33 @@ jobs:
             done
           done
           echo "Smoke test passed."
+
+      # Publish a Sentry deploy marker so every chart in the Sentry UI
+      # shows a vertical line at the moment this release went live. Makes
+      # "regression started at deploy X" answerable in one click. Runs
+      # AFTER the smoke test so we only mark deploys we verified serve
+      # traffic. Non-blocking on failure: a missing marker is better than
+      # a failed pipeline.
+      #
+      # Safety: SENTRY_RELEASE comes from workflow_run.head_sha which is
+      # a strict 40-hex commit SHA; passed via env: (never interpolated
+      # into a shell string) per GH Actions injection-safety guidance.
+      - name: Mark Sentry deploy
+        if: ${{ secrets.SENTRY_AUTH_TOKEN != '' }}
+        continue-on-error: true
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+          SENTRY_RELEASE: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SENTRY_ORG:-}" ] || [ -z "${SENTRY_PROJECT:-}" ]; then
+            echo "SENTRY_ORG / SENTRY_PROJECT not set; skipping marker."
+            exit 0
+          fi
+          curl -sSL https://sentry.io/get-cli/ | bash
+          sentry-cli releases new "$SENTRY_RELEASE" || true
+          sentry-cli releases set-commits "$SENTRY_RELEASE" --auto || true
+          sentry-cli releases deploys "$SENTRY_RELEASE" new -e production \
+            || echo "Sentry deploy marker failed (non-fatal)"

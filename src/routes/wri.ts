@@ -12,6 +12,7 @@ import {
   EIP_7702_DELEGATED_CODE_PREFIX,
 } from '../lib/networks'
 import { getRedis } from '../lib/redis'
+import { logStatsigEvent } from '../lib/statsig'
 import { getRelayClients } from '../lib/wriRelay'
 import {
   tryAcquireDelegateRelaySlot,
@@ -368,6 +369,15 @@ router.post('/api/wri/delegate-relay', perIpLimiter, async (req: Request, res: R
     )
     return res.status(502).json({ error: 'relay tx unverified' })
   }
+
+  logStatsigEvent({
+    walletAddress: userAddress.toLowerCase(),
+    event: 'wri_delegate_relay_ok',
+    metadata: {
+      txHash,
+      delegatedTo: BATCH_EXECUTOR_ADDRESS,
+    },
+  })
 
   return res.json({
     status: 'delegated',

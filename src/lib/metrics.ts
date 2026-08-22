@@ -121,6 +121,39 @@ export const transactionsIndexerWatchedAddresses = new Gauge({
   registers: [metricsRegistry],
 })
 
+// Which tier of the price-providers waterfall served a given symbol.
+// Labels: provider (dia|coingecko|cmc|mento|hardcoded), tier (1..5),
+// outcome (ok|skip|error). Grafana stacked-bar shows the live mix so
+// operators see "DIA served 98% today" or "CoinGecko carried the load
+// for 20min at 14:00 when DIA hit the exhausted-skip window".
+export const priceProviderTierUsedTotal = new Counter({
+  name: 'price_provider_tier_used_total',
+  help: 'Price waterfall tier used per symbol resolution',
+  labelNames: ['provider', 'tier', 'outcome'],
+  registers: [metricsRegistry],
+})
+
+// Which endpoint served a Celo RPC call and whether it succeeded. Labels:
+// provider (publicnode|alchemy|forno|blockscout|thirdweb|ankr|drpc|primary|
+// extra-N), outcome (ok|skip|error). Same shape as the price counter so a
+// single Grafana template panel can chart both.
+export const celoRpcEndpointUsedTotal = new Counter({
+  name: 'celo_rpc_endpoint_used_total',
+  help: 'Celo RPC endpoint used per fallback attempt',
+  labelNames: ['provider', 'outcome'],
+  registers: [metricsRegistry],
+})
+
+// Squid upstream outcomes. Labels: outcome (ok|429|5xx|breaker_open|
+// timeout|other). Grafana alert when 5xx or breaker_open rate exceeds
+// baseline.
+export const squidUpstreamOutcomeTotal = new Counter({
+  name: 'squid_upstream_outcome_total',
+  help: 'Squid /v2/route outcomes',
+  labelNames: ['outcome'],
+  registers: [metricsRegistry],
+})
+
 // WRI relay balance gauge. Scraped on /metrics request via an RPC call.
 // Async collect is supported via a sync gauge that stores the last-known
 // value; we update it inside an async helper triggered by the /metrics route

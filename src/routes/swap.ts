@@ -6,6 +6,8 @@ import { createLogger } from '../lib/logger'
 import { NATIVE_TOKEN_SENTINEL, networkIdToChainId } from '../lib/networks'
 import { buildCacheKey } from '../lib/query'
 import { getRedis } from '../lib/redis'
+import { logStatsigEvent } from '../lib/statsig'
+import { Sentry } from '../lib/sentry'
 import {
   squidRoute,
   SquidCollectFees,
@@ -617,6 +619,8 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
     // signal - if it clusters, alert externally).
     if (collectFees) {
       const echoed = upstream.route?.estimate?.appFeePercentageIncludedInPrice
+      const feeMatch =
+        echoed === undefined ? null : Number(echoed) === collectFees.feeValue
       log.warn(
         JSON.stringify({
           event: 'squid_integrator_fee',
@@ -624,7 +628,7 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
           feeType: collectFees.feeType,
           feeValueRequested: collectFees.feeValue,
           feeValueApplied: echoed ?? null,
-          feeMatch: echoed === undefined ? null : Number(echoed) === collectFees.feeValue,
+          feeMatch,
           fromChain: String(input.fromChainId),
           toChain: String(input.toChainId),
           fromToken,
@@ -634,6 +638,30 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
           quoteOnly: input.quoteOnly,
         }),
       )
+      // Data-integrity alert: Squid applied a different percentage than
+      // requested. Alertable because it means the fee-reconciliation math
+      // is off and the recipient balance growth will not match the sum of
+      // logged fees. Fire at warning level so a single mismatch does not
+      // page but a cluster shows up on the tokens dashboard degradation
+      // table (same wiring as tokens_info_unresolved_symbols).
+      if (feeMatch === false) {
+        Sentry.captureMessage('squid_integrator_fee_mismatch', {
+          level: 'warning',
+          tags: {
+            event: 'squid_integrator_fee_mismatch',
+            route: '/api/swap/quote',
+            fromToken,
+            toToken,
+          },
+          extra: {
+            integratorAddress: collectFees.integratorAddress,
+            feeValueRequested: collectFees.feeValue,
+            feeValueApplied: echoed ?? null,
+            fromAmount: input.sellAmount,
+            userAddress: input.userAddress,
+          },
+        })
+      }
     }
 
     try {
@@ -641,6 +669,21 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
     } catch (err) {
       log.warn('redis write failed:', err instanceof Error ? err.message : err)
     }
+
+    logStatsigEvent({
+      walletAddress: input.userAddress,
+      event: 'swap_quote_returned',
+      value: upstream.route?.estimate?.toAmount ?? '0',
+      metadata: {
+        provider: shouldRouteUniswap ? 'uniswap-v4' : 'squid',
+        fromChain: String(input.fromChainId),
+        toChain: String(input.toChainId),
+        sellToken: input.sellToken,
+        buyToken: input.buyToken,
+        sellAmount: input.sellAmount,
+        quoteOnly: input.quoteOnly,
+      },
+    })
 
     res.json(payload)
   } catch (err) {

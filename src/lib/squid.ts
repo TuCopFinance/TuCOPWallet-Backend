@@ -1,5 +1,7 @@
 import { fetchWithTimeout } from './http'
 import { createLogger } from './logger'
+import { squidUpstreamOutcomeTotal } from './metrics'
+import { Sentry } from './sentry'
 
 const log = createLogger('lib:squid')
 
@@ -34,11 +36,27 @@ function isBreakerOpen(): boolean {
 
 function recordFailure(): void {
   breaker.consecutiveFailures += 1
-  if (breaker.consecutiveFailures >= BREAKER_SKIP_AFTER_FAILURES) {
+  if (breaker.consecutiveFailures === BREAKER_SKIP_AFTER_FAILURES) {
+    // First-cross: fire ONE Sentry event per open-window so alerts ring
+    // exactly once when Squid degrades, not per subsequent short-circuited
+    // request. Recovery resets consecutiveFailures to 0 (via
+    // recordSuccess) and primes the next crossing.
     breaker.skipUntilMs = Date.now() + BREAKER_SKIP_DURATION_MS
     log.warn(
       `squid circuit breaker open for ${BREAKER_SKIP_DURATION_MS}ms after ${breaker.consecutiveFailures} consecutive failures`,
     )
+    Sentry.captureMessage('squid_breaker_opened', {
+      level: 'error',
+      tags: {
+        event: 'squid_breaker_opened',
+        provider: 'squid',
+      },
+      extra: {
+        consecutiveFailures: breaker.consecutiveFailures,
+        skipDurationMs: BREAKER_SKIP_DURATION_MS,
+        skipUntilMs: breaker.skipUntilMs,
+      },
+    })
   }
 }
 
@@ -137,38 +155,60 @@ export async function squidRoute(
   integratorId: string,
 ): Promise<SquidRouteResponse> {
   if (isBreakerOpen()) {
+    squidUpstreamOutcomeTotal.labels({ outcome: 'breaker_open' }).inc()
     throw new SquidUpstreamError(502, undefined, 'circuit breaker open')
   }
-  let res: Response
-  try {
-    res = await fetchWithTimeout(SQUID_ROUTE_URL, {
-      method: 'POST',
-      headers: {
-        'x-integrator-id': integratorId,
-        'Content-Type': 'application/json',
-        accept: 'application/json',
+  return Sentry.startSpan(
+    {
+      name: 'squid.route',
+      op: 'http.client',
+      attributes: {
+        provider: 'squid',
+        fromChain: body.fromChain,
+        toChain: body.toChain,
       },
-      body: JSON.stringify(body),
-    })
-  } catch (err) {
-    recordFailure()
-    throw err
-  }
-  if (!res.ok) {
-    const retryAfter = res.headers.get('retry-after') ?? undefined
-    let bodyHint: string | undefined
-    try {
-      const text = await res.text()
-      bodyHint = text.length > 200 ? `${text.slice(0, 200)}...` : text
-    } catch {
-      // body unreadable; status alone is enough
-    }
-    // 429 is a rate-limit pass-through, not a service outage; do NOT
-    // trip the breaker on it (the caller may retry, or another wallet
-    // may succeed immediately). 5xx counts toward the breaker.
-    if (res.status >= 500) recordFailure()
-    throw new SquidUpstreamError(res.status, retryAfter, bodyHint)
-  }
-  recordSuccess()
-  return (await res.json()) as SquidRouteResponse
+    },
+    async () => {
+      let res: Response
+      try {
+        res = await fetchWithTimeout(SQUID_ROUTE_URL, {
+          method: 'POST',
+          headers: {
+            'x-integrator-id': integratorId,
+            'Content-Type': 'application/json',
+            accept: 'application/json',
+          },
+          body: JSON.stringify(body),
+        })
+      } catch (err) {
+        recordFailure()
+        const errName = err instanceof Error ? err.name : 'unknown'
+        squidUpstreamOutcomeTotal
+          .labels({ outcome: errName === 'AbortError' ? 'timeout' : 'other' })
+          .inc()
+        throw err
+      }
+      if (!res.ok) {
+        const retryAfter = res.headers.get('retry-after') ?? undefined
+        let bodyHint: string | undefined
+        try {
+          const text = await res.text()
+          bodyHint = text.length > 200 ? `${text.slice(0, 200)}...` : text
+        } catch {
+          // body unreadable; status alone is enough
+        }
+        // 429 is a rate-limit pass-through, not a service outage; do NOT
+        // trip the breaker on it (the caller may retry, or another wallet
+        // may succeed immediately). 5xx counts toward the breaker.
+        if (res.status >= 500) recordFailure()
+        const outcome =
+          res.status === 429 ? '429' : res.status >= 500 ? '5xx' : 'other'
+        squidUpstreamOutcomeTotal.labels({ outcome }).inc()
+        throw new SquidUpstreamError(res.status, retryAfter, bodyHint)
+      }
+      recordSuccess()
+      squidUpstreamOutcomeTotal.labels({ outcome: 'ok' }).inc()
+      return (await res.json()) as SquidRouteResponse
+    },
+  )
 }
