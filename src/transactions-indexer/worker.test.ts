@@ -1,4 +1,4 @@
-import { ingestRange, type IndexerRpcClient } from './worker'
+import { computeTickWindow, HEAD_LAG_BUFFER_BLOCKS, ingestRange, type IndexerRpcClient } from './worker'
 
 const ERC20_TRANSFER_TOPIC0 =
   '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
@@ -233,5 +233,54 @@ describe('ingestRange', () => {
 
     expect(result.txCount).toBe(0)
     expect(queries.filter((q) => q.sql.trim().toUpperCase().startsWith('INSERT')).length).toBe(0)
+  })
+})
+
+describe('computeTickWindow', () => {
+  it('returns null when the reported tip has already caught up to the cursor', () => {
+    // tip==last -> nothing new to ingest
+    expect(
+      computeTickWindow({ tip: 100n, lastProcessed: 100n, maxBlocksPerTick: 500 }),
+    ).toBeNull()
+  })
+
+  it('returns null when the only unprocessed block is the reported tip itself (head-lag guard)', () => {
+    // tip = last + 1. Without the buffer we would query getLogs for a block
+    // the next-picked provider may not have seen yet ("block range extends
+    // beyond current head block"). The default 1-block buffer collapses this
+    // case to null; the next tick catches up once the tip advances.
+    expect(
+      computeTickWindow({ tip: 101n, lastProcessed: 100n, maxBlocksPerTick: 500 }),
+    ).toBeNull()
+  })
+
+  it('trails one block behind reported tip when the range is wider than the buffer', () => {
+    // tip - buffer = safeTip = 199. from = last + 1. target = safeTip.
+    expect(
+      computeTickWindow({ tip: 200n, lastProcessed: 100n, maxBlocksPerTick: 500 }),
+    ).toEqual({ from: 101n, target: 199n })
+  })
+
+  it('caps the target at lastProcessed + maxBlocksPerTick', () => {
+    // safeTip = 999 but maxBlocksPerTick = 10, so target is capped at 110.
+    expect(
+      computeTickWindow({ tip: 1000n, lastProcessed: 100n, maxBlocksPerTick: 10 }),
+    ).toEqual({ from: 101n, target: 110n })
+  })
+
+  it('honors a custom headLagBuffer of 0 (opt-out for tests that emulate a single-provider environment)', () => {
+    // With buffer=0 the previous behavior is preserved (tip is the target).
+    expect(
+      computeTickWindow({
+        tip: 101n,
+        lastProcessed: 100n,
+        maxBlocksPerTick: 500,
+        headLagBuffer: 0n,
+      }),
+    ).toEqual({ from: 101n, target: 101n })
+  })
+
+  it('exports the default buffer as 1n (guards against silent widening of the lag)', () => {
+    expect(HEAD_LAG_BUFFER_BLOCKS).toBe(1n)
   })
 })
