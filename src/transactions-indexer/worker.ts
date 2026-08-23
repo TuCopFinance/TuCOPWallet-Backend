@@ -24,6 +24,36 @@ const DEFAULT_GENESIS_OFFSET = 25
 // After this many consecutive tick failures escalate the log line so operator
 // monitoring can page on a stuck indexer vs transient RPC blips.
 const ERROR_ESCALATION_THRESHOLD = 5
+// Trail this many blocks behind the reported head when planning the tick
+// window. Motivation: `getBlockNumber` and `getLogs` may hit different
+// endpoints via the fallback executor, and providers are not perfectly
+// synced (~1-block skew is normal). Without a buffer, we routinely ask for
+// blocks the second endpoint has not seen yet, causing "block range extends
+// beyond current head block" 400s across the whole fallback chain (2026-08-22
+// noise sweep on prod). The next tick would catch up 500ms later, so the
+// only cost of the buffer is a matching ~500ms of extra indexer lag, which
+// is invisible to the wallet feed. Matches the neeru-indexer's
+// `REORG_BUFFER_BLOCKS` defensive pattern.
+export const HEAD_LAG_BUFFER_BLOCKS = 1n
+
+// Pure planner for the tick window. Extracted so the head-lag guard is
+// unit-testable independent of the tick loop / RPC / DB. Returns null when
+// there is nothing safe to ingest this tick (safeTip already caught up to
+// the cursor). Cap enforces `maxBlocksPerTick` to bound per-tick RPC work.
+export function computeTickWindow(input: {
+  tip: bigint
+  lastProcessed: bigint
+  maxBlocksPerTick: number
+  headLagBuffer?: bigint
+}): { from: bigint; target: bigint } | null {
+  const buffer = input.headLagBuffer ?? HEAD_LAG_BUFFER_BLOCKS
+  const safeTip = input.tip > buffer ? input.tip - buffer : 0n
+  if (safeTip <= input.lastProcessed) return null
+  const cap = input.lastProcessed + BigInt(input.maxBlocksPerTick)
+  const target = safeTip < cap ? safeTip : cap
+  const from = input.lastProcessed + 1n
+  return { from, target }
+}
 
 // Classify an RPC error message into a stable tag value. Keeps Sentry
 // grouping meaningful when the raw error string varies (different tx
@@ -540,21 +570,26 @@ export async function startIndexer(
         lastKnownTip = tip
         // Refresh observability gauges on every tick whether or not we end up
         // doing work; /metrics scrapes between health route calls read these.
-        // Cheap in-process gauge sets, no I/O.
+        // Cheap in-process gauge sets, no I/O. Lag gauge tracks raw distance
+        // to reported head (not safe-tip) so operators see the actual lag,
+        // including the intentional HEAD_LAG_BUFFER_BLOCKS.
         transactionsIndexerWatchedAddresses
           .labels({ network_id: NETWORK_ID })
           .set(watched.size)
         transactionsIndexerLagBlocks
           .labels({ network_id: NETWORK_ID })
           .set(tip > last ? Number(tip - last) : 0)
-        if (tip <= last) {
+
+        const window = computeTickWindow({
+          tip,
+          lastProcessed: last,
+          maxBlocksPerTick,
+        })
+        if (window === null) {
           consecutiveErrors = 0
           continue
         }
-
-        const cap = last + BigInt(maxBlocksPerTick)
-        const target = tip < cap ? tip : cap
-        const from = last + 1n
+        const { from, target } = window
         lastAttemptFromBlock = from
         lastAttemptToBlock = target
 
