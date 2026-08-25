@@ -3,6 +3,7 @@ import {
   CONTRACT_ADDRESS,
   READ_ABI as INDEXER_READ_ABI,
 } from '../../neeru-indexer/abi'
+import { isNeeruCategory } from '../../neeru-indexer/parser'
 import type { NeeruIndexerRpcClient } from '../../neeru-indexer/rpc'
 import { getIndexerState } from '../../neeru-indexer/state'
 import { decimalString } from '../../lib/decimal'
@@ -155,7 +156,7 @@ export async function getNeeruPositionDetail(
 
   const distinctCategories = new Set<number>()
   for (const row of rows) {
-    if (row.category === 0 || row.category === 1 || row.category === 2 || row.category === 3) {
+    if (isNeeruCategory(row.category)) {
       distinctCategories.add(row.category)
     }
   }

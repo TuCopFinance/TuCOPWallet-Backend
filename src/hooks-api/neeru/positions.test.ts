@@ -22,6 +22,8 @@ const RATE_A = BigInt(Math.round(1e27 * 1.0001))
 const RATE_B = BigInt(Math.round(1e27 * 1.0003))
 const RATE_C = BigInt(Math.round(1e27 * 1.0005))
 const RATE_D = BigInt(Math.round(1e27 * 1.0007))
+const RATE_E = BigInt(Math.round(1e27 * 1.0009))
+const RATE_F = BigInt(Math.round(1e27 * 1.0011))
 
 interface FakeRpcOpts {
   catReadReturns: ReadonlyArray<readonly [bigint, bigint, bigint, bigint]>
@@ -53,17 +55,10 @@ function buildFakeRpc(opts: FakeRpcOpts): {
     }) => {
       multicallCalls.push({ contracts: args.contracts })
       if (
-        args.contracts.length === 6 &&
+        args.contracts.length === opts.catReadReturns.length + 2 &&
         args.contracts[0]?.functionName === 'tranches'
       ) {
-        return [
-          opts.catReadReturns[0],
-          opts.catReadReturns[1],
-          opts.catReadReturns[2],
-          opts.catReadReturns[3],
-          decimals,
-          symbol,
-        ]
+        return [...opts.catReadReturns, decimals, symbol]
       }
       if (args.contracts[0]?.functionName === 'previewAccruedInterest') {
         return args.contracts.map((call) => {
@@ -121,9 +116,11 @@ describe('getNeeruEarnPositions', () => {
     catReadTuple({ r0: RATE_B, r1: BigInt(7 * 86_400), r2: 200_000n * 10n ** 18n }),
     catReadTuple({ r0: RATE_C, r1: BigInt(14 * 86_400), r2: 300_000n * 10n ** 18n }),
     catReadTuple({ r0: RATE_D, r1: BigInt(21 * 86_400), r2: 400_000n * 10n ** 18n }),
+    catReadTuple({ r0: RATE_E, r1: BigInt(35 * 86_400), r2: 500_000n * 10n ** 18n }),
+    catReadTuple({ r0: RATE_F, r1: BigInt(70 * 86_400), r2: 600_000n * 10n ** 18n }),
   ] as const
 
-  it('returns 4 EarnPositions with balance="0" when no address provided', async () => {
+  it('returns 6 EarnPositions with balance="0" when no address provided', async () => {
     const { rpc, multicallCalls } = buildFakeRpc({ catReadReturns })
     const { db } = buildFakeDb([])
 
@@ -131,7 +128,7 @@ describe('getNeeruEarnPositions', () => {
       db: db as never,
       rpc,
     })
-    expect(positions).toHaveLength(4)
+    expect(positions).toHaveLength(6)
     for (const p of positions) {
       expect(p.appId).toBe('neeru-vaults')
       expect(p.appName).toBe('Neeru Vaults')
@@ -198,7 +195,7 @@ describe('getNeeruEarnPositions', () => {
       db: db as never,
       rpc,
     })
-    expect(positions).toHaveLength(4)
+    expect(positions).toHaveLength(6)
 
     expect(positions[0]?.balance).toBe('0')
     expect(positions[1]?.balance).toBe('88')
@@ -249,7 +246,7 @@ describe('getNeeruEarnPositions', () => {
     const RAY_LITERAL = 10n ** 27n
     const noYield = catReadTuple({ r0: RAY_LITERAL, r1: 0n, r2: 0n })
     const { rpc } = buildFakeRpc({
-      catReadReturns: [noYield, noYield, noYield, noYield],
+      catReadReturns: [noYield, noYield, noYield, noYield, noYield, noYield],
     })
     const { db } = buildFakeDb([])
 
@@ -337,6 +334,8 @@ describe('getNeeruHeldPositions', () => {
       catReadTuple({ r0: RATE_B, r1: BigInt(7 * 86_400), r2: 0n }),
       catReadTuple({ r0: RATE_C, r1: BigInt(14 * 86_400), r2: 0n }),
       catReadTuple({ r0: RATE_D, r1: BigInt(21 * 86_400), r2: 0n }),
+      catReadTuple({ r0: RATE_E, r1: BigInt(35 * 86_400), r2: 0n }),
+      catReadTuple({ r0: RATE_F, r1: BigInt(70 * 86_400), r2: 0n }),
     ] as const
 
     const { rpc } = buildFakeRpc({

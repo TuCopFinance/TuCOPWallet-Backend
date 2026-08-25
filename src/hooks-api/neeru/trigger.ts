@@ -34,7 +34,7 @@ const log = createLogger('hooks-api:neeru:trigger')
 const NETWORK_ID: NetworkId = 'celo-mainnet'
 const RAY = 10n ** 27n
 const TOKEN_INFO_TTL_MS = 30_000
-const VALID_CATEGORIES: ReadonlySet<number> = new Set([0, 1, 2, 3])
+const VALID_CATEGORIES: ReadonlySet<number> = new Set([0, 1, 2, 3, 4, 5])
 const POSITION_ID_RE = /^\d+$/
 
 // Selector -> reason mapping used when a simulation-first close call
