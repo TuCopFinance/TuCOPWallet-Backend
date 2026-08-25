@@ -42,7 +42,7 @@ export function assertHooksApiConfig(): void {
   }
 }
 
-export function categoryImageUrl(category: 0 | 1 | 2 | 3 | 4 | 5): string {
+export function categoryImageUrl(category: number): string {
   if (!NEERU_CATEGORY_IMAGE_URL_TEMPLATE) return ''
   return NEERU_CATEGORY_IMAGE_URL_TEMPLATE.replace('{N}', String(category))
 }

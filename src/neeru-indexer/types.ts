@@ -1,4 +1,8 @@
-export type NeeruCategory = 0 | 1 | 2 | 3 | 4 | 5
+// Widened from a literal union to `number` so future on-chain tranche
+// additions do not require a source edit. The indexer parser enforces a
+// uint8 range (0..255) at runtime; downstream consumers use `Number`
+// arithmetic uniformly.
+export type NeeruCategory = number
 
 export interface NeeruPosition {
   positionId: bigint

@@ -5,6 +5,7 @@ import { decimalString } from '../../lib/decimal'
 import { createLogger } from '../../lib/logger'
 import { fetchSingleTokenPrice } from '../../lib/priceProviders'
 import {
+  CATEGORY_COUNT_FN_ABI,
   ERC20_READ_ABI,
   HOOKS_READ_ABI,
   PREVIEW_ACCRUED_INTEREST_FN_ABI,
@@ -26,8 +27,16 @@ const NETWORK_ID: NetworkId = 'celo-mainnet'
 const APP_NAME = 'Neeru Vaults'
 const SECONDS_PER_DAY = 86_400
 const RAY = 10n ** 27n
-const CATEGORIES = [0, 1, 2, 3, 4, 5] as const
-type Category = (typeof CATEGORIES)[number]
+// Category ids are discovered at runtime from the on-chain TRANCHE_COUNT()
+// view function rather than being hardcoded. The type is intentionally
+// widened to `number` because the true upper bound lives in the contract.
+// See fetchCatalogue for the discovery flow and the env fallback.
+type Category = number
+
+// Guard against a corrupt or malicious TRANCHE_COUNT() return so a bad RPC
+// response can not force the backend to allocate an unbounded call array.
+// The cap sits well above the current set (6) with room for organic growth.
+const CATEGORY_COUNT_MAX = 32
 
 interface CategoryRead {
   r0: bigint
@@ -181,18 +190,29 @@ async function fetchCatalogue(
     return catalogueCache
   }
 
+  // Discover how many categories the deployed contract exposes. Reading
+  // the count from the chain avoids a source-code literal that has to be
+  // bumped every time governance appends a tranche. If the call reverts
+  // (older impl that predates TRANCHE_COUNT) fall back to the env
+  // NEERU_CATEGORY_COUNT override; without either signal we refuse to
+  // serve a stale catalogue.
+  const categoryCount = await resolveCategoryCount(deps.rpc)
+
   type AnyCall = {
     address: `0x${string}`
     abi: readonly unknown[]
     functionName: string
     args: readonly unknown[]
   }
-  const categoryCalls: AnyCall[] = CATEGORIES.map((c) => ({
-    address: CONTRACT_ADDRESS,
-    abi: HOOKS_READ_ABI as unknown as readonly unknown[],
-    functionName: 'tranches',
-    args: [c] as const,
-  }))
+  const categoryCalls: AnyCall[] = []
+  for (let i = 0; i < categoryCount; i++) {
+    categoryCalls.push({
+      address: CONTRACT_ADDRESS,
+      abi: HOOKS_READ_ABI as unknown as readonly unknown[],
+      functionName: 'tranches',
+      args: [i] as const,
+    })
+  }
   const tokenCalls: AnyCall[] = [
     {
       address: NEERU_DEPOSIT_TOKEN_ADDRESS,
@@ -217,7 +237,7 @@ async function fetchCatalogue(
   })) as unknown as readonly unknown[]
 
   const categories: CategoryRead[] = []
-  for (let i = 0; i < CATEGORIES.length; i++) {
+  for (let i = 0; i < categoryCount; i++) {
     const raw = results[i] as readonly unknown[]
     categories.push({
       r0: BigInt(raw[0] as bigint | number | string),
@@ -226,8 +246,8 @@ async function fetchCatalogue(
       r3: BigInt(raw[3] as bigint | number | string),
     })
   }
-  const decimals = Number(results[CATEGORIES.length] as number | bigint)
-  const symbol = String(results[CATEGORIES.length + 1] as string)
+  const decimals = Number(results[categoryCount] as number | bigint)
+  const symbol = String(results[categoryCount + 1] as string)
 
   catalogueCache = {
     fetchedAtMs: now(),
@@ -235,6 +255,44 @@ async function fetchCatalogue(
     token: { decimals, symbol },
   }
   return catalogueCache
+}
+
+async function resolveCategoryCount(
+  rpc: NeeruIndexerRpcClient,
+): Promise<number> {
+  const envOverride = process.env.NEERU_CATEGORY_COUNT
+  const envParsed =
+    envOverride != null && envOverride !== ''
+      ? Number(envOverride)
+      : null
+
+  let onChainCount: number | null = null
+  try {
+    const raw = (await rpc.readContract({
+      address: CONTRACT_ADDRESS,
+      abi: [CATEGORY_COUNT_FN_ABI] as const,
+      functionName: 'TRANCHE_COUNT',
+      args: [] as const,
+    })) as bigint
+    onChainCount = Number(raw)
+  } catch (err) {
+    log.warn(
+      `TRANCHE_COUNT() read failed: ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+
+  const resolved = onChainCount ?? envParsed
+  if (resolved == null) {
+    throw new Error(
+      'category count could not be resolved: TRANCHE_COUNT() reverted and NEERU_CATEGORY_COUNT env is not set',
+    )
+  }
+  if (!Number.isInteger(resolved) || resolved < 1 || resolved > CATEGORY_COUNT_MAX) {
+    throw new Error(
+      `invalid category count ${resolved} - expected integer in [1, ${CATEGORY_COUNT_MAX}]`,
+    )
+  }
+  return resolved
 }
 
 // Wire-shaped catalogue for the /api/earn/neeru/catalogue endpoint.
@@ -307,18 +365,19 @@ async function loadOpenRows(
     [address.toLowerCase()],
   )
 
+  // Do not pre-seed the maps against a hardcoded id set: the number of
+  // categories lives on-chain now, so let the DB rows drive population.
+  // Callers use Map.get(id) ?? 0n which handles absent ids uniformly.
   const amountByCategory = new Map<Category, bigint>()
   const openIdsByCategory = new Map<Category, bigint[]>()
-  for (const c of CATEGORIES) {
-    amountByCategory.set(c, 0n)
-    openIdsByCategory.set(c, [])
-  }
   for (const row of rows) {
-    const cat = row.category as Category
-    if (cat !== 0 && cat !== 1 && cat !== 2 && cat !== 3) continue
+    const cat = row.category
+    if (!Number.isInteger(cat) || cat < 0) continue
     const amountBn = BigInt(row.amount)
     amountByCategory.set(cat, (amountByCategory.get(cat) ?? 0n) + amountBn)
-    openIdsByCategory.get(cat)!.push(BigInt(row.position_id))
+    const ids = openIdsByCategory.get(cat) ?? []
+    ids.push(BigInt(row.position_id))
+    openIdsByCategory.set(cat, ids)
   }
   return { amountByCategory, openIdsByCategory }
 }
@@ -328,7 +387,6 @@ async function fetchAccruedInterest(
   aggregate: UserAggregate,
 ): Promise<Map<Category, bigint>> {
   const accrued = new Map<Category, bigint>()
-  for (const c of CATEGORIES) accrued.set(c, 0n)
 
   type AnyCall = {
     address: `0x${string}`
@@ -337,8 +395,8 @@ async function fetchAccruedInterest(
     args: readonly unknown[]
   }
   const flat: { category: Category; id: bigint }[] = []
-  for (const c of CATEGORIES) {
-    for (const id of aggregate.openIdsByCategory.get(c) ?? []) {
+  for (const [c, ids] of aggregate.openIdsByCategory) {
+    for (const id of ids) {
       flat.push({ category: c, id })
     }
   }
@@ -488,20 +546,21 @@ export async function getNeeruEarnPositions(
     fetchCopmPriceCached(now),
   ])
 
+  const categoryIds = snapshot.categories.map((_, i) => i)
   const balances = new Map<Category, bigint>()
-  for (const c of CATEGORIES) balances.set(c, 0n)
+  for (const c of categoryIds) balances.set(c, 0n)
 
   if (args.address) {
     const aggregate = await loadOpenRows(args.db, args.address)
     const accrued = await fetchAccruedInterest(args.rpc, aggregate)
-    for (const c of CATEGORIES) {
+    for (const c of categoryIds) {
       const amount = aggregate.amountByCategory.get(c) ?? 0n
       const interest = accrued.get(c) ?? 0n
       balances.set(c, amount + interest)
     }
   }
 
-  return CATEGORIES.map((c) =>
+  return categoryIds.map((c) =>
     buildEarnPosition({
       category: c,
       snapshot,
