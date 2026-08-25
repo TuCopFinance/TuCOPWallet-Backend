@@ -26,7 +26,7 @@ const NETWORK_ID: NetworkId = 'celo-mainnet'
 const APP_NAME = 'Neeru Vaults'
 const SECONDS_PER_DAY = 86_400
 const RAY = 10n ** 27n
-const CATEGORIES = [0, 1, 2, 3] as const
+const CATEGORIES = [0, 1, 2, 3, 4, 5] as const
 type Category = (typeof CATEGORIES)[number]
 
 interface CategoryRead {

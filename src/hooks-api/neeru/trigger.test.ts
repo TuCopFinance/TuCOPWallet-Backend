@@ -177,7 +177,7 @@ describe('buildDepositTxs', () => {
     await expect(
       buildDepositTxs({
         address: USER,
-        categoryId: 4,
+        categoryId: 99,
         amount: '10',
         rpc,
       }),

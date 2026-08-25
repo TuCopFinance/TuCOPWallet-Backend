@@ -13,7 +13,9 @@ import type {
 } from './types'
 
 export function isNeeruCategory(value: number): value is NeeruCategory {
-  return value === 0 || value === 1 || value === 2 || value === 3
+  return (
+    Number.isInteger(value) && value >= 0 && value <= 5
+  )
 }
 
 function ensureFullAddress(value: string, label: string): string {
