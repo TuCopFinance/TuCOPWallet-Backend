@@ -71,8 +71,13 @@ function buildFakeRpc(opts: FakeRpcOpts): {
         `unexpected multicall: ${args.contracts[0]?.functionName}`,
       )
     }) as never,
-    readContract: (async () => {
-      throw new Error('readContract not used in hooks-api positions')
+    readContract: (async (params: { functionName: string }) => {
+      if (params.functionName === 'TRANCHE_COUNT') {
+        return BigInt(opts.catReadReturns.length)
+      }
+      throw new Error(
+        `readContract: unexpected functionName ${params.functionName}`,
+      )
     }) as never,
     call: (async () => {
       throw new Error('call not used in hooks-api positions')

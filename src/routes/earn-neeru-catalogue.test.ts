@@ -81,8 +81,11 @@ function buildFakeRpc(): NeeruIndexerRpcClient {
         `unexpected multicall: ${args.contracts[0]?.functionName}`,
       )
     }) as never,
-    readContract: (async () => {
-      throw new Error('readContract not used')
+    readContract: (async (params: { functionName: string }) => {
+      if (params.functionName === 'TRANCHE_COUNT') {
+        return BigInt(CAT_RATES.length)
+      }
+      throw new Error(`readContract: unexpected ${params.functionName}`)
     }) as never,
     call: (async () => {
       throw new Error('call not used')

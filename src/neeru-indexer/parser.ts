@@ -12,10 +12,13 @@ import type {
   NeeruEventWithoutTimestamp,
 } from './types'
 
+// Uint8 range guard. The upper bound comes from the on-chain uint8
+// category id field, not from a source-code literal enumerating known
+// tranches. New categories added by governance become valid without a
+// backend edit; the catalogue fetch discovers the actual count from
+// TRANCHE_COUNT().
 export function isNeeruCategory(value: number): value is NeeruCategory {
-  return (
-    Number.isInteger(value) && value >= 0 && value <= 5
-  )
+  return Number.isInteger(value) && value >= 0 && value <= 255
 }
 
 function ensureFullAddress(value: string, label: string): string {

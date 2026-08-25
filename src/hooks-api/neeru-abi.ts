@@ -65,6 +65,19 @@ export const MIN_DEPOSIT_FN_ABI = {
   outputs: [{ name: '', type: 'uint256' }],
 } as const satisfies AbiFunction
 
+// TRANCHE_COUNT() lets the backend discover how many category indices the
+// deployed contract exposes so the number of tranches lives on-chain
+// instead of as a source-code literal. When the on-chain contract does
+// not expose this fn (older impl or a test double) the caller falls back
+// to a probed default via env NEERU_CATEGORY_COUNT.
+export const CATEGORY_COUNT_FN_ABI = {
+  type: 'function',
+  name: 'TRANCHE_COUNT',
+  stateMutability: 'view',
+  inputs: [],
+  outputs: [{ name: '', type: 'uint256' }],
+} as const satisfies AbiFunction
+
 export const HOOKS_READ_ABI = [
   CATEGORY_READ_FN_ABI,
   PREVIEW_ACCRUED_INTEREST_FN_ABI,
@@ -73,6 +86,7 @@ export const HOOKS_READ_ABI = [
   GLOBAL_TVL_FN_ABI,
   GLOBAL_CAP_FN_ABI,
   MIN_DEPOSIT_FN_ABI,
+  CATEGORY_COUNT_FN_ABI,
 ] as const
 
 // ERC20 view bits the deposit-token resolver needs. Minimal subset to
