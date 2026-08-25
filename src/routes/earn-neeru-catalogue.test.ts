@@ -40,17 +40,23 @@ const TOKEN_SYMBOL = 'COPm'
 
 // Category rates chosen so monthly + annual come out to easy-to-read
 // numbers: flexible ~= 0, others increasing.
-const CAT_RATES: readonly [bigint, bigint, bigint, bigint] = [
-  BigInt(Math.round(1e27 * 1.0000)), // 0: flexible
-  BigInt(Math.round(1e27 * 1.0001)), // 1: 30d
-  BigInt(Math.round(1e27 * 1.0003)), // 2: 60d
-  BigInt(Math.round(1e27 * 1.0005)), // 3: 90d
+const CAT_RATES: readonly bigint[] = [
+  BigInt(Math.round(1e27 * 1.0000)),
+  BigInt(Math.round(1e27 * 1.0001)),
+  BigInt(Math.round(1e27 * 1.0003)),
+  BigInt(Math.round(1e27 * 1.0005)),
+  BigInt(Math.round(1e27 * 1.0007)),
+  BigInt(Math.round(1e27 * 1.0009)),
 ]
-const CAT_SECS: readonly [bigint, bigint, bigint, bigint] = [
+// Synthetic lock windows per cero-exposicion: real values would let a
+// reader cross-reference the on-chain contract.
+const CAT_SECS: readonly bigint[] = [
   0n,
-  BigInt(30 * 86400),
-  BigInt(60 * 86400),
-  BigInt(90 * 86400),
+  BigInt(7 * 86400),
+  BigInt(14 * 86400),
+  BigInt(21 * 86400),
+  BigInt(35 * 86400),
+  BigInt(70 * 86400),
 ]
 
 function buildFakeRpc(): NeeruIndexerRpcClient {
@@ -62,14 +68,11 @@ function buildFakeRpc(): NeeruIndexerRpcClient {
       contracts: ReadonlyArray<{ functionName: string; args: readonly unknown[] }>
     }) => {
       if (
-        args.contracts.length === 6 &&
+        args.contracts.length === CAT_RATES.length + 2 &&
         args.contracts[0]?.functionName === 'tranches'
       ) {
         return [
-          [CAT_RATES[0], CAT_SECS[0], 0n, 0n],
-          [CAT_RATES[1], CAT_SECS[1], 0n, 0n],
-          [CAT_RATES[2], CAT_SECS[2], 0n, 0n],
-          [CAT_RATES[3], CAT_SECS[3], 0n, 0n],
+          ...CAT_RATES.map((r, i) => [r, CAT_SECS[i]!, 0n, 0n] as const),
           TOKEN_DECIMALS,
           TOKEN_SYMBOL,
         ]
@@ -89,7 +92,7 @@ function buildFakeRpc(): NeeruIndexerRpcClient {
 }
 
 describe('GET /api/earn/neeru/catalogue', () => {
-  it('returns the four categories with derived monthly + annual rates', async () => {
+  it('returns all categories with derived monthly + annual rates', async () => {
     const { router, setRpc } = loadFreshRouter({
       NEERU_CONTRACT_ADDRESS: CONTRACT,
       NEERU_DEPOSIT_TOKEN_ADDRESS: DEPOSIT_TOKEN,
@@ -100,18 +103,16 @@ describe('GET /api/earn/neeru/catalogue', () => {
 
     const res = await request(app).get('/api/earn/neeru/catalogue')
     expect(res.status).toBe(200)
-    expect(res.body.data.categories).toHaveLength(4)
-    // IDs 0..3 in order.
-    expect(res.body.data.categories.map((c: { id: number }) => c.id)).toEqual([
-      0, 1, 2, 3,
-    ])
-    // Secs align with lock windows.
-    expect(res.body.data.categories[0].secs).toBe('0')
-    expect(res.body.data.categories[1].secs).toBe(String(30 * 86400))
-    expect(res.body.data.categories[2].secs).toBe(String(60 * 86400))
-    expect(res.body.data.categories[3].secs).toBe(String(90 * 86400))
-    // Rate ray round-trips as string.
-    expect(res.body.data.categories[0].rateRay).toBe(CAT_RATES[0].toString())
+    expect(res.body.data.categories).toHaveLength(CAT_RATES.length)
+    // IDs 0..N in order.
+    expect(res.body.data.categories.map((c: { id: number }) => c.id)).toEqual(
+      CAT_RATES.map((_, i) => i),
+    )
+    // Secs align with the fake's per-category lock windows.
+    for (let i = 0; i < CAT_RATES.length; i++) {
+      expect(res.body.data.categories[i].secs).toBe(CAT_SECS[i]!.toString())
+      expect(res.body.data.categories[i].rateRay).toBe(CAT_RATES[i]!.toString())
+    }
     // Monthly + annual monotonically increase with rate ray.
     const monthly = res.body.data.categories.map(
       (c: { monthlyRatePercentage: number }) => c.monthlyRatePercentage,
@@ -119,7 +120,7 @@ describe('GET /api/earn/neeru/catalogue', () => {
     const annual = res.body.data.categories.map(
       (c: { annualEffectivePercentage: number }) => c.annualEffectivePercentage,
     )
-    for (let i = 1; i < 4; i++) {
+    for (let i = 1; i < CAT_RATES.length; i++) {
       expect(monthly[i]).toBeGreaterThan(monthly[i - 1])
       expect(annual[i]).toBeGreaterThan(annual[i - 1])
     }

@@ -1,4 +1,4 @@
-export type NeeruCategory = 0 | 1 | 2 | 3
+export type NeeruCategory = 0 | 1 | 2 | 3 | 4 | 5
 
 export interface NeeruPosition {
   positionId: bigint
