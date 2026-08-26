@@ -108,6 +108,27 @@ describe('GET /api/tokens/info', () => {
     expect(usdm.name).toBe('Mento Dollar')
   })
 
+  it('Mento-native tokens carry isFeeCurrency:true (USDm + COPm parity)', async () => {
+    // COPm is registered as a direct fee currency in the Celo
+    // FeeCurrencyDirectory (0x15F344B9E6c3Cb6F0376A36A64928b13F62C6276)
+    // alongside USDm; both use direct token address, no adapter. Wallet
+    // filters fee currencies via `isNative || isFeeCurrency ||
+    // feeCurrencyAdapterAddress`, so a missing flag on COPm blocks users
+    // that only hold COPm from paying gas in COPm via CIP-64. Regression
+    // guard for the 2026-08-26 wallet-team parity ask.
+    mockFetchByHost({
+      'api.diadata.org': () => jsonRes({ Symbol: 'MOCK', Price: 1.0 }),
+    })
+    const res = await request(app).get('/api/tokens/info?networkIds=celo-mainnet')
+    const usdm = res.body['celo-mainnet:0x765de816845861e75a25fca122bb6898b8b1282a']
+    const copm = res.body['celo-mainnet:0x8a567e2ae79ca692bd748ab832081c45de4041ea']
+    expect(usdm.isFeeCurrency).toBe(true)
+    expect(copm.isFeeCurrency).toBe(true)
+    // Direct fee currencies (no adapter) — contrast with USDT/USDC.
+    expect(usdm.feeCurrencyAdapterAddress).toBeUndefined()
+    expect(copm.feeCurrencyAdapterAddress).toBeUndefined()
+  })
+
   it('static route /tokens/<file>.png serves the self-hosted PNG', async () => {
     const res = await request(app).get('/tokens/CELO.png')
     expect(res.status).toBe(200)

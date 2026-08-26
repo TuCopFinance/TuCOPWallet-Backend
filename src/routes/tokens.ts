@@ -154,6 +154,15 @@ const CELO_MAINNET_TOKENS: TokenCatalogueEntry[] = [
     name: 'Mento Colombian Peso',
     networkId: 'celo-mainnet',
     isCoreToken: true,
+    // Direct Mento-native fee currency via CIP-64. Registered in the
+    // FeeCurrencyDirectory (0x15F344B9E6c3Cb6F0376A36A64928b13F62C6276)
+    // alongside USDm; both are direct-address fee currencies (no adapter),
+    // in contrast with USDT/USDC which resolve through separate adapters.
+    // Wallet-side wallets that only hold COPm now surface it as a fee
+    // option (previously filtered out by the `isNative || isFeeCurrency ||
+    // feeCurrencyAdapterAddress` check). Added 2026-08-26 per wallet team
+    // parity ask; USDm has always had this flag.
+    isFeeCurrency: true,
     isStableCoin: true,
     isSwappable: true,
     isCashInEligible: true,
