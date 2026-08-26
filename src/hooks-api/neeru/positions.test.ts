@@ -151,7 +151,7 @@ describe('getNeeruEarnPositions', () => {
     expect(positions[3]?.displayProps.title).toBe('21 dias')
 
     expect(positions[0]?.displayProps.description).toBe(
-      'Genera intereses bloqueando tus Pesos por Flexible',
+      'Retira en cualquier momento, sin plazo minimo',
     )
     expect(positions[1]?.displayProps.description).toBe(
       'Genera intereses bloqueando tus Pesos por 7 dias',
