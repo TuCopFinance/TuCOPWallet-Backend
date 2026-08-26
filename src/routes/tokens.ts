@@ -39,6 +39,27 @@ const log = createLogger('routes:tokens')
 // CoinGecko's own `cache-control: max-age=30`.
 const CACHE_TTL_SECONDS = 30
 
+// Per-symbol last-known-good cache. When the waterfall returns no price for
+// a symbol on a given request (transient degradation across every tier),
+// the response backfills from this map so wallet always sees a numeric
+// priceUsd instead of an omitted field. The wallet-side cache also has a
+// last-known-price fallback (2026-08-26 wallet commit 1d56766d7), but that
+// only helps installs that already saw at least one healthy response;
+// fresh installs still hit "-" if the first fetch degrades. This
+// backend-side cache closes that hole. Bounded staleness so a
+// multi-hour outage does not serve a week-old price.
+interface LastKnownPrice {
+  priceUsd: string
+  fetchedAtMs: number
+  source: ProviderName
+}
+const lastKnownPrices = new Map<PriceSymbol, LastKnownPrice>()
+const LAST_KNOWN_MAX_STALE_MS = 24 * 60 * 60 * 1000 // 24h
+
+export function _resetTokensLastKnownPriceCacheForTests(): void {
+  lastKnownPrices.clear()
+}
+
 // Which network slugs the endpoint serves. Today only celo-mainnet. New
 // networks add here + a per-network token catalogue below.
 const SUPPORTED_NETWORK_IDS = new Set(['celo-mainnet'])
@@ -252,6 +273,8 @@ router.get('/api/tokens/info', async (req: Request, res: Response) => {
 
   const body: Record<string, ResponseEntry> = {}
   const providerCount: Partial<Record<ProviderName, number>> = {}
+  const lastKnownServed: PriceSymbol[] = []
+  const nowMs = Date.now()
   for (const t of tokens) {
     const addressForKey = t.address === 'native' ? '0x0' : t.address
     const tokenId = `${t.networkId}:${addressForKey.toLowerCase()}`
@@ -287,12 +310,30 @@ router.get('/api/tokens/info', async (req: Request, res: Response) => {
       entry.priceUsd = priceRow.priceUsd.toString()
       entry.priceFetchedAt = priceRow.fetchedAtMs
       providerCount[priceRow.source] = (providerCount[priceRow.source] ?? 0) + 1
+      // Refresh the last-known cache with the successful fetch. Only bump on
+      // success so a fresh cache entry is always waterfall-quality.
+      lastKnownPrices.set(t.priceSymbol, {
+        priceUsd: priceRow.priceUsd.toString(),
+        fetchedAtMs: priceRow.fetchedAtMs,
+        source: priceRow.source,
+      })
+    } else {
+      // Waterfall miss: fall back to the last-known-good price if we have
+      // one within the max-stale window. The response entry keeps the
+      // original `priceFetchedAt` so the wallet can render "hace X min"
+      // and decide whether to warn the user; nothing in the shape changes.
+      const fallback = lastKnownPrices.get(t.priceSymbol)
+      if (fallback && nowMs - fallback.fetchedAtMs <= LAST_KNOWN_MAX_STALE_MS) {
+        entry.priceUsd = fallback.priceUsd
+        entry.priceFetchedAt = fallback.fetchedAtMs
+        lastKnownServed.push(t.priceSymbol)
+      }
     }
     body[tokenId] = entry
   }
 
   const unresolvedSymbols = wantedSymbols.filter(
-    (s) => !fetchResult.prices.has(s),
+    (s) => !fetchResult.prices.has(s) && !lastKnownServed.includes(s),
   )
   const allUpstreamSkipped = UPSTREAM_PROVIDERS.every((p) =>
     fetchResult.skippedProviders.includes(p),
@@ -301,6 +342,10 @@ router.get('/api/tokens/info', async (req: Request, res: Response) => {
   // Audit log for observability. When the endpoint degrades to a lower tier
   // provider (or misses tokens entirely), the dashboard should reflect it
   // via this signal. Mirrors the swap_quote_comparison log convention.
+  // `lastKnownServed` counts symbols that got a numeric priceUsd from the
+  // in-process fallback rather than a fresh waterfall fetch. Non-empty means
+  // at least one provider tier is degraded but the response still has
+  // priceUsd for those symbols (waterfall degradation transparent to wallet).
   log.warn(
     JSON.stringify({
       event: 'tokens_info_served',
@@ -311,6 +356,7 @@ router.get('/api/tokens/info', async (req: Request, res: Response) => {
       providersSkipped: fetchResult.skippedProviders,
       perProvider: providerCount,
       unresolvedSymbols,
+      lastKnownServed,
     }),
   )
 
@@ -355,6 +401,27 @@ router.get('/api/tokens/info', async (req: Request, res: Response) => {
         perProvider: providerCount,
         tokenCount: tokens.length,
         pricedCount: Object.values(body).filter((e) => e.priceUsd).length,
+      },
+    })
+  }
+  if (lastKnownServed.length > 0) {
+    Sentry.captureMessage('tokens_info_last_known_price_served', {
+      level: 'warning',
+      tags: {
+        event: 'tokens_info_last_known_price_served',
+        route: '/api/tokens/info',
+        network: requested[0] ?? 'unknown',
+        lastKnownCount: String(lastKnownServed.length),
+        // First fallback-served symbol as a tag for per-symbol grouping.
+        firstLastKnownSymbol: lastKnownServed[0] ?? 'unknown',
+      },
+      extra: {
+        networkIds: requested,
+        lastKnownServed,
+        providersUsed: fetchResult.usedProviders,
+        providersSkipped: fetchResult.skippedProviders,
+        perProvider: providerCount,
+        maxStaleMs: LAST_KNOWN_MAX_STALE_MS,
       },
     })
   }

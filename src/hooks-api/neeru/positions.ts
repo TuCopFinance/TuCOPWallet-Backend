@@ -128,6 +128,17 @@ function categoryTitle(secs: bigint): string {
   return `${days} dias`
 }
 
+// Human-readable description surfaced in `displayProps.description`. Split
+// from `categoryTitle` because the fixed-term categories phrase "por N dias"
+// naturally, while the Flex bucket needs a different sentence (users retire
+// on demand, no lock window). Wallet team caught the "por Flexible" template
+// bug on 2026-08-26.
+function categoryDescription(secs: bigint): string {
+  if (secs === 0n) return 'Retira en cualquier momento, sin plazo minimo'
+  const days = Number(secs / BigInt(SECONDS_PER_DAY))
+  return `Genera intereses bloqueando tus Pesos por ${days} dias`
+}
+
 function rpow(base: bigint, exp: number, scale: bigint): bigint {
   let result = scale
   let b = base
@@ -463,7 +474,7 @@ function buildEarnPosition(args: BuildArgs): EarnPosition {
     label: title,
     displayProps: {
       title,
-      description: `Genera intereses bloqueando tus Pesos por ${title}`,
+      description: categoryDescription(categoryRead.r1),
       imageUrl: categoryImageUrl(category),
       manageUrl: NEERU_MANAGE_URL,
     },
