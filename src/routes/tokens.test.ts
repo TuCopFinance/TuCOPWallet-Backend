@@ -1,6 +1,7 @@
 import request from 'supertest'
 import { app } from '../app'
 import { _resetProviderStateForTests } from '../lib/priceProviders'
+import { _resetTokensLastKnownPriceCacheForTests } from './tokens'
 
 const REAL_FETCH = global.fetch
 
@@ -24,6 +25,7 @@ function jsonRes(body: unknown, status = 200): Response {
 
 beforeEach(() => {
   _resetProviderStateForTests()
+  _resetTokensLastKnownPriceCacheForTests()
 })
 
 afterEach(() => {
@@ -115,6 +117,8 @@ describe('GET /api/tokens/info', () => {
   })
 
   it('degraded scenario: DIA down + CoinGecko rate-limited -> hardcoded 1.0 fires for USD-pegged', async () => {
+    // Cache is reset in beforeEach so this test starts with no last-known-good
+    // entries, mirroring the cold-start pathological case.
     mockFetchByHost({
       'api.diadata.org': () => {
         throw new Error('dia down')
@@ -128,10 +132,61 @@ describe('GET /api/tokens/info', () => {
     expect(usdt.priceUsd).toBe('1')
     const usat = res.body['celo-mainnet:0xa2036f0538221a77a3937f1379699f44945018d0']
     expect(usat.priceUsd).toBe('1')
-    // COPm / XAUt have NO hardcoded and stay without priceUsd
+    // COPm / XAUt have NO hardcoded and stay without priceUsd (empty fallback cache)
     const copm = res.body['celo-mainnet:0x8a567e2ae79ca692bd748ab832081c45de4041ea']
     expect(copm.priceUsd).toBeUndefined()
     const xaut = res.body['celo-mainnet:0xaf37e8b6c9ed7f6318979f56fc287d76c30847ff']
     expect(xaut.priceUsd).toBeUndefined()
+  })
+
+  it('last-known-price fallback: second request keeps priceUsd for COPm even when waterfall degrades to nothing', async () => {
+    // Wallet team ask (2026-08-26): make cold-response waterfall miss serve
+    // the last-known-good price instead of an omitted field, so fresh
+    // installs that hit a transient degradation window still see a numeric
+    // priceUsd. Fallback cap is 24h; anything older is dropped.
+    const priceByAddr: Record<string, number> = {
+      '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e': 0.9992,
+      '0xceba9300f2b948710d2653dd7b07f33a8b32118c': 0.9998,
+      '0x765de816845861e75a25fca122bb6898b8b1282a': 1.0001,
+      '0x8a567e2ae79ca692bd748ab832081c45de4041ea': 0.000307,
+      '0x68749665ff8d2d112fa859aa293f07a622782f38': 4357.21,
+      '0x471ece3750da237f93b8e339c536989b8978a438': 0.0642,
+    }
+    // First request: DIA healthy, caches the last-known-good for every symbol.
+    mockFetchByHost({
+      'api.diadata.org': (url) => {
+        const addr = url.pathname.split('/').pop()!.toLowerCase()
+        return jsonRes({ Symbol: 'MOCK', Price: priceByAddr[addr] ?? null })
+      },
+    })
+    const first = await request(app).get('/api/tokens/info?networkIds=celo-mainnet')
+    expect(first.status).toBe(200)
+    const copmFirst = first.body['celo-mainnet:0x8a567e2ae79ca692bd748ab832081c45de4041ea']
+    expect(copmFirst.priceUsd).toBe('0.000307')
+
+    // Second request: DIA down + CoinGecko rate-limited. Without the
+    // fallback, COPm / XAUt would come back with `priceUsd: undefined` (see
+    // the prior test). With the fallback, we get the same string COPm
+    // returned in the first request, plus the ORIGINAL priceFetchedAt.
+    _resetProviderStateForTests() // circuit-breaker reset so waterfall attempts run again
+    mockFetchByHost({
+      'api.diadata.org': () => {
+        throw new Error('dia down')
+      },
+      'api.coingecko.com': () => new Response('rate limited', { status: 429 }),
+    })
+    const second = await request(app).get('/api/tokens/info?networkIds=celo-mainnet')
+    expect(second.status).toBe(200)
+    const copmSecond = second.body['celo-mainnet:0x8a567e2ae79ca692bd748ab832081c45de4041ea']
+    expect(copmSecond.priceUsd).toBe('0.000307')
+    // priceFetchedAt is the ORIGINAL fetch timestamp, so the wallet can
+    // decide whether the price is stale enough to warn the user.
+    expect(copmSecond.priceFetchedAt).toBe(copmFirst.priceFetchedAt)
+    const xautSecond = second.body['celo-mainnet:0xaf37e8b6c9ed7f6318979f56fc287d76c30847ff']
+    expect(xautSecond.priceUsd).toBe('4357.21')
+    // USD-pegged tokens keep the hardcoded 1.0 path; the fallback is
+    // shadowed by the fresh hardcoded fetch.
+    const usdtSecond = second.body['celo-mainnet:0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e']
+    expect(usdtSecond.priceUsd).toBe('1')
   })
 })
