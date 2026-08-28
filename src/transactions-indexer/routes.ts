@@ -10,6 +10,7 @@ import {
 } from '../lib/metrics'
 import { reopenBackfillIfDeeper, triggerBackfill } from './backfill'
 import { classify } from './classifier'
+import { clusterMultiDollarSwaps } from './multiSwapClustering'
 import { enrichTransactionWithLocalAmount } from './priceOracle'
 import type {
   ClassifierLog,
@@ -335,7 +336,11 @@ router.get('/api/transactions/feed', async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'database error' })
   }
 
-  const transactions: TokenTransaction[] = []
+  // Two-pass: first collect the classified txs (may be empty per row,
+  // typically one, occasionally two if the classifier splits). Then
+  // apply multi-swap clustering across the whole page. Enrichment runs
+  // last so the aggregated tx also gets its localAmount populated.
+  const classifiedAll: TokenTransaction[] = []
   for (const row of rows.slice(0, pageSize)) {
     const cached = await tryReadCache(db, row.network_id, row.tx_hash, address)
     let classified: TokenTransaction[]
@@ -360,12 +365,29 @@ router.get('/api/transactions/feed', async (req: Request, res: Response) => {
 
     for (const t of classified) {
       if (includeTypes && !includeTypes.has(t.type)) continue
-      // Enrichment is post-cache (the classified payload in the cache is
-      // currency-agnostic, so cache hits don't bloat with one row per
-      // currency code).
-      transactions.push(enrichTransactionWithLocalAmount(t, localCurrencyCode))
+      classifiedAll.push(t)
     }
   }
+
+  // Group adjacent legacy-sequential Squid multi-swap Dolares -> Pesos
+  // legs into a single aggregated SwapTransaction. Same wire shape the
+  // wallet already consumes from the atomic 7702 path (fromTokenAmounts
+  // array with per-leg transactionHash). Disable via env
+  // INDEXER_MULTI_SWAP_GROUPING_ENABLED=false if the heuristic ever
+  // mis-groups two unrelated user actions - see multiSwapClustering.ts
+  // for detection rules + wallet spec §7.
+  const clustered = env.INDEXER_MULTI_SWAP_GROUPING_ENABLED
+    ? clusterMultiDollarSwaps(classifiedAll)
+    : classifiedAll
+
+  // Enrichment is post-cluster so the aggregated event also gets its
+  // localAmount populated (would otherwise be missing on the collapsed
+  // fromTokenAmounts entries). The classified payload in the cache is
+  // currency-agnostic, so cache hits don't bloat with one row per
+  // currency code.
+  const transactions: TokenTransaction[] = clustered.map((t) =>
+    enrichTransactionWithLocalAmount(t, localCurrencyCode),
+  )
 
   const hasNextPage = rows.length > pageSize
   const endCursor =
