@@ -12,6 +12,7 @@ import {
   EIP_7702_DELEGATED_CODE_PREFIX,
 } from '../lib/networks'
 import { getRedis } from '../lib/redis'
+import { Sentry } from '../lib/sentry'
 import { logStatsigEvent } from '../lib/statsig'
 import { getRelayClients } from '../lib/wriRelay'
 import {
@@ -31,6 +32,13 @@ export const CELO_CHAIN_ID = CELO_MAINNET_CHAIN_ID
 export { BATCH_EXECUTOR_ADDRESS }
 
 const DEFAULT_MIN_BALANCE_WEI = 500000000000000000n
+// Second threshold for Sentry alert level escalation. Below this the
+// hot wallet is close enough to empty that an operator page is
+// justified even if the relay is still (barely) serving requests.
+// Kept below DEFAULT_MIN_BALANCE_WEI so the primary 503 gate fires
+// first; this const is only for Sentry level classification. Added
+// 2026-08-28 per wallet ticket 2 (pre-flip wri_dollars_spend_7702_v1).
+const CRITICAL_BALANCE_WEI = 100000000000000000n // 0.1 CELO
 const DEFAULT_MAX_GAS = 1000000n
 const RECEIPT_TIMEOUT_MS = 30_000
 const POST_MINING_MAX_ATTEMPTS = 4
@@ -281,6 +289,26 @@ router.post('/api/wri/delegate-relay', perIpLimiter, async (req: Request, res: R
     log.warn(
       `relay balance below threshold: balance=${relayBalance.toString()} minBalance=${minBalance.toString()} relay=${relay.account.address}`,
     )
+    // Sentry alert hook (wallet ticket 2, 2026-08-28). Fires on every
+    // low-balance-blocked request, but Sentry issue-grouping folds
+    // repeats into one issue per open window. Level escalates when
+    // balance dips below CRITICAL_BALANCE_WEI so the alert routing
+    // can page vs. warn accordingly.
+    const isCritical = relayBalance < CRITICAL_BALANCE_WEI
+    Sentry.captureMessage('wri_relay_balance_low', {
+      level: isCritical ? 'error' : 'warning',
+      tags: {
+        event: 'wri_relay_balance_low',
+        severity: isCritical ? 'critical' : 'warning',
+        provider: 'wri_relay',
+      },
+      extra: {
+        relayAddress: relay.account.address,
+        balanceWei: relayBalance.toString(),
+        minBalanceWei: minBalance.toString(),
+        criticalBalanceWei: CRITICAL_BALANCE_WEI.toString(),
+      },
+    })
     return res.status(503).json({ error: 'relay temporarily unavailable' })
   }
 
