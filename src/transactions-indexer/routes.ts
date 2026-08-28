@@ -296,8 +296,17 @@ router.get('/api/transactions/feed', async (req: Request, res: Response) => {
     return res.status(503).json({ error: 'database not configured' })
   }
 
-  // Pull one extra row so we can tell whether there's a next page.
-  const limit = pageSize + 1
+  // Fetch a WIDER window than `pageSize` so multi-swap clustering
+  // (see multiSwapClustering.ts) can see all cluster members even
+  // when a cluster tail extends past the pageSize boundary. Prior
+  // clustering was per-page and produced inconsistent aggregate
+  // shapes for the same on-chain tx depending on the caller's
+  // pageSize (wallet team bug report 2026-08-28, PR #244). A cluster
+  // is bounded by CLUSTER_WINDOW_MS = 120s + interleaved Squid
+  // approvals; empirical worst case is ~30 rows of on-chain activity
+  // in 120s. Add generous slack.
+  const CLUSTER_LOOKAHEAD = 30
+  const limit = pageSize + CLUSTER_LOOKAHEAD + 1
 
   const params: unknown[] = [networkIds, address]
   let where = `t.network_id = ANY($1::text[])
@@ -336,12 +345,18 @@ router.get('/api/transactions/feed', async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'database error' })
   }
 
-  // Two-pass: first collect the classified txs (may be empty per row,
-  // typically one, occasionally two if the classifier splits). Then
-  // apply multi-swap clustering across the whole page. Enrichment runs
-  // last so the aggregated tx also gets its localAmount populated.
+  // Classify ALL fetched rows (not just the first pageSize). Cluster
+  // sees the full lookahead window so aggregate shape is deterministic
+  // regardless of the caller's pageSize. `hashToRowIndex` maps every
+  // classified tx's on-chain hash to its raw-row position so we can
+  // compute an accurate `endCursor` after clustering (the cursor must
+  // point at the OLDEST raw row consumed by the returned events,
+  // otherwise the next page would double-render older cluster legs).
+  const scanLimit = Math.min(rows.length, pageSize + CLUSTER_LOOKAHEAD)
   const classifiedAll: TokenTransaction[] = []
-  for (const row of rows.slice(0, pageSize)) {
+  const hashToRowIndex = new Map<string, number>()
+  for (let i = 0; i < scanLimit; i++) {
+    const row = rows[i]!
     const cached = await tryReadCache(db, row.network_id, row.tx_hash, address)
     let classified: TokenTransaction[]
     if (cached) {
@@ -366,6 +381,7 @@ router.get('/api/transactions/feed', async (req: Request, res: Response) => {
     for (const t of classified) {
       if (includeTypes && !includeTypes.has(t.type)) continue
       classifiedAll.push(t)
+      hashToRowIndex.set(t.transactionHash, i)
     }
   }
 
@@ -380,22 +396,54 @@ router.get('/api/transactions/feed', async (req: Request, res: Response) => {
     ? clusterMultiDollarSwaps(classifiedAll)
     : classifiedAll
 
+  // Trim to first pageSize clustered events. Track the max (oldest) raw
+  // row index consumed so the endCursor points at the correct boundary.
+  const returned = clustered.slice(0, pageSize)
+  let maxContribRowIndex = -1
+  for (const t of returned) {
+    // A singleton contributes just its own row. An aggregated Swap has
+    // one contributing row per fromTokenAmounts[] entry (each leg is a
+    // real on-chain tx). Take the MAX (older = deeper into the fetch
+    // window) so the cursor skips past all consumed legs on next page.
+    const contribHashes: string[] = [t.transactionHash]
+    if (t.type === 'SWAP_TRANSACTION' && t.fromTokenAmounts) {
+      for (const leg of t.fromTokenAmounts) {
+        if (leg.transactionHash) contribHashes.push(leg.transactionHash)
+      }
+    }
+    for (const h of contribHashes) {
+      const idx = hashToRowIndex.get(h)
+      if (idx !== undefined && idx > maxContribRowIndex) {
+        maxContribRowIndex = idx
+      }
+    }
+  }
+
   // Enrichment is post-cluster so the aggregated event also gets its
   // localAmount populated (would otherwise be missing on the collapsed
   // fromTokenAmounts entries). The classified payload in the cache is
   // currency-agnostic, so cache hits don't bloat with one row per
   // currency code.
-  const transactions: TokenTransaction[] = clustered.map((t) =>
+  const transactions: TokenTransaction[] = returned.map((t) =>
     enrichTransactionWithLocalAmount(t, localCurrencyCode),
   )
 
-  const hasNextPage = rows.length > pageSize
+  // hasNextPage: there are unread raw rows beyond the last one that
+  // contributed to a returned event, OR the cluster produced more
+  // events than we returned (rare: only when the lookahead window
+  // itself contained many clusterable events).
+  const hasNextPage =
+    (maxContribRowIndex >= 0 && rows.length > maxContribRowIndex + 1) ||
+    clustered.length > returned.length
   const endCursor =
-    transactions.length > 0
+    transactions.length > 0 && maxContribRowIndex >= 0
       ? (() => {
-          const lastRow = rows[Math.min(pageSize, rows.length) - 1]
-          if (!lastRow) return null
-          return encodeCursor({ blockNumber: lastRow.block_number, txIndex: lastRow.tx_index })
+          const lastConsumedRow = rows[maxContribRowIndex]
+          if (!lastConsumedRow) return null
+          return encodeCursor({
+            blockNumber: lastConsumedRow.block_number,
+            txIndex: lastConsumedRow.tx_index,
+          })
         })()
       : null
 
