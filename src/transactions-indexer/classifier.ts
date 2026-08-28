@@ -321,9 +321,22 @@ function classify7702Atomic(
   const soldByToken = aggregateByToken(swapOutbound)
   const receivedByToken = aggregateByToken(swapInbound)
 
+  // Every leg of an atomic 7702 batch shares the SAME on-chain tx hash
+  // (the batch executor tx). The wallet uses this invariant to detect
+  // 7702-vs-legacy multi-swap:
+  //   uniqueHashes = Set(fromTokenAmounts.map(l => l.transactionHash))
+  //   is7702Batch = uniqueHashes.size === 1
+  // See wallet SwapContent.tsx:114-119. Also needed for per-leg
+  // deep-link even though on 7702 every leg links to the same batch.
+  // Emit `transactionHash: tx.hash` on every entry to make both
+  // guarantees explicit rather than relying on undefined-Set-size
+  // accident. Added 2026-08-28 per wallet ticket 1.
   const fromTokenAmounts: TokenAmount[] = []
   for (const [contract, value] of soldByToken) {
-    fromTokenAmounts.push(makeAmount(tokenIdForContract(tx.networkId, contract), value))
+    fromTokenAmounts.push({
+      ...makeAmount(tokenIdForContract(tx.networkId, contract), value),
+      transactionHash: tx.hash,
+    })
   }
 
   const { sold: soldPrimary, received: receivedPrimary } = stripRoundTripTokens(
