@@ -20,7 +20,12 @@
 //   `true`, set to `false` to disable via env flip if a false positive
 //   ever mis-groups two unrelated user actions).
 
-import type { SwapTransaction, TokenAmount, TokenTransaction } from './types'
+import type {
+  ApprovalTransaction,
+  SwapTransaction,
+  TokenAmount,
+  TokenTransaction,
+} from './types'
 
 // Sold-token allowlist. Only clusters that involve exclusively these
 // stables collapse into one row; the wallet's `SwapFeedItem` requires
@@ -43,6 +48,16 @@ const DOLLAR_FAMILY_TOKEN_IDS: ReadonlySet<string> = new Set([
 const AGGREGATE_OUT_TOKEN_ID =
   'celo-mainnet:0x765de816845861e75a25fca122bb6898b8b1282a'
 
+// Squid Router on Celo. Approvals directed at this address DO NOT
+// break the cluster - they are the setup step for a swap leg
+// (`approve(SquidRouter, amount)` before `fundAndRunMulticall`).
+// Wallet team spec 2026-08-28: "con approves intercalados permitidos".
+// Same address hardcoded in `classifier.ts` KNOWN_AGGREGATOR_TARGETS;
+// duplicated here because that module is not currently a value export
+// and we do not want to add a new coupling for a two-line constant.
+const SQUID_ROUTER_ADDRESS_LOWER =
+  '0xce16f69375520ab01377ce7b88f5ba8c48f8d666'
+
 // Cluster window measured from the newest-leg to the oldest-leg
 // timestamp. Wallet spec: "<= 120 segundos entre primer y ultimo swap".
 // Note: this bounds the whole cluster, not consecutive-pair diffs -
@@ -59,6 +74,19 @@ function isClusterableSwap(tx: TokenTransaction): tx is SwapTransaction {
   // second-cluster it - the wallet already handles that path.
   if (tx.fromTokenAmounts && tx.fromTokenAmounts.length > 0) return false
   return DOLLAR_FAMILY_TOKEN_IDS.has(tx.outAmount.tokenId)
+}
+
+// Squid multi-swap sequences interleave `approve(SquidRouter, amount)`
+// txs between the swap legs (one per leg the user has not previously
+// approved). Such approvals do NOT break the cluster - they get
+// re-emitted around the aggregated row at their original DESC
+// position. Any non-Squid approval (or non-approval) DOES break the
+// cluster since we cannot assume it belongs to the same user action.
+function isSquidApproval(tx: TokenTransaction): tx is ApprovalTransaction {
+  return (
+    tx.type === 'APPROVAL' &&
+    tx.approvedAddress.toLowerCase() === SQUID_ROUTER_ADDRESS_LOWER
+  )
 }
 
 // Two swaps belong in the same cluster when they share the buy token
@@ -201,10 +229,20 @@ export function clusterMultiDollarSwaps(
       continue
     }
     const cluster: SwapTransaction[] = [current]
+    const approvalsInSequence: ApprovalTransaction[] = []
     const head = current
     let j = i + 1
     while (j < txs.length) {
       const next = txs[j]!
+      // Squid approvals interleave with legs in the legacy sequential
+      // flow. Absorb them so the swap on the far side of the approval
+      // still joins the cluster; the approvals themselves are re-
+      // emitted after the aggregate at their original DESC position.
+      if (isSquidApproval(next)) {
+        approvalsInSequence.push(next)
+        j++
+        continue
+      }
       if (!isClusterableSwap(next)) break
       if (!sharesClusterKey(head, next)) break
       if (!withinClusterWindow(head.timestamp, next.timestamp)) break
@@ -213,8 +251,15 @@ export function clusterMultiDollarSwaps(
     }
     if (cluster.length >= CLUSTER_MIN_SIZE) {
       out.push(buildAggregatedSwap(cluster))
+      // Preserve the DESC order of the approvals; they were already
+      // in DESC order in the input because we walked newest-first.
+      out.push(...approvalsInSequence)
     } else {
+      // Not a cluster: emit the singleton swap + any approvals we
+      // consumed. Order matches the input (swap first because it
+      // was the newest, then approvals in DESC order).
       out.push(current)
+      out.push(...approvalsInSequence)
     }
     i = j
   }
