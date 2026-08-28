@@ -31,7 +31,22 @@ const mockQuery = jest.fn(async (sql: string, params?: readonly unknown[]) => {
   }
   if (normalized.startsWith('SELECT T.NETWORK_ID, T.TX_HASH')) {
     if (dbMode === 'noRows') return { rows: [] }
-    return { rows: queriedRows }
+    // Simulate the SQL `LIMIT $N` so pagination-sensitive tests can
+    // exercise the real fetch shape. LIMIT is the last positional
+    // parameter in the feed query (see routes.ts). Default to
+    // returning everything when the caller did not pass one (e.g.
+    // other-shaped queries that reuse the SELECT prefix).
+    const limitParam =
+      Array.isArray(params) && params.length > 0
+        ? params[params.length - 1]
+        : undefined
+    const limit =
+      typeof limitParam === 'number'
+        ? limitParam
+        : typeof limitParam === 'string'
+          ? Number(limitParam)
+          : queriedRows.length
+    return { rows: queriedRows.slice(0, limit) }
   }
   if (normalized.startsWith('SELECT LOG_INDEX')) {
     return { rows: [] }
