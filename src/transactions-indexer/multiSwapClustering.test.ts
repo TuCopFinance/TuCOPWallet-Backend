@@ -1,5 +1,12 @@
 import { clusterMultiDollarSwaps, _testExports } from './multiSwapClustering'
-import type { SwapTransaction, TokenTransaction, TransferTransaction } from './types'
+import type {
+  ApprovalTransaction,
+  SwapTransaction,
+  TokenTransaction,
+  TransferTransaction,
+} from './types'
+
+const SQUID_ROUTER = '0xce16f69375520ab01377ce7b88f5ba8c48f8d666'
 
 const USDM = 'celo-mainnet:0x765de816845861e75a25fca122bb6898b8b1282a'
 const USDC = 'celo-mainnet:0xceba9300f2b948710d2653dd7b07f33a8b32118c'
@@ -58,6 +65,26 @@ function makeSwap(args: SwapArgs): SwapTransaction {
       decimals: sellToken === USDM ? 18 : 6,
     },
     fromTokenAmounts,
+  }
+}
+
+function makeApproval(args: {
+  seq: number
+  tokenId: string
+  timestampSec: number
+  approvedAddress?: string
+}): ApprovalTransaction {
+  return {
+    type: 'APPROVAL',
+    networkId: 'celo-mainnet',
+    transactionHash: hash(args.seq),
+    timestamp: args.timestampSec * 1000,
+    block: String(3000 + args.seq),
+    address: '0x81dcf9160237d0ef0d4db27cfb2ea9743547f882',
+    status: 'Complete',
+    fees: [],
+    tokenId: args.tokenId,
+    approvedAddress: args.approvedAddress ?? SQUID_ROUTER,
   }
 }
 
@@ -156,6 +183,58 @@ describe('clusterMultiDollarSwaps', () => {
     expect(out).toHaveLength(2)
     expect(out[0]?.transactionHash).toBe(hash(2))
     expect(out[1]?.transactionHash).toBe(hash(1))
+  })
+
+  it('absorbs Squid `approve(SquidRouter, ...)` interleaved between swap legs (real prod pattern)', () => {
+    // Reproduces the exact tx sequence observed on prod deploy #241
+    // (spike v2 wallet, blocks 75991249..75991267): three swaps
+    // interleaved with two USDT+USDC approvals to Squid Router.
+    // Before the fix, adjacency was broken by the approvals and the
+    // cluster only got size=1 per swap. After the fix, the swaps
+    // collapse into one aggregate and the approvals re-emit after.
+    const desc: TokenTransaction[] = [
+      makeSwap({ seq: 10, sellToken: USDT, sellValue: '1.79', buyToken: COPM, buyValue: '5605', timestampSec: 2025 }),
+      makeApproval({ seq: 9, tokenId: USDT, timestampSec: 2024 }),
+      makeSwap({ seq: 8, sellToken: USDC, sellValue: '1.10', buyToken: COPM, buyValue: '3443', timestampSec: 2018 }),
+      makeApproval({ seq: 7, tokenId: USDC, timestampSec: 2016 }),
+      makeSwap({ seq: 6, sellToken: USDM, sellValue: '1.10', buyToken: COPM, buyValue: '3444', timestampSec: 2007 }),
+    ]
+    const out = clusterMultiDollarSwaps(desc)
+    // 1 aggregate + 2 approvals = 3 rows total.
+    expect(out).toHaveLength(3)
+    const agg = out[0] as SwapTransaction
+    expect(agg.type).toBe('SWAP_TRANSACTION')
+    expect(agg.transactionHash).toBe(hash(10))
+    expect(agg.fromTokenAmounts).toHaveLength(3)
+    expect(agg.fromTokenAmounts?.map((a) => a.tokenId)).toEqual([USDT, USDC, USDM])
+    expect(agg.fromTokenAmounts?.map((a) => a.transactionHash)).toEqual([
+      hash(10),
+      hash(8),
+      hash(6),
+    ])
+    // Approvals re-emit after the aggregate in DESC order (matches
+    // their position in the input feed).
+    expect(out[1]?.type).toBe('APPROVAL')
+    expect(out[1]?.transactionHash).toBe(hash(9))
+    expect(out[2]?.type).toBe('APPROVAL')
+    expect(out[2]?.transactionHash).toBe(hash(7))
+  })
+
+  it('does NOT absorb approvals to a non-Squid address (breaks cluster like any other unrelated tx)', () => {
+    // An approval to, say, a Neeru contract does not belong to the
+    // Squid multi-swap flow and must break the cluster.
+    const NEERU_ADDR = '0x988af5977201a0e988f2c75ea952532f6beb5082'
+    const desc: TokenTransaction[] = [
+      makeSwap({ seq: 3, sellToken: USDT, sellValue: '1', buyToken: COPM, buyValue: '3100', timestampSec: 200 }),
+      makeApproval({ seq: 2, tokenId: USDT, timestampSec: 198, approvedAddress: NEERU_ADDR }),
+      makeSwap({ seq: 1, sellToken: USDC, sellValue: '1', buyToken: COPM, buyValue: '3100', timestampSec: 195 }),
+    ]
+    const out = clusterMultiDollarSwaps(desc)
+    // 3 singletons - the Neeru approval broke the run.
+    expect(out).toHaveLength(3)
+    expect((out[0] as SwapTransaction).fromTokenAmounts).toBeUndefined()
+    expect(out[1]?.type).toBe('APPROVAL')
+    expect((out[2] as SwapTransaction).fromTokenAmounts).toBeUndefined()
   })
 
   it('interrupts a cluster when a non-swap tx breaks the adjacent run (per-page order)', () => {
