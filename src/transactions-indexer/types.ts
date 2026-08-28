@@ -40,6 +40,14 @@ export interface TokenAmount {
   // so the classifier itself stays timestamp-agnostic per-amount.
   timestamp?: number
   localAmount?: LocalAmount | null
+  // Populated only on entries inside `SwapTransaction.fromTokenAmounts[]`
+  // when the parent `SwapTransaction` is an aggregated multi-leg cluster
+  // (see `multiSwapClustering.ts`). Points to the individual on-chain leg
+  // so the wallet can deep-link from the aggregate row to per-leg tx
+  // detail. Absent on all other TokenAmount uses (single-leg swaps,
+  // transfers, earn amounts) - the parent `BaseTransaction.transactionHash`
+  // is the source of truth in those cases.
+  transactionHash?: string
 }
 
 export interface FeeEntry {

@@ -337,6 +337,20 @@ const envSchema = z.object({
     .default('true')
     .transform((v) => v !== 'false'),
 
+  // Cluster N adjacent legacy-sequential Squid multi-swap Dolares -> Pesos
+  // transactions into a single aggregated SwapTransaction event when the
+  // wallet team's criteria are met (see multiSwapClustering.ts + wallet
+  // spec §7 "Multi-swap Dolares clustering"). Default true; set to the
+  // literal string "false" to disable via env flip if clustering ever
+  // mis-groups user actions. Backwards-compatible when disabled: single-
+  // leg events per Squid tx as before. Added 2026-08-28 per wallet team
+  // request.
+  INDEXER_MULTI_SWAP_GROUPING_ENABLED: z
+    .string()
+    .optional()
+    .default('true')
+    .transform((v) => v !== 'false'),
+
   // Shared secret gating the admin endpoints (currently just
   // POST /api/admin/reset-backfill). REQUIRED for those routes to
   // respond; leaving it unset gates the route to 503 so a leaked
