@@ -105,6 +105,14 @@ describe('classify', () => {
     expect(fromTokens).toEqual(
       [TOKEN_USDM, TOKEN_USDC, TOKEN_USDT].map((c) => `celo-mainnet:${c}`).sort(),
     )
+    // 7702 atomic batch invariant (wallet ticket 1 2026-08-28): every
+    // fromTokenAmounts entry MUST carry `transactionHash` equal to the
+    // batch tx hash. Wallet's SwapContent.tsx:114-119 uses
+    // `new Set(fromLegs.map(l => l.transactionHash)).size === 1` to
+    // distinguish atomic-7702 from legacy sequential multi-swap.
+    const hashes = (swap.fromTokenAmounts ?? []).map((a) => a.transactionHash)
+    expect(hashes).toEqual([tx.hash, tx.hash, tx.hash])
+    expect(new Set(hashes).size).toBe(1)
   })
 
   it('rule 2: plain aggregator swap (single in, single out) returns SWAP_TRANSACTION without fromTokenAmounts', () => {
