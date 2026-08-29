@@ -7,8 +7,15 @@ export async function fetchWithTimeout(
 ): Promise<Response> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  // Preserve caller-supplied AbortSignal (SIGTERM propagation from worker
+  // loops) by composing it with the timeout signal via AbortSignal.any.
+  // Without this the caller signal never reaches the socket and workers
+  // block on the full timeout window on shutdown.
+  const signal = init.signal
+    ? AbortSignal.any([init.signal, ctrl.signal])
+    : ctrl.signal
   try {
-    return await fetch(url, { ...init, signal: ctrl.signal })
+    return await fetch(url, { ...init, signal })
   } finally {
     clearTimeout(timer)
   }

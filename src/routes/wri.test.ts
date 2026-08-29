@@ -43,8 +43,21 @@ jest.mock('../lib/redis', () => ({
   getRedis: () => null,
 }))
 
+const mockSentryCaptureMessage = jest.fn()
+jest.mock('../lib/sentry', () => {
+  const actual = jest.requireActual('../lib/sentry')
+  return {
+    ...actual,
+    Sentry: {
+      ...actual.Sentry,
+      captureMessage: (...args: unknown[]) => mockSentryCaptureMessage(...args),
+    },
+  }
+})
+
 import { app } from '../app'
 import { _resetInMemoryStoreForTests } from '../lib/wriRateLimit'
+import { _resetRelayAlertThrottleForTests } from './wri'
 
 const BATCH_EXECUTOR_DELEGATION_CODE = `0xef0100${BATCH_EXECUTOR.toLowerCase().slice(2)}`
 
@@ -87,6 +100,8 @@ describe('POST /api/wri/delegate-relay', () => {
     mockWaitForReceipt.mockReset()
     mockRecoverAuthorizationAddress.mockReset()
     _resetInMemoryStoreForTests()
+    _resetRelayAlertThrottleForTests()
+    mockSentryCaptureMessage.mockReset()
   })
 
   it('rejects invalid userAddress', async () => {
@@ -219,6 +234,67 @@ describe('POST /api/wri/delegate-relay', () => {
     expect(res.status).toBe(503)
     expect(res.body.error).toMatch(/temporarily unavailable/i)
     expect(mockSendTransaction).not.toHaveBeenCalled()
+  })
+
+  it('balance-low: fires ONE Sentry captureMessage per (address, severity) throttle window', async () => {
+    // First balance-low request: fires. Second: throttled. Third with a
+    // critical-severity balance: fires again (severity escalation resets
+    // the throttle key). No private key material appears anywhere in
+    // the emitted payload.
+    mockSentryCaptureMessage.mockClear()
+
+    // Request 1: warning severity (balance between critical and min)
+    mockRecoverAuthorizationAddress.mockResolvedValueOnce(VALID_USER)
+    mockGetTransactionCount.mockResolvedValueOnce(5)
+    mockGetCode.mockResolvedValueOnce('0x')
+    mockGetBalance.mockResolvedValueOnce(200000000000000000n) // 0.2 CELO
+    const r1 = await request(app).post('/api/wri/delegate-relay').send(validBody())
+    expect(r1.status).toBe(503)
+    expect(mockSentryCaptureMessage).toHaveBeenCalledTimes(1)
+    const [msg1, opts1] = mockSentryCaptureMessage.mock.calls[0] as [
+      string,
+      Record<string, unknown>,
+    ]
+    expect(msg1).toBe('wri_relay_balance_low')
+    expect(opts1.level).toBe('warning')
+    expect(opts1.fingerprint).toEqual([
+      'wri_relay_balance_low',
+      RELAY_ADDRESS.toLowerCase(),
+      'warning',
+    ])
+    const extra1 = opts1.extra as Record<string, unknown>
+    expect(JSON.stringify(extra1)).not.toMatch(/private|secret|walletPk|WRI_RELAY_PK|0x[a-f0-9]{64}/i)
+    expect(extra1.relayAddress).toBe(RELAY_ADDRESS)
+    expect(extra1.balanceWei).toBe('200000000000000000')
+
+    // Request 2: same severity within throttle window -> no new event
+    mockRecoverAuthorizationAddress.mockResolvedValueOnce(VALID_USER)
+    mockGetTransactionCount.mockResolvedValueOnce(5)
+    mockGetCode.mockResolvedValueOnce('0x')
+    mockGetBalance.mockResolvedValueOnce(200000000000000000n)
+    const r2 = await request(app).post('/api/wri/delegate-relay').send(validBody())
+    expect(r2.status).toBe(503)
+    expect(mockSentryCaptureMessage).toHaveBeenCalledTimes(1)
+
+    // Request 3: critical severity (below CRITICAL) -> fires (new throttle key)
+    mockRecoverAuthorizationAddress.mockResolvedValueOnce(VALID_USER)
+    mockGetTransactionCount.mockResolvedValueOnce(5)
+    mockGetCode.mockResolvedValueOnce('0x')
+    mockGetBalance.mockResolvedValueOnce(50000000000000000n) // 0.05 CELO
+    const r3 = await request(app).post('/api/wri/delegate-relay').send(validBody())
+    expect(r3.status).toBe(503)
+    expect(mockSentryCaptureMessage).toHaveBeenCalledTimes(2)
+    const [msg3, opts3] = mockSentryCaptureMessage.mock.calls[1] as [
+      string,
+      Record<string, unknown>,
+    ]
+    expect(msg3).toBe('wri_relay_balance_low')
+    expect(opts3.level).toBe('error')
+    expect(opts3.fingerprint).toEqual([
+      'wri_relay_balance_low',
+      RELAY_ADDRESS.toLowerCase(),
+      'critical',
+    ])
   })
 
   it('happy path: submits tx, waits for receipt, verifies delegation, returns 200', async () => {
