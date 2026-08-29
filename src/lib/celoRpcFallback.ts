@@ -37,7 +37,7 @@ const SKIP_DURATION_MS = 5 * 60 * 1000
 // per-endpoint outcomes group nicely on Grafana + Sentry without leaking
 // full URLs into label values. Unknown URLs fall back to 'other' rather
 // than blowing up label cardinality with random hostnames.
-function providerNameFromUrl(url: string): string {
+export function providerNameFromUrl(url: string): string {
   const lower = url.toLowerCase()
   if (lower.includes('publicnode.com')) return 'publicnode'
   if (lower.includes('alchemy.com')) return 'alchemy'

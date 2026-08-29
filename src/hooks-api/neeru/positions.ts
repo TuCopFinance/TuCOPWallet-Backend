@@ -69,6 +69,11 @@ const CATALOGUE_TTL_MS = 30_000
 const PRICE_TTL_MS = 60_000
 
 let catalogueCache: CatalogueSnapshot | null = null
+// Single-flight guard: if N concurrent requests hit fetchCatalogue on a
+// cache miss they all issue independent TRANCHE_COUNT + multicall reads
+// (stampede). One inflight promise is enough because every miss produces
+// the same snapshot; other callers await the same result.
+let inflightCatalogue: Promise<CatalogueSnapshot> | null = null
 
 interface PriceSnapshot {
   fetchedAtMs: number
@@ -78,6 +83,7 @@ let priceCache: PriceSnapshot | null = null
 
 export function _resetHooksApiNeeruCacheForTests(): void {
   catalogueCache = null
+  inflightCatalogue = null
   priceCache = null
 }
 
@@ -187,7 +193,19 @@ async function fetchCatalogue(
   if (catalogueCache && now() - catalogueCache.fetchedAtMs < CATALOGUE_TTL_MS) {
     return catalogueCache
   }
+  if (inflightCatalogue) {
+    return inflightCatalogue
+  }
+  inflightCatalogue = fetchCatalogueUncached(deps, now).finally(() => {
+    inflightCatalogue = null
+  })
+  return inflightCatalogue
+}
 
+async function fetchCatalogueUncached(
+  deps: FetchCatalogueDeps,
+  now: () => number,
+): Promise<CatalogueSnapshot> {
   // Discover how many categories the deployed contract exposes. Reading
   // the count from the chain avoids a source-code literal that has to be
   // bumped every time governance appends a tranche. If the call reverts

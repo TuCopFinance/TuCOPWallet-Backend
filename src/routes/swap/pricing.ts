@@ -18,19 +18,20 @@ export function safeBigInt(value: string | undefined): bigint | null {
 
 // Parse a decimal string like "0.9945" or "3242.712" into a bigint scaled
 // by PRICE_SCALE (1e18). Returns null on any parse error. Truncates
-// fractional beyond 18 digits (matches PRICE_SCALE precision).
+// fractional beyond 18 digits (matches PRICE_SCALE precision). Rejects
+// negative values: Squid `est.exchangeRate` is never negative, and every
+// call site downstream uses the result in a multiplication that would
+// silently propagate the sign into `guaranteedPrice`, which the wallet
+// then feeds into `approve()` sizing.
 export function parseDecimalToScaled(value: string): bigint | null {
   if (!value) return null
-  const negative = value.startsWith('-')
-  const cleaned = negative ? value.slice(1) : value
-  if (!/^\d+(?:\.\d+)?$/.test(cleaned)) return null
-  const parts = cleaned.split('.')
+  if (!/^\d+(?:\.\d+)?$/.test(value)) return null
+  const parts = value.split('.')
   const wholePart = parts[0] ?? '0'
   const fracPart = parts[1] ?? ''
   const fracPadded = fracPart.padEnd(18, '0').slice(0, 18)
   try {
-    const scaled = BigInt(wholePart) * PRICE_SCALE + BigInt(fracPadded || '0')
-    return negative ? -scaled : scaled
+    return BigInt(wholePart) * PRICE_SCALE + BigInt(fracPadded || '0')
   } catch {
     return null
   }
