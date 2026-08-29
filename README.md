@@ -31,7 +31,7 @@ flowchart LR
         CMC[CoinMarketCap]
         Blockscout[Celo Blockscout]
         Squid[Squid Router v2]
-        CeloRPC[Celo RPC<br/>celocolombia &rarr; forno &rarr; ankr &rarr; drpc]
+        CeloRPC[Celo RPC<br/>multi-endpoint fallback]
         Allbridge[Allbridge V2]
     end
 
@@ -57,7 +57,7 @@ Both workers use Postgres advisory locks for multi-replica safety and back off o
 
 ## Cross-cutting behaviour
 
-- **Rate limit:** 300 requests per IP per 60 s window across all endpoints (`express-rate-limit`, in-memory). Sized so an active user firing ~10 swaps in 2-3 minutes (quote refreshes + receipt polling + feed/balance refresh) does not hit the wall; sustained 5 req/s is still considered bot traffic. Exceeding it returns `429 { "error": "rate limit exceeded" }`. Trust-proxy is set to one hop so Railway's LB forwards the real client IP. Per-endpoint tiering is tracked in `ROADMAP.md`.
+- **Rate limit:** per-IP limiter (`express-rate-limit`, in-memory) sized so an active user firing quote refreshes, receipt polling, and feed/balance refresh does not hit the wall. Exceeding it returns `429 { "error": "rate limit exceeded" }`. Trust-proxy is set to one hop so Railway's LB forwards the real client IP. The write path (`/api/wri/delegate-relay`) carries a stricter per-IP + Redis-backed global limit on top.
 - **Upstream timeout:** every outbound call (Etherscan, CoinMarketCap, Blockscout) is wrapped in `fetchWithTimeout` with an 8 s default, so a hung upstream never holds an inbound request open indefinitely.
 - **Cache fallthrough:** when `REDIS_URL` is unset or set to the literal `disabled`, every request goes direct to upstream. Otherwise the cache is consulted with normalised keys; failed cache reads or writes fall through and never break the response.
 - **Logging:** all diagnostic output goes through `src/lib/logger.ts` with per-module namespaces (e.g. `[app:req]`, `[routes:blockscout]`). In production (`NODE_ENV=production`) only `warn` and `error` are emitted.
@@ -72,7 +72,7 @@ Detailed documentation is under [`docs/`](./docs/):
 
 Design notes and historical trails:
 
-- [`ROADMAP.md`](./ROADMAP.md) - deferred items + hardening trail per shipped PR.
+- [`ROADMAP.md`](./ROADMAP.md) - deferred items.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) - contributor guide.
 - [`SECURITY.md`](./SECURITY.md) - vulnerability reporting.
 - [`LICENSES/`](./LICENSES/) - per-file attribution for vendored code (currently the Allbridge port).

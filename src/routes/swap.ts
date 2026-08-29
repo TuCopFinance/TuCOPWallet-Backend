@@ -155,18 +155,22 @@ function shapeResponse(
       echoed ?? collectFees.feeValue.toString()
   }
 
-  // Pre-computed max wei of sell token the router might pull for this quote.
-  // For Squid sell-mode quotes (which is how we always call Squid) this is
-  // fromAmount itself - the router never pulls more than the user's supplied
-  // sellAmount. Exposed as a dedicated field so wallets do NOT have to
-  // derive it from `buyAmount * guaranteedPrice`, a formula that only holds
-  // for same-decimal pairs and breaks by 10^(sellDec - buyDec) on cross-
-  // decimal pairs. Wallet-side approve() should size on this field.
+  // Pre-computed max wei of sell token the router might pull for this
+  // quote. Always sourced from the CALLER-supplied `input.sellAmount`
+  // (not Squid's echoed `est.fromAmount`) so the value reflects the
+  // user's committed maximum regardless of any upstream fee model
+  // that might otherwise skew the echoed amount. In sell-mode (which
+  // is how we always call Squid) the router never pulls more than
+  // this. Exposed as a dedicated field so wallets do NOT have to
+  // derive it from `buyAmount * guaranteedPrice`, a formula that only
+  // holds for same-decimal pairs and breaks by 10^(sellDec - buyDec)
+  // on cross-decimal pairs. Wallet-side approve() should size on this
+  // field.
   return {
     unvalidatedSwapTransaction: swapTx,
     details: {
       swapProvider: 'squid',
-      worstCaseSellAmount: fromAmount,
+      worstCaseSellAmount: input.sellAmount,
     },
   }
 }
@@ -802,6 +806,18 @@ function buildSwapErrorEnvelope(input: {
 // is broken AND involves COPm. Any other pair returns null (no viable
 // same-side alternative in the current AMM landscape on Celo). The
 // wallet renderer decides whether to show the hint to the user.
+// Single source of truth for the tokens the pair-label + fallback-hint
+// helpers know about. Keys are lowercased addresses; values are the
+// wallet-facing symbols. Any address not in this map is treated as
+// unknown (never truncated in wire output).
+const KNOWN_TOKEN_SYMBOLS: Readonly<Record<string, string>> = {
+  '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e': 'USDT',
+  '0xceba9300f2b948710d2653dd7b07f33a8b32118c': 'USDC',
+  '0x765de816845861e75a25fca122bb6898b8b1282a': 'USDm',
+  '0x8a567e2ae79ca692bd748ab832081c45de4041ea': 'COPm',
+  '0x471ece3750da237f93b8e339c536989b8978a438': 'CELO',
+}
+
 function suggestFallbackPair(sellToken: string, buyToken: string): string | null {
   const sell = sellToken.toLowerCase()
   const buy = buyToken.toLowerCase()
@@ -826,24 +842,24 @@ function suggestFallbackPair(sellToken: string, buyToken: string): string | null
 
 function pairLabel(sellToken: string, buyToken: string): string {
   const label = (t: string): string => {
-    const lower = t.toLowerCase()
-    if (lower === '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e') return 'USDT'
-    if (lower === '0xceba9300f2b948710d2653dd7b07f33a8b32118c') return 'USDC'
-    if (lower === '0x765de816845861e75a25fca122bb6898b8b1282a') return 'USDm'
-    if (lower === '0x8a567e2ae79ca692bd748ab832081c45de4041ea') return 'COPm'
-    if (lower === '0x471ece3750da237f93b8e339c536989b8978a438') return 'CELO'
-    return t.slice(0, 8)
+    const symbol = KNOWN_TOKEN_SYMBOLS[t.toLowerCase()]
+    // Return 'unknown' (not a truncated address) if the token is off the
+    // known list. A partial 0x-prefix in a client-visible field would
+    // violate the wire invariant and give the wallet nothing to render.
+    return symbol ?? 'unknown'
   }
   return `${label(sellToken)}->${label(buyToken)}`
 }
 
 // Parse HTTP Retry-After header value. Squid sends either delta-seconds
 // (integer) or HTTP-date; only the integer form is common in practice.
-// Returns null when the header is absent or unparseable.
+// Returns null when the header is absent or unparseable. Bounds match
+// spec: 0..3600 inclusive (0 = "retry now" is a meaningful hint we pass
+// through; 3600 is the documented upper bound).
 function parseRetryAfterSeconds(raw: string | undefined): number | null {
   if (!raw) return null
   const n = Number(raw)
-  if (Number.isFinite(n) && n > 0 && n < 3600) return Math.floor(n)
+  if (Number.isFinite(n) && n >= 0 && n <= 3600) return Math.floor(n)
   return null
 }
 

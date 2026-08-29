@@ -234,6 +234,11 @@ const envSchema = z.object({
   // WRI relay
   WRI_RELAY_PK: zHexBytes32.optional(),
   WRI_RELAY_MIN_CELO_BALANCE: z.coerce.bigint().optional(),
+  // Secondary threshold: below this the Sentry alert level escalates
+  // from warning to error so on-call paging can differentiate the two.
+  // Must stay strictly below WRI_RELAY_MIN_CELO_BALANCE (a request
+  // hitting the critical band has already been blocked by the min gate).
+  WRI_RELAY_CRITICAL_CELO_BALANCE: z.coerce.bigint().optional(),
   WRI_RELAY_MAX_GAS: z.coerce.bigint().optional(),
   WRI_RELAY_PER_IP_LIMIT: zPositiveInt.optional().default(20),
   WRI_RELAY_GLOBAL_LIMIT: zPositiveInt.optional().default(60),
@@ -290,6 +295,12 @@ const envSchema = z.object({
   // bound on the cursor advance per iteration.
   INDEXER_POLL_INTERVAL_MS: zPositiveInt.optional().default(5_000),
   INDEXER_MAX_BLOCKS_PER_TICK: zPositiveInt.optional().default(200),
+  // Trail N blocks behind the reported head to survive cross-provider
+  // skew: getBlockNumber may land on a different provider than getLogs
+  // via the fallback chain, and providers are not perfectly synced. The
+  // default 1 covers the observed ~1-block skew; bump if the head-lag
+  // 400 reappears in prod (Sentry classifier tags `other`).
+  INDEXER_HEAD_LAG_BUFFER_BLOCKS: zPositiveInt.optional().default(1),
   // Comma-separated Celo contract addresses passed as the `address` filter
   // to eth_getLogs during the tick loop's log-first pre-filter. Narrows
   // the query to logs emitted by known token contracts + integrated

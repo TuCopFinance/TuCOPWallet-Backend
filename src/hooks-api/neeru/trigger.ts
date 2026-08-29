@@ -34,7 +34,10 @@ const log = createLogger('hooks-api:neeru:trigger')
 const NETWORK_ID: NetworkId = 'celo-mainnet'
 const RAY = 10n ** 27n
 const TOKEN_INFO_TTL_MS = 30_000
-const VALID_CATEGORIES: ReadonlySet<number> = new Set([0, 1, 2, 3, 4, 5])
+// Upper bound must mirror CATEGORY_COUNT_MAX in positions.ts. Both live
+// as source literals because the deposit path runs before catalogue
+// resolution and cannot afford a preflight RPC just for validation.
+const CATEGORY_ID_MAX = 31
 const POSITION_ID_RE = /^\d+$/
 
 // Selector -> reason mapping used when a simulation-first close call
@@ -208,7 +211,11 @@ export async function buildDepositTxs(
   const { address, categoryId, amount, rpc } = args
   const now = args.now ?? (() => Date.now())
 
-  if (!VALID_CATEGORIES.has(categoryId)) {
+  if (
+    !Number.isInteger(categoryId) ||
+    categoryId < 0 ||
+    categoryId > CATEGORY_ID_MAX
+  ) {
     throw new Error('INVALID_CATEGORY')
   }
   if (!POSITION_ID_RE.test(amount)) {

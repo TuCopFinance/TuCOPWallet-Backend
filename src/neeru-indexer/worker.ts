@@ -1,6 +1,7 @@
 import type { Pool } from 'pg'
 import { getDb } from '../lib/db'
 import { env } from '../lib/env'
+import { providerNameFromUrl } from '../lib/celoRpcFallback'
 import { createLogger } from '../lib/logger'
 import { Sentry } from '../lib/sentry'
 import {
@@ -72,9 +73,13 @@ function classifyRpcError(msg: string): string {
   return 'other'
 }
 
+// Collapse any URL surfaced by the error message down to a provider
+// bucket. Never surface the raw URL: for endpoints like Alchemy the
+// path segment carries the API key. Also keeps Sentry tag cardinality
+// bounded (one value per known provider + 'other').
 function extractRpcEndpoint(msg: string): string | null {
   const m = msg.match(/https:\/\/[a-z0-9.-]+(?:\/[^\s"|)]*)?/i)
-  return m ? m[0] : null
+  return m ? providerNameFromUrl(m[0]) : null
 }
 
 function parseIntervalMs(): number {

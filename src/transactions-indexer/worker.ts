@@ -1,6 +1,9 @@
 import type { Pool } from 'pg'
 import type { Hash } from 'viem'
-import { getSharedCeloFallbackExecutor } from '../lib/celoRpcFallback'
+import {
+  getSharedCeloFallbackExecutor,
+  providerNameFromUrl,
+} from '../lib/celoRpcFallback'
 import { getDb } from '../lib/db'
 import { env } from '../lib/env'
 import { createLogger } from '../lib/logger'
@@ -70,9 +73,13 @@ function classifyRpcError(msg: string): string {
   return 'other'
 }
 
+// Collapse any URL surfaced by the error message down to a provider
+// bucket. Never surface the raw URL: for endpoints like Alchemy the
+// path segment carries the API key. Also keeps Sentry tag cardinality
+// bounded (one value per known provider + 'other').
 function extractRpcEndpoint(msg: string): string | null {
   const m = msg.match(/https:\/\/[a-z0-9.-]+(?:\/[^\s"|)]*)?/i)
-  return m ? m[0] : null
+  return m ? providerNameFromUrl(m[0]) : null
 }
 
 // Best-effort extraction of the tx hash embedded in a fallback executor
@@ -192,41 +199,48 @@ function buildDefaultClient(): IndexerRpcClient {
         args.contractAddresses.length > 0
           ? (args.contractAddresses as unknown as `0x${string}`[])
           : undefined
-      const [outbound, inbound] = await Promise.all([
-        executor.withFallback('indexer:getLogs-outbound', async (c) => {
-          return (await c.request({
-            method: 'eth_getLogs',
-            params: [
-              {
-                ...(addressForRpc ? { address: addressForRpc } : {}),
-                topics: [
-                  topic0Filter as unknown as `0x${string}`[],
-                  paddedForRpc as unknown as `0x${string}`[],
-                ],
-                fromBlock: fromHex,
-                toBlock: toHex,
-              },
-            ],
-          })) as Array<{ transactionHash: string }>
-        }),
-        executor.withFallback('indexer:getLogs-inbound', async (c) => {
-          return (await c.request({
-            method: 'eth_getLogs',
-            params: [
-              {
-                ...(addressForRpc ? { address: addressForRpc } : {}),
-                topics: [
-                  topic0Filter as unknown as `0x${string}`[],
-                  null,
-                  paddedForRpc as unknown as `0x${string}`[],
-                ],
-                fromBlock: fromHex,
-                toBlock: toHex,
-              },
-            ],
-          })) as Array<{ transactionHash: string }>
-        }),
-      ])
+      // Both eth_getLogs calls run through ONE fallback selection so they
+      // land on the same endpoint. Two independent withFallback calls in
+      // Promise.all can land on different endpoints (transient failure on
+      // one drops the second call to the next in the chain) with different
+      // heads, which reproduces the same cross-provider 400 that
+      // HEAD_LAG_BUFFER_BLOCKS was meant to prevent.
+      const [outbound, inbound] = await executor.withFallback(
+        'indexer:getLogs-outbound+inbound',
+        async (c) => {
+          return Promise.all([
+            c.request({
+              method: 'eth_getLogs',
+              params: [
+                {
+                  ...(addressForRpc ? { address: addressForRpc } : {}),
+                  topics: [
+                    topic0Filter as unknown as `0x${string}`[],
+                    paddedForRpc as unknown as `0x${string}`[],
+                  ],
+                  fromBlock: fromHex,
+                  toBlock: toHex,
+                },
+              ],
+            }) as Promise<Array<{ transactionHash: string }>>,
+            c.request({
+              method: 'eth_getLogs',
+              params: [
+                {
+                  ...(addressForRpc ? { address: addressForRpc } : {}),
+                  topics: [
+                    topic0Filter as unknown as `0x${string}`[],
+                    null,
+                    paddedForRpc as unknown as `0x${string}`[],
+                  ],
+                  fromBlock: fromHex,
+                  toBlock: toHex,
+                },
+              ],
+            }) as Promise<Array<{ transactionHash: string }>>,
+          ])
+        },
+      )
       const out = new Set<string>()
       for (const l of outbound) out.add(l.transactionHash.toLowerCase())
       for (const l of inbound) out.add(l.transactionHash.toLowerCase())
@@ -584,6 +598,7 @@ export async function startIndexer(
           tip,
           lastProcessed: last,
           maxBlocksPerTick,
+          headLagBuffer: BigInt(env.INDEXER_HEAD_LAG_BUFFER_BLOCKS),
         })
         if (window === null) {
           consecutiveErrors = 0
