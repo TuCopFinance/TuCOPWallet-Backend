@@ -362,6 +362,30 @@ const envSchema = z.object({
     .default('true')
     .transform((v) => v !== 'false'),
 
+  // TuCOPRamp pass-through proxy (2026-08-30 wallet request). The proxy
+  // route lives at `/api/tucopramp/*` and forwards to
+  // `${TUCOPRAMP_UPSTREAM_URL_<ENV>}/*` (stripping the /api/tucopramp
+  // prefix), preserving the wallet-signed body byte-for-byte and
+  // injecting the consumer key via `X-TuCOPRamp-Key` server-side so
+  // the wallet never holds the secret. `TUCOPRAMP_ENV` selects
+  // staging vs prod for both the upstream URL and the consumer key.
+  // Kill switch `TUCOPRAMP_PROXY_ENABLED` disables the proxy without
+  // a redeploy (returns 503 { code: "proxy_disabled" }).
+  //
+  // See `src/routes/tucopramp-proxy.ts` for the request-shape contract
+  // and the wallet-consumer-spec.md "TuCOPRamp proxy" section for the
+  // wire behavior.
+  TUCOPRAMP_PROXY_ENABLED: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => v === 'true'),
+  TUCOPRAMP_ENV: z.enum(['staging', 'prod']).optional().default('staging'),
+  TUCOPRAMP_UPSTREAM_URL_STAGING: zHttpsUrl.optional(),
+  TUCOPRAMP_UPSTREAM_URL_PROD: zHttpsUrl.optional(),
+  TUCOPRAMP_CONSUMER_KEY_STAGING: z.string().optional(),
+  TUCOPRAMP_CONSUMER_KEY_PROD: z.string().optional(),
+
   // Shared secret gating the admin endpoints (currently just
   // POST /api/admin/reset-backfill). REQUIRED for those routes to
   // respond; leaving it unset gates the route to 503 so a leaked
