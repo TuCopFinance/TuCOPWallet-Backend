@@ -15,6 +15,7 @@ import metaContractsNeeruRouter from './routes/meta-contracts-neeru'
 import positionsNotifyRouter from './routes/positions-notify'
 import pricesRouter from './routes/prices'
 import tokensRouter from './routes/tokens'
+import tucoprampProxyRouter from './routes/tucopramp-proxy'
 import txStatusRouter from './routes/tx-status'
 import swapRouter from './routes/swap'
 import wriRouter from './routes/wri'
@@ -65,6 +66,15 @@ app.use(
     message: { error: 'rate limit exceeded' },
   }),
 )
+
+// TuCOPRamp proxy must own its own body-capture middleware BEFORE the
+// app-wide express.json() runs. The proxy forwards the raw request
+// body byte-for-byte to preserve the wallet's EIP-191 signature; any
+// JSON parse-then-reserialise breaks the signature check upstream.
+// Mounting the router here (out of order with the rest of the routers)
+// gives express.raw() first crack at /api/tucopramp/* and lets
+// express.json() no-op after the stream is already consumed.
+app.use(tucoprampProxyRouter)
 
 app.use(express.json({ limit: '16kb' }))
 
