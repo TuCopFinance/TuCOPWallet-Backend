@@ -84,10 +84,7 @@ beforeEach(() => {
   installMockFetch()
   setEnv({
     TUCOPRAMP_PROXY_ENABLED: 'true',
-    TUCOPRAMP_ENV: 'staging',
-    TUCOPRAMP_UPSTREAM_URL_STAGING: 'https://api.staging.tucopramp.xyz',
-    TUCOPRAMP_UPSTREAM_URL_PROD: 'https://api.tucopramp.xyz',
-    TUCOPRAMP_CONSUMER_KEY_STAGING: 'tcr_staging_test_key_deadbeef',
+    TUCOPRAMP_UPSTREAM_URL: 'https://api.ramp.tucop.xyz',
     TUCOPRAMP_CONSUMER_KEY_PROD: 'tcr_prod_test_key_cafebabe',
   })
 })
@@ -96,10 +93,7 @@ afterEach(() => {
   global.fetch = REAL_FETCH
   setEnv({
     TUCOPRAMP_PROXY_ENABLED: undefined,
-    TUCOPRAMP_ENV: undefined,
-    TUCOPRAMP_UPSTREAM_URL_STAGING: undefined,
-    TUCOPRAMP_UPSTREAM_URL_PROD: undefined,
-    TUCOPRAMP_CONSUMER_KEY_STAGING: undefined,
+    TUCOPRAMP_UPSTREAM_URL: undefined,
     TUCOPRAMP_CONSUMER_KEY_PROD: undefined,
   })
 })
@@ -110,13 +104,12 @@ afterEach(() => {
 import { app } from '../app'
 
 describe('GET /health/tucopramp-proxy', () => {
-  it('exposes env + upstream but never the consumer key', async () => {
+  it('exposes enabled + upstream but never the consumer key', async () => {
     const res = await request(app).get('/health/tucopramp-proxy')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
       enabled: true,
-      env: 'staging',
-      upstream: 'https://api.staging.tucopramp.xyz',
+      upstream: 'https://api.ramp.tucop.xyz',
     })
     // Whitelist assertion: no key field, no key value, at any depth.
     const asString = JSON.stringify(res.body)
@@ -124,23 +117,22 @@ describe('GET /health/tucopramp-proxy', () => {
     expect(asString).not.toContain('key')
   })
 
-  it('reflects the active env when TUCOPRAMP_ENV=prod', async () => {
-    setEnv({ TUCOPRAMP_ENV: 'prod' })
+  it('shape stays the same when the kill switch is OFF (enabled:false, upstream still visible)', async () => {
+    setEnv({ TUCOPRAMP_PROXY_ENABLED: 'false' })
     const res = await request(app).get('/health/tucopramp-proxy')
+    expect(res.status).toBe(200)
     expect(res.body).toEqual({
-      enabled: true,
-      env: 'prod',
-      upstream: 'https://api.tucopramp.xyz',
+      enabled: false,
+      upstream: 'https://api.ramp.tucop.xyz',
     })
   })
 })
 
-describe('ALL /api/tucopramp/*', () => {
+describe('ALL /api/tucopramp/v1/p2p/*', () => {
   it('T1: GET passes wallet-signed headers unchanged + injects X-TuCOPRamp-Key', async () => {
-    // Wallet spec: X-Wallet-Address, X-Wallet-Timestamp,
-    // X-Wallet-Signature, Idempotency-Key MUST reach upstream
-    // verbatim. Backend injects X-TuCOPRamp-Key with the env-selected
-    // consumer key.
+    // Wallet spec §3: X-Wallet-Address, X-Wallet-Timestamp,
+    // X-Wallet-Signature, Idempotency-Key MUST reach upstream verbatim.
+    // Backend injects X-TuCOPRamp-Key with the consumer key.
     const res = await request(app)
       .get('/api/tucopramp/v1/p2p/banks?limit=10')
       .set('X-Wallet-Address', '0x81dCf9160237D0EF0d4db27CFb2EA9743547f882')
@@ -150,14 +142,14 @@ describe('ALL /api/tucopramp/*', () => {
     expect(res.status).toBe(200)
     expect(captured).toHaveLength(1)
     const call = captured[0]!
-    expect(call.url).toBe('https://api.staging.tucopramp.xyz/v1/p2p/banks?limit=10')
+    expect(call.url).toBe('https://api.ramp.tucop.xyz/v1/p2p/banks?limit=10')
     expect(call.init.method).toBe('GET')
     const h = call.init.headers!
     expect(h.get('X-Wallet-Address')).toBe('0x81dCf9160237D0EF0d4db27CFb2EA9743547f882')
     expect(h.get('X-Wallet-Timestamp')).toBe('1735689600')
     expect(h.get('X-Wallet-Signature')).toBe('0xdeadbeef')
     expect(h.get('Idempotency-Key')).toBe('idem-abc-123')
-    expect(h.get('X-TuCOPRamp-Key')).toBe('tcr_staging_test_key_deadbeef')
+    expect(h.get('X-TuCOPRamp-Key')).toBe('tcr_prod_test_key_cafebabe')
   })
 
   it('T2: POST with JSON body forwards bytes verbatim (SHA256 identical)', async () => {
@@ -268,8 +260,8 @@ describe('ALL /api/tucopramp/*', () => {
     expect(res.headers['content-type']).toMatch(/^application\/json/)
   })
 
-  it('T6 (bonus): missing consumer key returns proxy_misconfigured (guard against silent-degrade in test env)', async () => {
-    setEnv({ TUCOPRAMP_CONSUMER_KEY_STAGING: undefined })
+  it('T6: missing consumer key returns proxy_misconfigured (guard against silent-degrade)', async () => {
+    setEnv({ TUCOPRAMP_CONSUMER_KEY_PROD: undefined })
     const res = await request(app)
       .get('/api/tucopramp/v1/p2p/banks')
       .set('X-Wallet-Address', '0x81dc')
@@ -278,14 +270,25 @@ describe('ALL /api/tucopramp/*', () => {
     expect(captured).toHaveLength(0)
   })
 
-  it('T7 (bonus): prod env selects prod upstream + prod key without cross-contamination', async () => {
-    setEnv({ TUCOPRAMP_ENV: 'prod' })
+  it('T7: missing upstream URL returns proxy_misconfigured', async () => {
+    setEnv({ TUCOPRAMP_UPSTREAM_URL: undefined })
     const res = await request(app)
       .get('/api/tucopramp/v1/p2p/banks')
       .set('X-Wallet-Address', '0x81dc')
-    expect(res.status).toBe(200)
-    const call = captured[0]!
-    expect(call.url).toBe('https://api.tucopramp.xyz/v1/p2p/banks')
-    expect(call.init.headers!.get('X-TuCOPRamp-Key')).toBe('tcr_prod_test_key_cafebabe')
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ code: 'proxy_misconfigured' })
+    expect(captured).toHaveLength(0)
+  })
+
+  it('T8: paths outside /v1/p2p/* fall through to the app 404 handler (never reach upstream)', async () => {
+    // Wallet spec §2 + §7 scope the proxy to /v1/p2p/*. Any other
+    // path under /api/tucopramp/* must NOT proxy: it should hit the
+    // app's 404 handler so consumer-key budget is not spent on a
+    // wallet mistake.
+    const res = await request(app)
+      .get('/api/tucopramp/admin/reset')
+      .set('X-Wallet-Address', '0x81dc')
+    expect(res.status).toBe(404)
+    expect(captured).toHaveLength(0)
   })
 })

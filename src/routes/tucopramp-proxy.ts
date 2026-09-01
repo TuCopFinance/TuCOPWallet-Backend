@@ -1,9 +1,14 @@
 // Pass-through proxy for TuCOPRamp (2026-08-30 wallet request). The
 // wallet signs the request path + body per EIP-191 and sends to
-// `/api/tucopramp/<...>`; backend strips that prefix and forwards to
-// `${TUCOPRAMP_UPSTREAM_URL_<ENV>}/<...>` with the consumer key
-// injected via the `X-TuCOPRamp-Key` header (kept server-side so the
-// key never ships in the wallet binary).
+// `/api/tucopramp/v1/p2p/<...>`; backend strips only the /api/tucopramp
+// prefix and forwards to `${TUCOPRAMP_UPSTREAM_URL}/v1/p2p/<...>` with
+// the consumer key injected via the `X-TuCOPRamp-Key` header (kept
+// server-side so the key never ships in the wallet binary).
+//
+// Path scope is `/v1/p2p/*` intentionally (wallet spec §2 + §7):
+// TuCOPRamp admin surfaces are NOT proxied. A wallet mistake pointed
+// at a non-p2p path 404s backend-side without spending consumer-key
+// budget on a round trip that upstream would reject anyway.
 //
 // Preservation contract (MUST hold end-to-end):
 //
@@ -59,6 +64,9 @@ const log = createLogger('routes:tucopramp-proxy')
 const router = Router()
 
 const PROXY_PATH_PREFIX = '/api/tucopramp'
+// Only /v1/p2p/* is proxied; other paths under /api/tucopramp fall through
+// to the app's 404 handler. Matches the wallet spec §2 + §7.
+const PROXY_ROUTE_PATTERN = `${PROXY_PATH_PREFIX}/v1/p2p/*`
 const UPSTREAM_TIMEOUT_MS = 30_000
 // Cap raw body at 10 MB. Multipart proof uploads (bank receipt
 // photos) empirically fit under 5 MB; 10 leaves headroom for future
@@ -90,41 +98,33 @@ const UPSTREAM_RESPONSE_HEADERS_TO_FORWARD: ReadonlyArray<string> = [
 
 interface ProxyConfig {
   enabled: boolean
-  envName: 'staging' | 'prod'
   upstream: string | null
   key: string | null
 }
 
 // Resolve at request time (not boot) so a Railway env flip of
-// TUCOPRAMP_ENV or TUCOPRAMP_PROXY_ENABLED takes effect on the
-// next request without restart. Matches the pattern the WRI +
-// integrator-fee routes use.
+// TUCOPRAMP_PROXY_ENABLED takes effect on the next request without a
+// restart. Matches the pattern the WRI + integrator-fee routes use.
 function resolveProxyConfig(): ProxyConfig {
-  const envName = env.TUCOPRAMP_ENV
-  const upstream =
-    envName === 'prod'
-      ? env.TUCOPRAMP_UPSTREAM_URL_PROD ?? null
-      : env.TUCOPRAMP_UPSTREAM_URL_STAGING ?? null
-  const key =
-    envName === 'prod'
-      ? env.TUCOPRAMP_CONSUMER_KEY_PROD ?? null
-      : env.TUCOPRAMP_CONSUMER_KEY_STAGING ?? null
-  return { enabled: env.TUCOPRAMP_PROXY_ENABLED, envName, upstream, key }
+  return {
+    enabled: env.TUCOPRAMP_PROXY_ENABLED,
+    upstream: env.TUCOPRAMP_UPSTREAM_URL ?? null,
+    key: env.TUCOPRAMP_CONSUMER_KEY_PROD ?? null,
+  }
 }
 
 // GET /health/tucopramp-proxy
 //
 // Read-only probe for coordination between backend + wallet + TuCOPRamp
-// teams. Exposes the ENV name and the upstream host (both harmless to
-// disclose) so a wallet-side smoke can verify the proxy is up +
+// teams. Exposes only the enabled flag + upstream host (both harmless
+// to disclose) so a wallet-side smoke can verify the proxy is up and
 // pointing at the right upstream without asking for Railway access.
 // Consumer key is NEVER exposed here; the shape is stable regardless
-// of whether the key is set.
+// of whether the key is set. Shape matches wallet spec §5.
 router.get('/health/tucopramp-proxy', (_req: Request, res: ExpressResponse) => {
   const cfg = resolveProxyConfig()
   return res.json({
     enabled: cfg.enabled,
-    env: cfg.envName,
     upstream: cfg.upstream,
   })
 })
@@ -139,12 +139,12 @@ router.use(
   express.raw({ type: '*/*', limit: MAX_BODY_BYTES }),
 )
 
-// ALL /api/tucopramp/<...>
+// ALL /api/tucopramp/v1/p2p/<...>
 //
-// Catch-all handler across every HTTP method. Order matters: this must
-// come AFTER the body-capture middleware above.
+// Handler across every HTTP method for the /v1/p2p namespace. Order
+// matters: this must come AFTER the body-capture middleware above.
 // Express 4 wildcard syntax: `/prefix/*` matches any nested path.
-router.all(`${PROXY_PATH_PREFIX}/*`, async (req: Request, res: ExpressResponse) => {
+router.all(PROXY_ROUTE_PATTERN, async (req: Request, res: ExpressResponse) => {
   const cfg = resolveProxyConfig()
 
   if (!cfg.enabled) {
@@ -156,7 +156,6 @@ router.all(`${PROXY_PATH_PREFIX}/*`, async (req: Request, res: ExpressResponse) 
       level: 'error',
       tags: {
         event: 'tucopramp_proxy_misconfigured',
-        env: cfg.envName,
       },
       extra: {
         hasUpstream: cfg.upstream !== null,
@@ -226,12 +225,19 @@ router.all(`${PROXY_PATH_PREFIX}/*`, async (req: Request, res: ExpressResponse) 
     }
   }
 
+  // Per-request audit trail (wallet spec §6). One log.warn line per
+  // request so the entry lands in prod (project logger prod level =
+  // WARN). Volume is bounded by upstream's 60 req/min per-wallet cap.
+  // Sensitive material NEVER logged: no headers (X-TuCOPRamp-Key,
+  // X-Wallet-Signature), no request body, no response body content.
+  //
   // On 4xx / 5xx, best-effort extract the upstream `request_id` from
-  // the error envelope so a wallet ticket citing an error is traceable
-  // to a specific upstream log line. Silent when the body is not JSON
-  // (e.g. HTML error page from a proxy in front of TuCOPRamp).
+  // the RFC 7807 envelope so a wallet ticket citing an error is
+  // traceable to a specific upstream log line. Silent when the body
+  // is not JSON (e.g. HTML error page from a proxy in front of
+  // TuCOPRamp).
+  let requestId: string | undefined
   if (upstreamRes.status >= 400) {
-    let requestId: string | undefined
     try {
       const parsed = JSON.parse(responseBuffer.toString('utf-8')) as {
         request_id?: unknown
@@ -242,11 +248,11 @@ router.all(`${PROXY_PATH_PREFIX}/*`, async (req: Request, res: ExpressResponse) 
     } catch {
       // Non-JSON response body; nothing to extract.
     }
-    log.warn(
-      `upstream ${upstreamRes.status} on ${req.method} ${pathAfterPrefix}` +
-        (requestId ? ` request_id=${requestId}` : ''),
-    )
   }
+  log.warn(
+    `proxy ${req.method} ${pathAfterPrefix} -> ${upstreamRes.status}` +
+      (requestId ? ` request_id=${requestId}` : ''),
+  )
 
   return res.send(responseBuffer)
 })
