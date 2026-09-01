@@ -363,12 +363,13 @@ const envSchema = z.object({
     .transform((v) => v !== 'false'),
 
   // TuCOPRamp pass-through proxy (2026-08-30 wallet request). The proxy
-  // route lives at `/api/tucopramp/*` and forwards to
-  // `${TUCOPRAMP_UPSTREAM_URL_<ENV>}/*` (stripping the /api/tucopramp
+  // route lives at `/api/tucopramp/v1/p2p/*` and forwards to
+  // `${TUCOPRAMP_UPSTREAM_URL}/v1/p2p/*` (stripping the /api/tucopramp
   // prefix), preserving the wallet-signed body byte-for-byte and
   // injecting the consumer key via `X-TuCOPRamp-Key` server-side so
-  // the wallet never holds the secret. `TUCOPRAMP_ENV` selects
-  // staging vs prod for both the upstream URL and the consumer key.
+  // the wallet never holds the secret. TuCOPRamp has a single
+  // deployment today (no staging/prod split); when a separate staging
+  // deployment materialises, a second env pair gets added here.
   // Kill switch `TUCOPRAMP_PROXY_ENABLED` disables the proxy without
   // a redeploy (returns 503 { code: "proxy_disabled" }).
   //
@@ -380,10 +381,7 @@ const envSchema = z.object({
     .optional()
     .default('false')
     .transform((v) => v === 'true'),
-  TUCOPRAMP_ENV: z.enum(['staging', 'prod']).optional().default('staging'),
-  TUCOPRAMP_UPSTREAM_URL_STAGING: zHttpsUrl.optional(),
-  TUCOPRAMP_UPSTREAM_URL_PROD: zHttpsUrl.optional(),
-  TUCOPRAMP_CONSUMER_KEY_STAGING: z.string().optional(),
+  TUCOPRAMP_UPSTREAM_URL: zHttpsUrl.optional(),
   TUCOPRAMP_CONSUMER_KEY_PROD: z.string().optional(),
 
   // Shared secret gating the admin endpoints (currently just
