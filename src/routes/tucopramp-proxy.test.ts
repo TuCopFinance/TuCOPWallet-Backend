@@ -291,4 +291,56 @@ describe('ALL /api/tucopramp/v1/p2p/*', () => {
     expect(res.status).toBe(404)
     expect(captured).toHaveLength(0)
   })
+
+  it('T9: forwards HTTP cache-semantic response headers (Cache-Control, ETag, Last-Modified, Vary)', async () => {
+    // TuCOPRamp `GET /v1/p2p/limits` (guide v1.3) and `GET /v1/p2p/banks`
+    // emit `Cache-Control: public, max-age=<n>`. Consumers that respect
+    // HTTP caching semantics need the header to serve conditional or
+    // fresh responses correctly; dropping it silently forces every hit
+    // to round-trip and defeats the upstream cache hint. `ETag` +
+    // `Last-Modified` support conditional GET. `Vary` keeps caches
+    // honest when the response differs by consumer key.
+    nextUpstreamResponse = {
+      status: 200,
+      body: Buffer.from(
+        JSON.stringify({
+          min_order_cop: 100000,
+          max_order_cop: 500000,
+          max_daily_cop: 1000000,
+          max_monthly_cop: 3000000,
+        })
+      ),
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=300',
+        ETag: 'W/"abc123"',
+        'Last-Modified': 'Wed, 02 Sep 2026 22:40:00 GMT',
+        Vary: 'X-TuCOPRamp-Key',
+      },
+    }
+    const res = await request(app).get('/api/tucopramp/v1/p2p/limits')
+    expect(res.status).toBe(200)
+    expect(res.headers['cache-control']).toBe('public, max-age=300')
+    expect(res.headers['etag']).toBe('W/"abc123"')
+    expect(res.headers['last-modified']).toBe('Wed, 02 Sep 2026 22:40:00 GMT')
+    expect(res.headers['vary']).toBe('X-TuCOPRamp-Key')
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+  })
+
+  it('T10: cache-semantic headers absent upstream are absent downstream (no synthesis)', async () => {
+    // Passthrough discipline: the proxy MUST NOT invent cache headers
+    // the upstream did not emit. Otherwise a wallet-side cache could
+    // incorrectly hold onto data the upstream considered dynamic.
+    nextUpstreamResponse = {
+      status: 200,
+      body: Buffer.from('{"ok":true}'),
+      headers: { 'Content-Type': 'application/json' },
+    }
+    const res = await request(app).get('/api/tucopramp/v1/p2p/banks')
+    expect(res.status).toBe(200)
+    expect(res.headers['cache-control']).toBeUndefined()
+    expect(res.headers['etag']).toBeUndefined()
+    expect(res.headers['last-modified']).toBeUndefined()
+    expect(res.headers['vary']).toBeUndefined()
+  })
 })

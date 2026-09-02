@@ -89,9 +89,17 @@ const WALLET_PASSTHROUGH_HEADERS: ReadonlyArray<string> = [
 
 // Upstream response headers we echo to the wallet. Explicit allowlist
 // avoids accidentally leaking upstream infra headers (server names,
-// CF-Ray, etc.) that the wallet does not need.
+// CF-Ray, etc.) that the wallet does not need. HTTP cache-semantic
+// headers (Cache-Control / ETag / Last-Modified / Vary) are forwarded
+// so consumers can honour upstream cache hints and conditional GETs;
+// TuCOPRamp `GET /v1/p2p/limits` and `/v1/p2p/banks` emit
+// `Cache-Control: public, max-age=<n>` per guide v1.3.
 const UPSTREAM_RESPONSE_HEADERS_TO_FORWARD: ReadonlyArray<string> = [
   'Content-Type',
+  'Cache-Control',
+  'ETag',
+  'Last-Modified',
+  'Vary',
   'Retry-After',
   'Sunset',
 ]
@@ -254,7 +262,17 @@ router.all(PROXY_ROUTE_PATTERN, async (req: Request, res: ExpressResponse) => {
       (requestId ? ` request_id=${requestId}` : ''),
   )
 
-  return res.send(responseBuffer)
+  // `res.end(buffer)` instead of `res.send(buffer)`: `res.send()`
+  // auto-generates a weak ETag over the response body when the
+  // response has no ETag set. For a passthrough proxy that is a
+  // correctness bug — a wallet doing a conditional GET with
+  // `If-None-Match: <our-synth-etag>` would send an ETag the
+  // upstream cannot recognise. When upstream DID send an ETag we
+  // set it explicitly above and the wallet gets the real, semantic
+  // ETag. Same reasoning applies to Content-Type auto-detection
+  // (we already set it explicitly from upstream), so `res.end()`
+  // is both safer and simpler for this route.
+  return res.end(responseBuffer)
 })
 
 export default router
