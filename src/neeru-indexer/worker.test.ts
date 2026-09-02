@@ -1,4 +1,5 @@
 import { encodeAbiParameters, pad, toHex } from 'viem'
+import { neeruIndexerLagBlocks } from '../lib/metrics'
 import {
   CONTRACT_ADDRESS,
   EVENT_A_TOPIC0,
@@ -315,6 +316,38 @@ describe('runTick', () => {
     ).length
     expect(begins).toBe(5)
     expect(commits).toBe(5)
+  })
+
+  it('throws rpc_stale_tip when getBlockNumber returns a value <= lastScannedBlock (2026-07-31 celocolombia pattern)', async () => {
+    // Scenario: RPC provider returns HTTP 200 with block=0 for
+    // eth_blockNumber, but indexer has already scanned block 5_000_000.
+    // Without the sanity guard, the tick would silently no-op via the
+    // "latest <= REORG_BUFFER_BLOCKS" early return, and the indexer would
+    // look "healthy" per consecutiveErrors counter while doing nothing.
+    // With the guard, we throw so the caller's error path fires + Sentry
+    // stuck event trips on threshold.
+    const { db } = buildFakeDb({ lastScannedBlock: 5_000_000n })
+    const staleRpc = buildRpc({ latestBlock: 5_000_000n }).rpc
+    await expect(runTick({ db: db as never, rpc: staleRpc })).rejects.toThrow(
+      /rpc_stale_tip: getBlockNumber\(\)=5000000 <= lastScannedBlock=5000000/,
+    )
+
+    // Same guard fires when the RPC returns a block STRICTLY behind (block=0
+    // being the observed 2026-07-31 case).
+    const { db: db2 } = buildFakeDb({ lastScannedBlock: 5_000_000n })
+    const zeroBlockRpc = buildRpc({ latestBlock: 100n }).rpc
+    await expect(
+      runTick({ db: db2 as never, rpc: zeroBlockRpc }),
+    ).rejects.toThrow(/rpc_stale_tip: getBlockNumber\(\)=100 <= lastScannedBlock=5000000/)
+  })
+
+  it('emits neeru_indexer_lag_blocks gauge on every tick where the tip is sane', async () => {
+    const { db } = buildFakeDb({ lastScannedBlock: 1_000_000n })
+    const { rpc } = buildRpc({ latestBlock: 1_000_010n })
+    await runTick({ db: db as never, rpc })
+    // Lag = latest (1_000_010) - lastScannedBlock (1_000_000) = 10 blocks.
+    const gauge = await neeruIndexerLagBlocks.get()
+    expect(gauge.values[0]!.value).toBe(10)
   })
 
   it('throws when neeru_indexer_state row is missing', async () => {

@@ -111,6 +111,21 @@ export const transactionsIndexerLagBlocks = new Gauge({
   registers: [metricsRegistry],
 })
 
+// Neeru indexer lag in blocks (celo tip - last scanned block). Emitted by
+// the neeru worker on every successful tick. Grafana alerts when this stays
+// above a threshold (default 40, ~3 min at 5s blocks) for >2 min; catches
+// the class of silent-degradation we saw 2026-07-31 (rpc.celocolombia.org
+// returned block=0 for 3 days, indexer looked "alive" via consecutiveErrors
+// counter but nothing scanned). Complements the neeru_indexer_stuck Sentry
+// event (which fires only after 5 consecutive tick failures); a stall where
+// getBlockNumber() succeeds but returns a stale tip does NOT trip that
+// counter, hence a dedicated lag gauge.
+export const neeruIndexerLagBlocks = new Gauge({
+  name: 'neeru_indexer_lag_blocks',
+  help: 'Celo tip block minus last scanned block on the neeru indexer. Stays at 0 when caught up; unbounded upward when stalled.',
+  registers: [metricsRegistry],
+})
+
 // Total addresses the transactions indexer is watching. Quick sanity check
 // that POST /api/transactions/watch is reaching the DB. Updated alongside
 // the lag gauge.
