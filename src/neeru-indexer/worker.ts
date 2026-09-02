@@ -3,6 +3,7 @@ import { getDb } from '../lib/db'
 import { env } from '../lib/env'
 import { providerNameFromUrl } from '../lib/celoRpcFallback'
 import { createLogger } from '../lib/logger'
+import { neeruIndexerLagBlocks } from '../lib/metrics'
 import { Sentry } from '../lib/sentry'
 import {
   assertIndexerConfig,
@@ -132,6 +133,30 @@ export async function runTick(opts: TickOptions): Promise<{
   if (latest <= REORG_BUFFER_BLOCKS) {
     return { scanned: false }
   }
+
+  // Sanity guard against a silently-degraded RPC provider (2026-07-31
+  // incident: rpc.celocolombia.org returned HTTP 200 with `block=0` for
+  // eth_blockNumber while the indexer had lastScannedBlock=~50M; the
+  // fallback executor did not distinguish "success with bad data" from a
+  // real success, so the indexer looked healthy while doing nothing for
+  // 3 days). The fallback chain has since been reordered (forno-first),
+  // but this guard covers any future recurrence at ANY provider without
+  // relying on ordering. Throwing here trips the consecutive-errors
+  // counter + the neeru_indexer_stuck Sentry event on threshold cross;
+  // recovery is automatic when the next tick sees a sane tip.
+  if (latest <= state.lastScannedBlock) {
+    throw new Error(
+      `rpc_stale_tip: getBlockNumber()=${latest} <= lastScannedBlock=${state.lastScannedBlock}; likely stale RPC provider`,
+    )
+  }
+
+  // Emit the lag gauge on every tick where we got a sane tip. Uses the raw
+  // distance to `latest` (not `safeTip`) so operators see the actual gap,
+  // including the intentional REORG_BUFFER_BLOCKS trailing window. Grafana
+  // alert when this stays above threshold for >2 min catches silent stalls
+  // that the consecutive-error counter would miss (e.g. RPC returns a
+  // frozen-but-non-stale tip).
+  neeruIndexerLagBlocks.set(Number(latest - state.lastScannedBlock))
 
   const safeTip = latest - REORG_BUFFER_BLOCKS
   const fromBlock = state.lastScannedBlock + 1n

@@ -580,19 +580,33 @@ export async function startIndexer(
 
         const tip = await rpc.getBlockNumber()
         const last = await getLastBlock(db, tip)
+        // Sanity guard against a silently-degraded RPC provider that returns
+        // a stale tip (e.g. 2026-07-31 celocolombia returning block=0 for
+        // eth_blockNumber). Without this, tip<last silently clamps the lag
+        // gauge to 0 (masking the bug) and the tick planner produces an
+        // empty window (making the indexer look "caught up"). Throwing here
+        // routes into the consecutive-errors path so the existing threshold
+        // Sentry event fires; recovery is automatic once a sane tip lands.
+        if (tip < last) {
+          throw new Error(
+            `rpc_stale_tip: getBlockNumber()=${tip} < lastIndexedBlock=${last}; likely stale RPC provider`,
+          )
+        }
         lastKnownCursor = last
         lastKnownTip = tip
         // Refresh observability gauges on every tick whether or not we end up
         // doing work; /metrics scrapes between health route calls read these.
         // Cheap in-process gauge sets, no I/O. Lag gauge tracks raw distance
         // to reported head (not safe-tip) so operators see the actual lag,
-        // including the intentional HEAD_LAG_BUFFER_BLOCKS.
+        // including the intentional HEAD_LAG_BUFFER_BLOCKS. Safe from the
+        // clamp-hides-stale-tip trap because the sanity guard above threw
+        // when tip<last.
         transactionsIndexerWatchedAddresses
           .labels({ network_id: NETWORK_ID })
           .set(watched.size)
         transactionsIndexerLagBlocks
           .labels({ network_id: NETWORK_ID })
-          .set(tip > last ? Number(tip - last) : 0)
+          .set(Number(tip - last))
 
         const window = computeTickWindow({
           tip,
