@@ -1,6 +1,7 @@
 import path from 'path'
 import express from 'express'
 import rateLimit from 'express-rate-limit'
+import helmet from 'helmet'
 import { hooksApiRouter } from './hooks-api/routes'
 import { corsReadSkippingWrite, corsWrite, WRITE_PATHS } from './lib/cors'
 import { createLogger } from './lib/logger'
@@ -25,6 +26,23 @@ import transactionsRouter from './transactions-indexer/routes'
 const reqLog = createLogger('app:req')
 
 export const app = express()
+
+// Drop the default `X-Powered-By: Express` header (fingerprinting signal that
+// tells attackers the framework in use). Nothing consumes it.
+app.disable('x-powered-by')
+
+// Baseline security headers via helmet. Defaults enable:
+// - Strict-Transport-Security (max-age=15552000; includeSubDomains)
+// - X-Content-Type-Options: nosniff
+// - X-Frame-Options: SAMEORIGIN
+// - Referrer-Policy: no-referrer
+// - Cross-Origin-Opener-Policy / Cross-Origin-Resource-Policy
+// CSP is intentionally left OFF: this backend serves JSON (not HTML), the
+// only static assets are token logos + Neeru category images returned as
+// PNG/SVG via express.static, and enabling CSP with the helmet defaults
+// would forbid inline styles on 404 pages that Express renders. Add it
+// selectively per-router if we ever serve HTML.
+app.use(helmet({ contentSecurityPolicy: false }))
 
 // Railway terminates TLS at one proxy hop. Telling Express to trust exactly one
 // hop lets express-rate-limit see the real client IP without enabling IP
