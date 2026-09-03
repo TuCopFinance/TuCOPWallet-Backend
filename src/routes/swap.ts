@@ -75,10 +75,13 @@ function validate(req: Request): { ok: true; input: ValidatedInput } | { ok: fal
   }
 }
 
-// Reads the 3 integrator-fee env vars each call so a Railway env flip takes
-// effect on the next request without a redeploy (matching the pattern used
-// for SQUID_INTEGRATOR_ID and REDIS_URL). Returns undefined when the kill
-// switch is off, which makes the caller skip both the request-side
+// Reads the 3 integrator-fee env vars each call (via process.env directly,
+// not the cached env schema) so tests can override per-test without a module
+// cache reset. A Railway env-var change auto-triggers a rolling redeploy
+// (~2-5 min, zero downtime); the new container comes up with the new values.
+// Not an in-process hot-reload (process.env is set at container start and
+// stays fixed for the lifetime of that container). Returns undefined when
+// the kill switch is off, which makes the caller skip both the request-side
 // collectFees payload AND the response-side appFeePercentageIncludedInPrice
 // mapping. Env-var validation in lib/env.ts guarantees that when the flag
 // is on, address + percentage are both present and well-formed, so this

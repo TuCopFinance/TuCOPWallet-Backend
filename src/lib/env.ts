@@ -219,7 +219,10 @@ const envSchema = z.object({
   // to the configured recipient address. Address + percentage are REQUIRED
   // when the flag is on (validated in the cross-field block below). Kept
   // as env so we can flip on / off / rotate recipient / retune percentage
-  // without a redeploy. Range on percentage matches Squid's contract
+  // via a Railway env-var change. Railway auto-triggers a rolling redeploy
+  // on env change (~2-5 min, zero downtime); the new container boots with
+  // the new value. No code release needed, but the running process is
+  // NOT hot-reloaded in place. Range on percentage matches Squid's contract
   // (0 < feeValue <= 100); percentages above ~1% are unusual for consumer
   // swaps but we do not clamp defensively so the operator can dial it if
   // Squid ever supports higher tiers.
@@ -331,9 +334,12 @@ const envSchema = z.object({
     .default('true')
     .transform((v) => v !== 'false'),
 
-  // Kill switches for /api/transactions/feed and /watch. Evaluated per-request
-  // (not at boot) so the flip takes effect on the next request without a
-  // Railway restart. Default true. Set to the literal string "false" to gate
+  // Kill switches for /api/transactions/feed and /watch. Evaluated per
+  // handler invocation (not memoised at module load) so a Railway env
+  // change auto-triggers a rolling redeploy (~2-5 min, zero downtime)
+  // and the new container boots with the flipped value; the running
+  // process itself is NOT hot-reloaded in place. Default true. Set to
+  // the literal string "false" to gate
   // the route to 503. Added 2026-07-05 in response to the shape-bug rollback
   // during the WRI_TX_FEED_TUCOP_V1 rollout so backend has a same-second pause
   // path independent of the wallet's Statsig gate.
