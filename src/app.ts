@@ -6,6 +6,7 @@ import { hooksApiRouter } from './hooks-api/routes'
 import { corsReadSkippingWrite, corsWrite, WRITE_PATHS } from './lib/cors'
 import { createLogger } from './lib/logger'
 import { httpRequestDurationSeconds } from './lib/metrics'
+import { hashWalletAddress } from './lib/pii'
 import { Sentry } from './lib/sentry'
 import { neeruTimelockRouter } from './neeru-timelock/routes'
 import blockscoutRouter from './routes/blockscout'
@@ -122,7 +123,11 @@ app.use((req, _res, next) => {
   scope.setContext('request', {
     path: req.path,
     query: req.query,
-    walletAddress,
+    // Pseudonymised pointer, not the raw address. Stable per user so
+    // per-user drill-down in Sentry still works; unreversible without a
+    // rainbow table of known addresses (PII_HASH_SALT makes any such
+    // table single-environment).
+    walletPseudonym: hashWalletAddress(walletAddress),
   })
   next()
 })
