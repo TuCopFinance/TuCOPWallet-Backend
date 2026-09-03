@@ -370,8 +370,11 @@ const envSchema = z.object({
   // the wallet never holds the secret. TuCOPRamp has a single
   // deployment today (no staging/prod split); when a separate staging
   // deployment materialises, a second env pair gets added here.
-  // Kill switch `TUCOPRAMP_PROXY_ENABLED` disables the proxy without
-  // a redeploy (returns 503 { code: "proxy_disabled" }).
+  // Kill switch `TUCOPRAMP_PROXY_ENABLED` disables the proxy (returns
+  // 503 { code: "proxy_disabled" }). Toggling the env var in Railway
+  // auto-triggers a rolling redeploy (~2-5 min, zero downtime); the
+  // new container boots with the new value. Not an in-process hot
+  // swap (env is cached at boot via parseEnv() in this file).
   //
   // See `src/routes/tucopramp-proxy.ts` for the request-shape contract
   // and the wallet-consumer-spec.md "TuCOPRamp proxy" section for the
