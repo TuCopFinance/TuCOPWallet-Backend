@@ -105,12 +105,31 @@ describe('GET /api/earn/neeru/positions', () => {
     expect(res.body.error).toMatch(/address/i)
   })
 
-  it('400s on a mixed-case address (lowercase-only enforcement)', async () => {
-    const mixed = '0x111111111111111111111111111111111111111A'
+  it('accepts EIP-55 checksummed addresses + normalises to lowercase before assembler', async () => {
+    // Regression test for 2026-09-03 bug: prior code required lowercase-
+    // only via HEX_ADDRESS_LOWER_RE, returning 400 on checksummed input.
+    // viem's `getAddress()` (default wallet-side format) produces
+    // checksummed addresses; wallet callers that didn't pre-lowercase
+    // (fetchNeeruPositions did not) hit 400 in prod. Contrast with every
+    // other wallet-facing endpoint in this repo which accepts both
+    // casings via HEX_ADDRESS_RE. Fix: accept both, normalise server-
+    // side to lowercase before passing to the assembler.
+    const checksummed = '0x81dCf9160237D0EF0d4db27CFb2EA9743547f882'
+    const expectedLower = checksummed.toLowerCase()
+    getNeeruPositionDetailMock.mockResolvedValueOnce({
+      address: expectedLower,
+      positions: [],
+      lastSyncedBlock: 1000000,
+      lastSyncedAt: '2026-09-03T00:00:00.000Z',
+    })
     const res = await request(app).get(
-      `/api/earn/neeru/positions?address=${mixed}`,
+      `/api/earn/neeru/positions?address=${checksummed}`,
     )
-    expect(res.status).toBe(400)
+    expect(res.status).toBe(200)
+    // Assembler receives the lowercased form so DB queries hit the same
+    // canonical key regardless of caller casing.
+    const args = getNeeruPositionDetailMock.mock.calls[0]?.[0]
+    expect(args?.address).toBe(expectedLower)
   })
 
   it('400s on an unknown query param', async () => {

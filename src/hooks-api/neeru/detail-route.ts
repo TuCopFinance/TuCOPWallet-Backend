@@ -5,7 +5,7 @@
 // must update the spec section and its changelog entry.
 import type { Request, Response, Router } from 'express'
 import { getDb } from '../../lib/db'
-import { HEX_ADDRESS_LOWER_RE } from '../../lib/hex'
+import { HEX_ADDRESS_RE } from '../../lib/hex'
 import { createLogger } from '../../lib/logger'
 import {
   _setSharedNeeruRpcForTests,
@@ -40,10 +40,17 @@ export function mountNeeruDetailRoute(router: Router): void {
       }
 
       const raw = req.query.address
-      if (typeof raw !== 'string' || !HEX_ADDRESS_LOWER_RE.test(raw)) {
+      if (typeof raw !== 'string' || !HEX_ADDRESS_RE.test(raw)) {
         return res.status(400).json({ error: 'invalid address' })
       }
-      const address = raw
+      // Normalise to lowercase before downstream use. Wallet clients send
+      // EIP-55 checksummed addresses (viem `getAddress()` default); every
+      // other wallet-facing endpoint in this repo already accepts both
+      // casings and lowercases server-side. Prior code required lowercase-
+      // only via HEX_ADDRESS_LOWER_RE, returning 400 on checksummed input
+      // and forcing every consumer to pre-lowercase; that inconsistency is
+      // eliminated here.
+      const address = raw.toLowerCase()
 
       const db = getDb()
       if (!db) {
