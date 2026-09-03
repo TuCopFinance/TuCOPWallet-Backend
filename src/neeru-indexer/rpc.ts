@@ -25,8 +25,10 @@ import { createLogger } from '../lib/logger'
 const log = createLogger('neeru-indexer:rpc')
 
 // Fallback chain order: primary -> Forno -> Ankr -> dRPC. URLs resolve
-// through lib/celoClient getters, which read from env, so a Railway env
-// override propagates here without a redeploy.
+// through lib/celoClient getters, which read from the cached env schema
+// (parseEnv() populates cachedEnv on the first access at boot). A Railway
+// env override auto-triggers a rolling redeploy so the new container boots
+// with the new URLs; the running process is NOT hot-reloaded in place.
 
 // Skip window is applied to EVERY endpoint (was primary-only before
 // 2026-08-08). After N consecutive failures on any endpoint, we skip it
