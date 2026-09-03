@@ -189,6 +189,26 @@ function buildAggregatedSwap(cluster: readonly SwapTransaction[]): SwapTransacti
     },
   }))
 
+  // Pick the outAmount.tokenId defensively. When every leg sold the same
+  // token, use that token. When the basket mixes (USDT + USDC + USDm),
+  // pick the tokenId of the leg with the largest whole-unit value so any
+  // future wallet renderer that reads `outAmount.tokenId` (today it uses
+  // `fromTokenAmounts`) sees a token that was ACTUALLY sold instead of a
+  // hardcoded USDm. Falls back to AGGREGATE_OUT_TOKEN_ID only when the
+  // cluster is somehow empty (unreachable in practice).
+  const uniqueTokenIds = new Set(cluster.map((c) => c.outAmount.tokenId))
+  let dominantTokenId: string
+  let dominantDecimals: number | null
+  if (uniqueTokenIds.size === 1) {
+    dominantTokenId = cluster[0]!.outAmount.tokenId
+    dominantDecimals = cluster[0]!.outAmount.decimals
+  } else {
+    const largest = cluster.reduce((a, b) =>
+      Number(b.outAmount.value) > Number(a.outAmount.value) ? b : a,
+    )
+    dominantTokenId = largest.outAmount.tokenId
+    dominantDecimals = largest.outAmount.decimals
+  }
   return {
     ...head,
     inAmount: {
@@ -197,16 +217,9 @@ function buildAggregatedSwap(cluster: readonly SwapTransaction[]): SwapTransacti
       decimals: head.inAmount.decimals,
     },
     outAmount: {
-      tokenId: AGGREGATE_OUT_TOKEN_ID,
+      tokenId: dominantTokenId,
       value: sumDecimalStrings(outValues),
-      // outAmount decimals: use USDm's 18 (matches AGGREGATE_OUT_TOKEN_ID).
-      // Legs may have used 6-decimal (USDT/USDC) or 18-decimal (USDm) but
-      // sumDecimalStrings scales to the max fractional-digits present, so
-      // the resulting string is expressive enough regardless. The wallet
-      // renders via BigNumber and does not divide by `decimals` for the
-      // display path (see priceOracle.ts:decimalizeValueForClassifier
-      // contract), so this is a display-metadata field only.
-      decimals: 18,
+      decimals: dominantDecimals,
     },
     fromTokenAmounts,
     fees,

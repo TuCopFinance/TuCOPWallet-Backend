@@ -1,7 +1,7 @@
 import { fetchWithTimeout } from './http'
 import { createLogger } from './logger'
 import { squidUpstreamOutcomeTotal } from './metrics'
-import { Sentry } from './sentry'
+import { attachUpstreamMeta, Sentry } from './sentry'
 
 const log = createLogger('lib:squid')
 
@@ -156,7 +156,11 @@ export async function squidRoute(
 ): Promise<SquidRouteResponse> {
   if (isBreakerOpen()) {
     squidUpstreamOutcomeTotal.labels({ outcome: 'breaker_open' }).inc()
-    throw new SquidUpstreamError(502, undefined, 'circuit breaker open')
+    throw attachUpstreamMeta(
+      new SquidUpstreamError(502, undefined, 'circuit breaker open'),
+      'squid',
+      'breaker_open',
+    )
   }
   return Sentry.startSpan(
     {
@@ -183,9 +187,9 @@ export async function squidRoute(
       } catch (err) {
         recordFailure()
         const errName = err instanceof Error ? err.name : 'unknown'
-        squidUpstreamOutcomeTotal
-          .labels({ outcome: errName === 'AbortError' ? 'timeout' : 'other' })
-          .inc()
+        const outcome = errName === 'AbortError' ? 'timeout' : 'other'
+        squidUpstreamOutcomeTotal.labels({ outcome }).inc()
+        if (err instanceof Error) attachUpstreamMeta(err, 'squid', outcome)
         throw err
       }
       if (!res.ok) {
@@ -204,7 +208,11 @@ export async function squidRoute(
         const outcome =
           res.status === 429 ? '429' : res.status >= 500 ? '5xx' : 'other'
         squidUpstreamOutcomeTotal.labels({ outcome }).inc()
-        throw new SquidUpstreamError(res.status, retryAfter, bodyHint)
+        throw attachUpstreamMeta(
+          new SquidUpstreamError(res.status, retryAfter, bodyHint),
+          'squid',
+          res.status,
+        )
       }
       recordSuccess()
       squidUpstreamOutcomeTotal.labels({ outcome: 'ok' }).inc()
