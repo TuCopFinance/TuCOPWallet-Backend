@@ -67,16 +67,18 @@ Import the following PromQL panels into a new Grafana dashboard (one per row):
 
 ### Step 3: alert rules
 
-Suggested initial alert rules. Tune thresholds against real prod traffic after one week.
+Wire alert rules against the metrics catalogued above. Tune thresholds against real prod traffic after one week.
 
-| Alert | Expression | Severity | Action |
-|---|---|---|---|
-| Relay balance below 1 CELO | `wri_relay_balance_celo < 1` for `5m` | critical | page (Slack/Telegram) |
-| Relay balance metric stale | `time() - wri_relay_balance_last_updated_seconds > 600` | warning | Slack |
-| Backend down | `absent(up{job="backend"}) == 1` for `2m` | critical | page |
-| 5xx burst | `rate(http_request_duration_seconds_count{status=~"5.."}[5m]) > 0.1` | warning | Slack |
-| pg pool saturated | `pg_pool_waiting > 5` for `2m` | warning | Slack |
-| WRI global bucket exhausted often | `rate(wri_relay_rate_limited_total{tier="global"}[5m]) > 0.5` | warning | Slack (could signal attack) |
+Metric families that carry live-alert value:
+
+- Relay hot-wallet balance (`wri_relay_balance_celo` + `wri_relay_balance_last_updated_seconds`).
+- Backend availability (`up{job="backend"}` absence).
+- Error rate (`http_request_duration_seconds_count{status=~"5.."}` rate).
+- pg pool saturation (`pg_pool_waiting`).
+- WRI relay rate-limit budget consumption (`wri_relay_rate_limited_total{tier=...}` rate).
+- Indexer lag (`transactions_indexer_lag_blocks` + `neeru_indexer_lag_blocks`).
+
+Concrete alert expressions, thresholds, severities, and paging channels are maintained in operator-owned Grafana Cloud config, not published here (public-repo sensitivity gate: publishing exact tripping values tells an attacker where the defensive perimeters sit).
 
 Contact points: configure Slack webhook OR Telegram bot in Grafana Cloud's notification settings.
 
@@ -96,7 +98,7 @@ Once the scrape is live:
 
 1. `curl https://tucop-backend-production.up.railway.app/metrics | grep wri_relay_balance` -> should return the live balance.
 2. In Grafana Explore: query `wri_relay_balance_celo` -> should see data points every 30s.
-3. Drop the relay-balance threshold to `< 100` temporarily, wait 5min -> alert fires -> Slack/Telegram receives. Restore threshold.
+3. Fire-drill the alert path by temporarily lowering a threshold, waiting for the alert to trip in Slack/Telegram, then restoring. Operator-facing detail lives in the internal alerts config, not published here.
 
 ## What this runbook is NOT for
 

@@ -57,7 +57,7 @@ Both workers use Postgres advisory locks for multi-replica safety and back off o
 
 ## Cross-cutting behaviour
 
-- **Rate limit:** per-IP limiter (`express-rate-limit`, in-memory) sized so an active user firing quote refreshes, receipt polling, and feed/balance refresh does not hit the wall. Exceeding it returns `429 { "error": "rate limit exceeded" }`. Trust-proxy is set to one hop so Railway's LB forwards the real client IP. The write path (`/api/wri/delegate-relay`) carries a stricter per-IP + Redis-backed global limit on top.
+- **Rate limit:** requests are rate-limited per client; over-limit responses return `429 { "error": "rate limit exceeded" }` with a `Retry-After` header. Trust-proxy is set to one hop so Railway's LB forwards the real client IP. Write endpoints carry additional per-endpoint tiers.
 - **Upstream timeout:** every outbound call (Etherscan, CoinMarketCap, Blockscout) is wrapped in `fetchWithTimeout` with an 8 s default, so a hung upstream never holds an inbound request open indefinitely.
 - **Cache fallthrough:** when `REDIS_URL` is unset or set to the literal `disabled`, every request goes direct to upstream. Otherwise the cache is consulted with normalised keys; failed cache reads or writes fall through and never break the response.
 - **Logging:** all diagnostic output goes through `src/lib/logger.ts` with per-module namespaces (e.g. `[app:req]`, `[routes:blockscout]`). In production (`NODE_ENV=production`) only `warn` and `error` are emitted.
