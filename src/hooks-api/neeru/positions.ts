@@ -2,6 +2,7 @@ import type { Pool } from 'pg'
 import { CONTRACT_ADDRESS } from '../../neeru-indexer/abi'
 import type { NeeruIndexerRpcClient } from '../../neeru-indexer/rpc'
 import { decimalString } from '../../lib/decimal'
+import { env } from '../../lib/env'
 import { createLogger } from '../../lib/logger'
 import { fetchSingleTokenPrice } from '../../lib/priceProviders'
 import {
@@ -276,11 +277,11 @@ async function fetchCatalogueUncached(
 async function resolveCategoryCount(
   rpc: NeeruIndexerRpcClient,
 ): Promise<number> {
-  const envOverride = process.env.NEERU_CATEGORY_COUNT
-  const envParsed =
-    envOverride != null && envOverride !== ''
-      ? Number(envOverride)
-      : null
+  // Read via zod-validated env for consistency with the rest of the codebase
+  // (project rule: all env access goes through `env` unless boot-cached is a
+  // problem, which is not the case here since the fallback fires only when
+  // TRANCHE_COUNT() reverts on-chain, not per-request).
+  const envParsed = env.NEERU_CATEGORY_COUNT ?? null
 
   let onChainCount: number | null = null
   try {
