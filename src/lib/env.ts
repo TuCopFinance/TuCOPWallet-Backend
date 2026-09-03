@@ -423,6 +423,15 @@ const envSchema = z.object({
   // Free-text version tag surfaced by GET /api/meta/contracts/neeru so
   // the wallet can detect proxy upgrades without polling on chain.
   NEERU_CONTRACT_VERSION: z.string().optional(),
+  // Fallback for the runtime `TRANCHE_COUNT()` on-chain read (see
+  // src/hooks-api/neeru/positions.ts::resolveCategoryCount). Only fires
+  // when the contract's TRANCHE_COUNT() call reverts (older impl, test
+  // double, partial RPC outage). Not set in prod today; the current
+  // partner V2 impl exposes TRANCHE_COUNT() so this env is unused there.
+  // Documented in the wallet-consumer-spec.md kill-switch table because
+  // a Neeru catalogue 502 is wallet-visible when both signals are absent
+  // (fail-closed).
+  NEERU_CATEGORY_COUNT: z.coerce.number().int().min(1).optional(),
 
   // Timelock monitor. Watches the admin Timelock that guards the Neeru fund
   // proxy for schedule / execute / cancel events targeting the proxy address.
