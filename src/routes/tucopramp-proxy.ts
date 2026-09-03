@@ -110,9 +110,16 @@ interface ProxyConfig {
   key: string | null
 }
 
-// Resolve at request time (not boot) so a Railway env flip of
-// TUCOPRAMP_PROXY_ENABLED takes effect on the next request without a
-// restart. Matches the pattern the WRI + integrator-fee routes use.
+// Resolve at request time via the shared `env` proxy. Note that `env`
+// is lazy but cache-once: `parseEnv()` populates `cachedEnv` on the
+// first access at boot (src/lib/env.ts). Subsequent per-request reads
+// return the cached value. So a Railway env-var change does NOT
+// hot-reload in the running process; instead Railway auto-triggers a
+// rolling redeploy (~2-5 min, zero downtime) and the new container
+// comes up with the new value. Calling `resolveProxyConfig()`
+// per-request is still worth doing (it groups the 3 vars into one
+// snapshot per handler invocation) but does not mean "env-flip
+// latest without restart", which was the earlier incorrect wording.
 function resolveProxyConfig(): ProxyConfig {
   return {
     enabled: env.TUCOPRAMP_PROXY_ENABLED,
