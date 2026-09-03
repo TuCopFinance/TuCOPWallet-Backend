@@ -121,6 +121,12 @@ const IGNORE = new Set<string>([
   'NEERU_TIMELOCK_INTERVAL_MS',
   'NEERU_TIMELOCK_ERROR_BACKOFF_MS',
   'NEERU_TIMELOCK_MAX_BLOCKS_PER_BATCH',
+  // Backend-internal observability + ops tuning. Not wallet-facing (wallet
+  // never checks these; they govern Sentry alert level escalation, indexer
+  // trailing buffer, and server-side Statsig SDK auth respectively).
+  'WRI_RELAY_CRITICAL_CELO_BALANCE',
+  'STATSIG_SERVER_SECRET',
+  'INDEXER_HEAD_LAG_BUFFER_BLOCKS',
 ])
 
 const missingFromSpec = [...envVarsInSource]
