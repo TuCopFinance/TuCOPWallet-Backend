@@ -1,5 +1,6 @@
 import type { Statsig, StatsigUser } from '@statsig/statsig-node-core'
 import { createLogger } from './logger'
+import { hashWalletAddress } from './pii'
 export type { StatsigUser }
 
 const log = createLogger('lib:statsig')
@@ -80,14 +81,20 @@ export async function shutdownStatsig(): Promise<void> {
 
 // Build a StatsigUser from a wallet address string. The wallet is the
 // primary user identifier across TuCop's backend + wallet + on-chain
-// layers, so events keyed on `userID = <address>` join naturally with
-// wallet-side events (which use the same convention).
+// layers, so events keyed on a stable per-user pseudonym still join
+// naturally with wallet-side events (wallet applies the same salt to
+// its own address before shipping to Statsig).
+//
+// We push a pseudonym (SHA-256 truncated) into Statsig instead of the
+// raw address so third-party PII stores do not carry on-chain-linkable
+// identifiers. See lib/pii.ts for the collision + reversal analysis.
 function buildUser(walletAddress: string | undefined): StatsigUser {
   const Ctor = StatsigUserCtor!
-  if (walletAddress) {
+  const pseudonym = hashWalletAddress(walletAddress)
+  if (pseudonym) {
     return new Ctor({
-      userID: walletAddress,
-      customIDs: { walletAddress },
+      userID: pseudonym,
+      customIDs: { walletPseudonym: pseudonym },
     })
   }
   return new Ctor({ userID: 'anonymous' })

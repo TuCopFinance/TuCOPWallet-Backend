@@ -31,7 +31,7 @@
 import { fetchWithTimeout } from './http'
 import { createLogger } from './logger'
 import { priceProviderTierUsedTotal } from './metrics'
-import { Sentry } from './sentry'
+import { attachUpstreamMeta, Sentry } from './sentry'
 
 const log = createLogger('lib:price-providers')
 
@@ -181,8 +181,12 @@ const cmcBatchFetch: ProviderBatchFetch = async (symbols) => {
     throw new ProviderExhaustedError('cmc', json.status?.error_message ?? 'quota exhausted')
   }
   if (!res.ok || errCode !== 0) {
-    throw new Error(
-      `cmc http ${res.status} code ${errCode} ${json.status?.error_message ?? ''}`,
+    throw attachUpstreamMeta(
+      new Error(
+        `cmc http ${res.status} code ${errCode} ${json.status?.error_message ?? ''}`,
+      ),
+      'cmc',
+      res.status,
     )
   }
 
@@ -218,7 +222,11 @@ const coingeckoBatchFetch: ProviderBatchFetch = async (symbols) => {
     throw new ProviderExhaustedError('coingecko', 'rate limit 429')
   }
   if (!res.ok) {
-    throw new Error(`coingecko http ${res.status}`)
+    throw attachUpstreamMeta(
+      new Error(`coingecko http ${res.status}`),
+      'coingecko',
+      res.status,
+    )
   }
   const json = (await res.json()) as Record<string, { usd?: number } | undefined> & {
     status?: { error_code?: number; error_message?: string }

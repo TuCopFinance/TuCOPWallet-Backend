@@ -124,8 +124,9 @@ describe('clusterMultiDollarSwaps', () => {
     // inAmount summed across all 3 legs.
     expect(agg.inAmount.tokenId).toBe(COPM)
     expect(agg.inAmount.value).toBe('12393.9')
-    // outAmount collapsed to USDm placeholder + summed value.
-    expect(agg.outAmount.tokenId).toBe(_testExports.AGGREGATE_OUT_TOKEN_ID)
+    // outAmount uses the LARGEST leg's tokenId (defensive: mixed basket
+    // no longer misreports USDm; here USDT 1.79 beats USDC 1.10 and USDm 1.10).
+    expect(agg.outAmount.tokenId).toBe(USDT)
     expect(agg.outAmount.value).toBe('3.99')
     // fromTokenAmounts preserves per-leg breakdown with transactionHash.
     expect(agg.fromTokenAmounts).toEqual([
@@ -319,6 +320,57 @@ describe('clusterMultiDollarSwaps', () => {
 
   it('empty input returns empty output', () => {
     expect(clusterMultiDollarSwaps([])).toEqual([])
+  })
+
+  it('outAmount.tokenId collapses to the single leg token when the basket is uniform (all USDT)', () => {
+    // Uniform basket must never be misreported as USDm. Wallets that key
+    // off outAmount.tokenId now see the real sold token.
+    const desc: TokenTransaction[] = [
+      makeSwap({ seq: 3, sellToken: USDT, sellValue: '2.00', buyToken: COPM, buyValue: '6200', timestampSec: 300 }),
+      makeSwap({ seq: 2, sellToken: USDT, sellValue: '1.50', buyToken: COPM, buyValue: '4650', timestampSec: 295 }),
+      makeSwap({ seq: 1, sellToken: USDT, sellValue: '1.00', buyToken: COPM, buyValue: '3100', timestampSec: 290 }),
+    ]
+    const out = clusterMultiDollarSwaps(desc)
+    expect(out).toHaveLength(1)
+    const agg = out[0] as SwapTransaction
+    expect(agg.outAmount.tokenId).toBe(USDT)
+    expect(agg.outAmount.decimals).toBe(6)
+    expect(agg.outAmount.value).toBe('4.50')
+  })
+
+  it('outAmount.tokenId picks the largest leg when the basket mixes across USDT/USDC/USDm', () => {
+    // USDC 2.50 is the biggest sold amount, so aggregate outAmount.tokenId
+    // is USDC (not USDT and not the old hardcoded USDm).
+    const desc: TokenTransaction[] = [
+      makeSwap({ seq: 3, sellToken: USDT, sellValue: '0.50', buyToken: COPM, buyValue: '1550', timestampSec: 300 }),
+      makeSwap({ seq: 2, sellToken: USDC, sellValue: '2.50', buyToken: COPM, buyValue: '7750', timestampSec: 295 }),
+      makeSwap({ seq: 1, sellToken: USDM, sellValue: '1.00', buyToken: COPM, buyValue: '3100', timestampSec: 290 }),
+    ]
+    const out = clusterMultiDollarSwaps(desc)
+    expect(out).toHaveLength(1)
+    const agg = out[0] as SwapTransaction
+    expect(agg.outAmount.tokenId).toBe(USDC)
+    expect(agg.outAmount.decimals).toBe(6)
+    expect(agg.outAmount.value).toBe('4.00')
+  })
+
+  it('is deterministic: repeated calls with the same input produce byte-identical output', () => {
+    // Underpins the /api/transactions/feed pageSize-stability contract:
+    // clustering is a pure function of the input window, so pagination
+    // slicing the same window at different pageSize values MUST yield the
+    // same aggregated events. Any drift here (e.g. Set iteration order
+    // leaking into fromTokenAmounts) would show up wallet-side as an
+    // event whose composition changed between pages.
+    const desc: TokenTransaction[] = [
+      makeSwap({ seq: 3, sellToken: USDT, sellValue: '1.79', buyToken: COPM, buyValue: '5559.5', timestampSec: 200 }),
+      makeSwap({ seq: 2, sellToken: USDC, sellValue: '1.10', buyToken: COPM, buyValue: '3417.2', timestampSec: 195 }),
+      makeSwap({ seq: 1, sellToken: USDM, sellValue: '1.10', buyToken: COPM, buyValue: '3417.2', timestampSec: 190 }),
+    ]
+    const a = JSON.stringify(clusterMultiDollarSwaps(desc))
+    const b = JSON.stringify(clusterMultiDollarSwaps(desc))
+    const c = JSON.stringify(clusterMultiDollarSwaps([...desc]))
+    expect(a).toBe(b)
+    expect(a).toBe(c)
   })
 })
 

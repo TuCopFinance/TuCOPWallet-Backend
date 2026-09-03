@@ -500,7 +500,31 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
   try {
     const cached = await cache?.get(cacheKey)
     if (cached) {
-      return res.json(JSON.parse(cached))
+      const cachedPayload = JSON.parse(cached) as {
+        unvalidatedSwapTransaction?: { buyAmount?: string }
+        details?: { swapProvider?: string }
+      }
+      // Fire the business event on the cache-hit branch too. Without
+      // this, the swap-volume dashboard reflects only fresh-quote
+      // volume (understated by the cache-hit ratio, ~30s TTL). The
+      // `cached: 'true'` metadata field lets the Statsig console
+      // segment fresh vs cached volume.
+      logStatsigEvent({
+        walletAddress: input.userAddress,
+        event: 'swap_quote_returned',
+        value: cachedPayload.unvalidatedSwapTransaction?.buyAmount ?? '0',
+        metadata: {
+          provider: cachedPayload.details?.swapProvider ?? 'unknown',
+          fromChain: String(input.fromChainId),
+          toChain: String(input.toChainId),
+          sellToken: input.sellToken,
+          buyToken: input.buyToken,
+          sellAmount: input.sellAmount,
+          quoteOnly: input.quoteOnly,
+          cached: 'true',
+        },
+      })
+      return res.json(cachedPayload)
     }
   } catch (err) {
     log.warn('redis read failed:', err instanceof Error ? err.message : err)
@@ -649,19 +673,24 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
       // page but a cluster shows up on the tokens dashboard degradation
       // table (same wiring as tokens_info_unresolved_symbols).
       if (feeMatch === false) {
+        // Sentry tag cardinality is bounded: tokens map to the known-symbol
+        // enum (USDT/USDC/USDm/COPm/CELO/unknown) instead of raw hex
+        // addresses. Full addresses stay in extra for drill-down.
         Sentry.captureMessage('squid_integrator_fee_mismatch', {
           level: 'warning',
           tags: {
             event: 'squid_integrator_fee_mismatch',
             route: '/api/swap/quote',
-            fromToken,
-            toToken,
+            fromToken: KNOWN_TOKEN_SYMBOLS[fromToken.toLowerCase()] ?? 'unknown',
+            toToken: KNOWN_TOKEN_SYMBOLS[toToken.toLowerCase()] ?? 'unknown',
           },
           extra: {
             integratorAddress: collectFees.integratorAddress,
             feeValueRequested: collectFees.feeValue,
             feeValueApplied: echoed ?? null,
             fromAmount: input.sellAmount,
+            fromTokenAddress: fromToken,
+            toTokenAddress: toToken,
             userAddress: input.userAddress,
           },
         })
@@ -686,6 +715,7 @@ router.get('/api/swap/quote', async (req: Request, res: Response) => {
         buyToken: input.buyToken,
         sellAmount: input.sellAmount,
         quoteOnly: input.quoteOnly,
+        cached: 'false',
       },
     })
 
