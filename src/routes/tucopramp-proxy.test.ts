@@ -383,6 +383,17 @@ describe("ALL /api/tucopramp platform routes (Bridge-backed ramp)", () => {
     );
   });
 
+  it("forwards the platform API version the wallet asks for", async () => {
+    const res = await request(app)
+      .get("/api/tucopramp/v1/withdrawals/wdr_1")
+      .set("X-TuCOPRamp-Party-Session", "tps_session_token")
+      .set("TuCOPRamp-Version", "2026-10-08");
+    expect(res.status).toBe(200);
+    expect(captured[0]!.init.headers!.get("TuCOPRamp-Version")).toBe(
+      "2026-10-08",
+    );
+  });
+
   it.each([
     ["POST", "/v1/sessions/wallet/nonce"],
     ["POST", "/v1/sessions/wallet"],

@@ -106,6 +106,9 @@ const WALLET_PASSTHROUGH_HEADERS: ReadonlyArray<string> = [
   // Platform routes act for a party through a session the wallet opened with
   // a signature; the token is the wallet's, not the backend's.
   "X-TuCOPRamp-Party-Session",
+  // The platform API version the wallet was built against. Without it
+  // TuCOPRamp falls back to the consumer's pinned version.
+  "TuCOPRamp-Version",
   "Content-Type",
   "Content-Length",
 ];
