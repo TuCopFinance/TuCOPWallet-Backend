@@ -83,6 +83,18 @@ const PROXY_UPSTREAM_PREFIXES: ReadonlyArray<string> = [
   "/v1/withdrawals",
   "/v1/deposits",
 ];
+// Platform routes that act for a party. TuCOPRamp lets an integrator whose own
+// Bridge customer it linked call these with the API key alone; this proxy
+// injects the consumer key for anyone on the internet, so it never forwards
+// them without the caller's own party session.
+const PARTY_SESSION_REQUIRED_PREFIXES: ReadonlyArray<string> = [
+  "/v1/parties",
+  "/v1/destinations",
+  "/v1/quotes",
+  "/v1/payments",
+  "/v1/withdrawals",
+  "/v1/deposits",
+];
 const PROXY_ROUTE_PATTERNS = PROXY_UPSTREAM_PREFIXES.flatMap((prefix) => [
   `${PROXY_PATH_PREFIX}${prefix}`,
   `${PROXY_PATH_PREFIX}${prefix}/*`,
@@ -106,6 +118,9 @@ const WALLET_PASSTHROUGH_HEADERS: ReadonlyArray<string> = [
   // Platform routes act for a party through a session the wallet opened with
   // a signature; the token is the wallet's, not the backend's.
   "X-TuCOPRamp-Party-Session",
+  // The platform API version the wallet was built against. Without it
+  // TuCOPRamp falls back to the consumer's pinned version.
+  "TuCOPRamp-Version",
   "Content-Type",
   "Content-Length",
 ];
@@ -210,6 +225,17 @@ router.all(PROXY_ROUTE_PATTERNS, async (req: Request, res: ExpressResponse) => {
   const pathAfterPrefix = originalUrl.startsWith(PROXY_PATH_PREFIX)
     ? originalUrl.slice(PROXY_PATH_PREFIX.length)
     : originalUrl;
+  const upstreamPath = pathAfterPrefix.split("?")[0] ?? "";
+  const needsPartySession = PARTY_SESSION_REQUIRED_PREFIXES.some(
+    (prefix) =>
+      upstreamPath === prefix || upstreamPath.startsWith(`${prefix}/`),
+  );
+  if (needsPartySession && !req.header("X-TuCOPRamp-Party-Session")?.trim()) {
+    return res.status(401).json({
+      code: "party_session_required",
+      detail: "X-TuCOPRamp-Party-Session is required.",
+    });
+  }
   const trimmedUpstream = cfg.upstream.replace(/\/+$/, "");
   const upstreamUrl = `${trimmedUpstream}${pathAfterPrefix}`;
 

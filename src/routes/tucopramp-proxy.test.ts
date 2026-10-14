@@ -383,6 +383,17 @@ describe("ALL /api/tucopramp platform routes (Bridge-backed ramp)", () => {
     );
   });
 
+  it("forwards the platform API version the wallet asks for", async () => {
+    const res = await request(app)
+      .get("/api/tucopramp/v1/withdrawals/wdr_1")
+      .set("X-TuCOPRamp-Party-Session", "tps_session_token")
+      .set("TuCOPRamp-Version", "2026-10-08");
+    expect(res.status).toBe(200);
+    expect(captured[0]!.init.headers!.get("TuCOPRamp-Version")).toBe(
+      "2026-10-08",
+    );
+  });
+
   it.each([
     ["POST", "/v1/sessions/wallet/nonce"],
     ["POST", "/v1/sessions/wallet"],
@@ -394,9 +405,9 @@ describe("ALL /api/tucopramp platform routes (Bridge-backed ramp)", () => {
     ["POST", "/v1/withdrawals"],
     ["GET", "/v1/deposits/dep_1"],
   ])("%s %s reaches upstream at the same path", async (method, path) => {
-    const req = request(app)[method.toLowerCase() as "get" | "post"](
-      `/api/tucopramp${path}`,
-    );
+    const verb = method.toLowerCase() as "get" | "post";
+    const call = request(app)[verb](`/api/tucopramp${path}`);
+    const req = call.set("X-TuCOPRamp-Party-Session", "tps_session_token");
     const res =
       method === "POST"
         ? await req.set("Content-Type", "application/json").send("{}")
@@ -405,6 +416,44 @@ describe("ALL /api/tucopramp platform routes (Bridge-backed ramp)", () => {
     expect(captured).toHaveLength(1);
     expect(captured[0]!.url).toBe(`https://api.ramp.tucop.xyz${path}`);
     expect(captured[0]!.init.method).toBe(method);
+  });
+
+  it.each([
+    ["POST", "/v1/parties"],
+    ["GET", "/v1/parties/me"],
+    ["GET", "/v1/destinations"],
+    ["POST", "/v1/quotes"],
+    ["POST", "/v1/payments"],
+    ["GET", "/v1/withdrawals/wdr_1"],
+    ["POST", "/v1/deposits"],
+  ])(
+    "%s %s without a party session never reaches upstream with the consumer key",
+    async (method, path) => {
+      const req = request(app)[method.toLowerCase() as "get" | "post"](
+        `/api/tucopramp${path}`,
+      );
+      const res =
+        method === "POST"
+          ? await req.set("Content-Type", "application/json").send("{}")
+          : await req;
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe("party_session_required");
+      expect(captured).toHaveLength(0);
+    },
+  );
+
+  it("revokes a party session through DELETE /v1/sessions/current", async () => {
+    const res = await request(app)
+      .delete("/api/tucopramp/v1/sessions/current")
+      .set("X-TuCOPRamp-Party-Session", "tps_session_token");
+    expect(res.status).toBe(200);
+    expect(captured[0]!.url).toBe(
+      "https://api.ramp.tucop.xyz/v1/sessions/current",
+    );
+    expect(captured[0]!.init.method).toBe("DELETE");
+    expect(captured[0]!.init.headers!.get("X-TuCOPRamp-Party-Session")).toBe(
+      "tps_session_token",
+    );
   });
 
   it.each([
