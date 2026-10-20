@@ -52,26 +52,58 @@
 //   size limit already caps at 32MB. Switch to streaming if we hit
 //   memory pressure.
 
-import { Router, type Request, type Response as ExpressResponse } from 'express'
-import express from 'express'
-import { env } from '../lib/env'
-import { fetchWithTimeout } from '../lib/http'
-import { createLogger } from '../lib/logger'
-import { Sentry } from '../lib/sentry'
+import {
+  Router,
+  type Request,
+  type Response as ExpressResponse,
+} from "express";
+import express from "express";
+import { env } from "../lib/env";
+import { fetchWithTimeout } from "../lib/http";
+import { createLogger } from "../lib/logger";
+import { Sentry } from "../lib/sentry";
 
-const log = createLogger('routes:tucopramp-proxy')
+const log = createLogger("routes:tucopramp-proxy");
 
-const router = Router()
+const router = Router();
 
-const PROXY_PATH_PREFIX = '/api/tucopramp'
-// Only /v1/p2p/* is proxied; other paths under /api/tucopramp fall through
-// to the app's 404 handler. Matches the wallet spec §2 + §7.
-const PROXY_ROUTE_PATTERN = `${PROXY_PATH_PREFIX}/v1/p2p/*`
-const UPSTREAM_TIMEOUT_MS = 30_000
+const PROXY_PATH_PREFIX = "/api/tucopramp";
+// /v1/p2p/* is the direct (P2P) ramp. The rest are TuCOPRamp's platform
+// API used by the Bridge-backed ramp: party sessions, parties, destinations,
+// quotes, payments, withdrawals and deposits. Admin and operator surfaces are
+// never proxied; anything else under /api/tucopramp falls through to the
+// app's 404 handler.
+const PROXY_UPSTREAM_PREFIXES: ReadonlyArray<string> = [
+  "/v1/p2p",
+  "/v1/sessions",
+  "/v1/parties",
+  "/v1/destinations",
+  "/v1/quotes",
+  "/v1/payments",
+  "/v1/withdrawals",
+  "/v1/deposits",
+];
+// Platform routes that act for a party. TuCOPRamp lets an integrator whose own
+// Bridge customer it linked call these with the API key alone; this proxy
+// injects the consumer key for anyone on the internet, so it never forwards
+// them without the caller's own party session.
+const PARTY_SESSION_REQUIRED_PREFIXES: ReadonlyArray<string> = [
+  "/v1/parties",
+  "/v1/destinations",
+  "/v1/quotes",
+  "/v1/payments",
+  "/v1/withdrawals",
+  "/v1/deposits",
+];
+const PROXY_ROUTE_PATTERNS = PROXY_UPSTREAM_PREFIXES.flatMap((prefix) => [
+  `${PROXY_PATH_PREFIX}${prefix}`,
+  `${PROXY_PATH_PREFIX}${prefix}/*`,
+]);
+const UPSTREAM_TIMEOUT_MS = 30_000;
 // Cap raw body at 10 MB. Multipart proof uploads (bank receipt
 // photos) empirically fit under 5 MB; 10 leaves headroom for future
 // endpoints. Sits well below Railway's 32 MB request cap.
-const MAX_BODY_BYTES = 10 * 1024 * 1024
+const MAX_BODY_BYTES = 10 * 1024 * 1024;
 
 // Wallet-signed headers pass through unchanged. Case is normalised to
 // the canonical form the wallet spec lists so the upstream sees the
@@ -79,13 +111,19 @@ const MAX_BODY_BYTES = 10 * 1024 * 1024
 // Idempotency-Key is not signed but is idempotency-critical, so
 // forward if present.
 const WALLET_PASSTHROUGH_HEADERS: ReadonlyArray<string> = [
-  'X-Wallet-Address',
-  'X-Wallet-Timestamp',
-  'X-Wallet-Signature',
-  'Idempotency-Key',
-  'Content-Type',
-  'Content-Length',
-]
+  "X-Wallet-Address",
+  "X-Wallet-Timestamp",
+  "X-Wallet-Signature",
+  "Idempotency-Key",
+  // Platform routes act for a party through a session the wallet opened with
+  // a signature; the token is the wallet's, not the backend's.
+  "X-TuCOPRamp-Party-Session",
+  // The platform API version the wallet was built against. Without it
+  // TuCOPRamp falls back to the consumer's pinned version.
+  "TuCOPRamp-Version",
+  "Content-Type",
+  "Content-Length",
+];
 
 // Upstream response headers we echo to the wallet. Explicit allowlist
 // avoids accidentally leaking upstream infra headers (server names,
@@ -95,19 +133,19 @@ const WALLET_PASSTHROUGH_HEADERS: ReadonlyArray<string> = [
 // TuCOPRamp `GET /v1/p2p/limits` and `/v1/p2p/banks` emit
 // `Cache-Control: public, max-age=<n>` per guide v1.3.
 const UPSTREAM_RESPONSE_HEADERS_TO_FORWARD: ReadonlyArray<string> = [
-  'Content-Type',
-  'Cache-Control',
-  'ETag',
-  'Last-Modified',
-  'Vary',
-  'Retry-After',
-  'Sunset',
-]
+  "Content-Type",
+  "Cache-Control",
+  "ETag",
+  "Last-Modified",
+  "Vary",
+  "Retry-After",
+  "Sunset",
+];
 
 interface ProxyConfig {
-  enabled: boolean
-  upstream: string | null
-  key: string | null
+  enabled: boolean;
+  upstream: string | null;
+  key: string | null;
 }
 
 // Resolve at request time via the shared `env` proxy. Note that `env`
@@ -125,7 +163,7 @@ function resolveProxyConfig(): ProxyConfig {
     enabled: env.TUCOPRAMP_PROXY_ENABLED,
     upstream: env.TUCOPRAMP_UPSTREAM_URL ?? null,
     key: env.TUCOPRAMP_CONSUMER_KEY_PROD ?? null,
-  }
+  };
 }
 
 // GET /health/tucopramp-proxy
@@ -136,13 +174,13 @@ function resolveProxyConfig(): ProxyConfig {
 // pointing at the right upstream without asking for Railway access.
 // Consumer key is NEVER exposed here; the shape is stable regardless
 // of whether the key is set. Shape matches wallet spec §5.
-router.get('/health/tucopramp-proxy', (_req: Request, res: ExpressResponse) => {
-  const cfg = resolveProxyConfig()
+router.get("/health/tucopramp-proxy", (_req: Request, res: ExpressResponse) => {
+  const cfg = resolveProxyConfig();
   return res.json({
     enabled: cfg.enabled,
     upstream: cfg.upstream,
-  })
-})
+  });
+});
 
 // Body capture middleware. Mounted here (not app-wide) so only this
 // prefix bypasses the app's `express.json({ limit: '16kb' })`. Using
@@ -151,65 +189,76 @@ router.get('/health/tucopramp-proxy', (_req: Request, res: ExpressResponse) => {
 // empty Buffer, not null.
 router.use(
   PROXY_PATH_PREFIX,
-  express.raw({ type: '*/*', limit: MAX_BODY_BYTES }),
-)
+  express.raw({ type: "*/*", limit: MAX_BODY_BYTES }),
+);
 
-// ALL /api/tucopramp/v1/p2p/<...>
+// ALL /api/tucopramp/<allowed prefix>/<...>
 //
-// Handler across every HTTP method for the /v1/p2p namespace. Order
+// Handler across every HTTP method for the allowed namespaces. Order
 // matters: this must come AFTER the body-capture middleware above.
 // Express 4 wildcard syntax: `/prefix/*` matches any nested path.
-router.all(PROXY_ROUTE_PATTERN, async (req: Request, res: ExpressResponse) => {
-  const cfg = resolveProxyConfig()
+router.all(PROXY_ROUTE_PATTERNS, async (req: Request, res: ExpressResponse) => {
+  const cfg = resolveProxyConfig();
 
   if (!cfg.enabled) {
-    return res.status(503).json({ code: 'proxy_disabled' })
+    return res.status(503).json({ code: "proxy_disabled" });
   }
   if (!cfg.upstream || !cfg.key) {
     // Fire once per open-window so operators know the env is misconfigured.
-    Sentry.captureMessage('tucopramp_proxy_misconfigured', {
-      level: 'error',
+    Sentry.captureMessage("tucopramp_proxy_misconfigured", {
+      level: "error",
       tags: {
-        event: 'tucopramp_proxy_misconfigured',
+        event: "tucopramp_proxy_misconfigured",
       },
       extra: {
         hasUpstream: cfg.upstream !== null,
         hasKey: cfg.key !== null,
       },
-    })
-    return res.status(503).json({ code: 'proxy_misconfigured' })
+    });
+    return res.status(503).json({ code: "proxy_misconfigured" });
   }
 
   // Strip the /api/tucopramp prefix from the original URL. Keep the
   // rest (path + querystring) BYTE-IDENTICAL because the wallet signs
   // the upstream path.
-  const originalUrl = req.originalUrl
+  const originalUrl = req.originalUrl;
   const pathAfterPrefix = originalUrl.startsWith(PROXY_PATH_PREFIX)
     ? originalUrl.slice(PROXY_PATH_PREFIX.length)
-    : originalUrl
-  const trimmedUpstream = cfg.upstream.replace(/\/+$/, '')
-  const upstreamUrl = `${trimmedUpstream}${pathAfterPrefix}`
+    : originalUrl;
+  const upstreamPath = pathAfterPrefix.split("?")[0] ?? "";
+  const needsPartySession = PARTY_SESSION_REQUIRED_PREFIXES.some(
+    (prefix) =>
+      upstreamPath === prefix || upstreamPath.startsWith(`${prefix}/`),
+  );
+  if (needsPartySession && !req.header("X-TuCOPRamp-Party-Session")?.trim()) {
+    return res.status(401).json({
+      code: "party_session_required",
+      detail: "X-TuCOPRamp-Party-Session is required.",
+    });
+  }
+  const trimmedUpstream = cfg.upstream.replace(/\/+$/, "");
+  const upstreamUrl = `${trimmedUpstream}${pathAfterPrefix}`;
 
   // Body: `express.raw()` yields Buffer for methods with a payload,
   // or an empty object for GET/HEAD (the middleware sees no
   // Content-Length header). Normalise to `undefined` for empty so
   // fetch does not send a bogus Content-Length: 0 with GET.
   const rawBody =
-    Buffer.isBuffer(req.body) && req.body.length > 0 ? req.body : undefined
+    Buffer.isBuffer(req.body) && req.body.length > 0 ? req.body : undefined;
 
   // Build forwarded headers. Case-preserving because upstream logs
   // and the integration guide reference these exact strings, and
   // some HTTP debug tools sort by case.
-  const forwardHeaders = new Headers()
+  const forwardHeaders = new Headers();
   for (const hdr of WALLET_PASSTHROUGH_HEADERS) {
-    const value = req.header(hdr)
+    const value = req.header(hdr);
     if (value !== undefined) {
-      forwardHeaders.set(hdr, value)
+      forwardHeaders.set(hdr, value);
     }
   }
-  forwardHeaders.set('X-TuCOPRamp-Key', cfg.key)
+  forwardHeaders.set("X-TuCOPRamp-Key", cfg.key);
 
-  let upstreamRes: Response
+  let upstreamRes: Response;
   try {
     upstreamRes = await fetchWithTimeout(
       upstreamUrl,
@@ -219,24 +268,24 @@ router.all(PROXY_ROUTE_PATTERN, async (req: Request, res: ExpressResponse) => {
         body: rawBody,
       },
       UPSTREAM_TIMEOUT_MS,
-    )
+    );
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    log.warn(`upstream request failed: ${msg}`)
-    return res.status(502).json({ code: 'upstream_unavailable' })
+    const msg = err instanceof Error ? err.message : String(err);
+    log.warn(`upstream request failed: ${msg}`);
+    return res.status(502).json({ code: "upstream_unavailable" });
   }
 
   // Echo status + allowed headers + body verbatim. Read the response
   // as an ArrayBuffer so binary responses (image proofs, etc.) round-
   // trip cleanly; UTF-8 JSON is a subset of that path and works
   // identically.
-  const responseBuffer = Buffer.from(await upstreamRes.arrayBuffer())
+  const responseBuffer = Buffer.from(await upstreamRes.arrayBuffer());
 
-  res.status(upstreamRes.status)
+  res.status(upstreamRes.status);
   for (const hdr of UPSTREAM_RESPONSE_HEADERS_TO_FORWARD) {
-    const value = upstreamRes.headers.get(hdr)
+    const value = upstreamRes.headers.get(hdr);
     if (value !== null) {
-      res.setHeader(hdr, value)
+      res.setHeader(hdr, value);
     }
   }
 
@@ -251,14 +300,14 @@ router.all(PROXY_ROUTE_PATTERN, async (req: Request, res: ExpressResponse) => {
   // traceable to a specific upstream log line. Silent when the body
   // is not JSON (e.g. HTML error page from a proxy in front of
   // TuCOPRamp).
-  let requestId: string | undefined
+  let requestId: string | undefined;
   if (upstreamRes.status >= 400) {
     try {
-      const parsed = JSON.parse(responseBuffer.toString('utf-8')) as {
-        request_id?: unknown
-      }
-      if (typeof parsed.request_id === 'string') {
-        requestId = parsed.request_id
+      const parsed = JSON.parse(responseBuffer.toString("utf-8")) as {
+        request_id?: unknown;
+      };
+      if (typeof parsed.request_id === "string") {
+        requestId = parsed.request_id;
       }
     } catch {
       // Non-JSON response body; nothing to extract.
@@ -266,8 +315,8 @@ router.all(PROXY_ROUTE_PATTERN, async (req: Request, res: ExpressResponse) => {
   }
   log.warn(
     `proxy ${req.method} ${pathAfterPrefix} -> ${upstreamRes.status}` +
-      (requestId ? ` request_id=${requestId}` : ''),
-  )
+      (requestId ? ` request_id=${requestId}` : ""),
+  );
 
   // `res.end(buffer)` instead of `res.send(buffer)`: `res.send()`
   // auto-generates a weak ETag over the response body when the
@@ -279,7 +328,7 @@ router.all(PROXY_ROUTE_PATTERN, async (req: Request, res: ExpressResponse) => {
   // ETag. Same reasoning applies to Content-Type auto-detection
   // (we already set it explicitly from upstream), so `res.end()`
   // is both safer and simpler for this route.
-  return res.end(responseBuffer)
-})
+  return res.end(responseBuffer);
+});
 
-export default router
+export default router;
