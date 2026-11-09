@@ -1,14 +1,25 @@
 // Pass-through proxy for TuCOPRamp (2026-08-30 wallet request). The
 // wallet signs the request path + body per EIP-191 and sends to
-// `/api/tucopramp/v1/p2p/<...>`; backend strips only the /api/tucopramp
-// prefix and forwards to `${TUCOPRAMP_UPSTREAM_URL}/v1/p2p/<...>` with
+// `/api/tucopramp/p2p/<...>`; backend strips only the /api/tucopramp
+// prefix and forwards to `${TUCOPRAMP_UPSTREAM_URL}/p2p/<...>` with
 // the consumer key injected via the `X-TuCOPRamp-Key` header (kept
 // server-side so the key never ships in the wallet binary).
 //
-// Path scope is `/v1/p2p/*` intentionally (wallet spec §2 + §7):
-// TuCOPRamp admin surfaces are NOT proxied. A wallet mistake pointed
-// at a non-p2p path 404s backend-side without spending consumer-key
-// budget on a round trip that upstream would reject anyway.
+// Upstream paths carry NO version segment. TuCOPRamp served `/v1/<path>`
+// as a deprecated alias for a while and then deleted it, so a forwarded
+// `/v1/...` now 404s there. There is no compatibility window on this side
+// either, deliberately: the wallet signs the path and upstream verifies
+// the signature over the path it received, so accepting `/v1` and
+// rewriting it would turn an honest 404 into a `signature_invalid` that
+// nobody can debug from a support ticket. Anything under
+// `/api/tucopramp/v1` gets an explicit 410 instead, which names the
+// problem (old client) rather than looking like a missing route.
+//
+// Path scope is the P2P ramp plus the platform API the Bridge-backed ramp
+// uses (wallet spec §2 + §7): TuCOPRamp admin surfaces are NOT proxied.
+// A wallet mistake pointed at an unlisted path 404s backend-side without
+// spending consumer-key budget on a round trip that upstream would reject
+// anyway.
 //
 // Preservation contract (MUST hold end-to-end):
 //
@@ -58,6 +69,7 @@ import {
   type Response as ExpressResponse,
 } from "express";
 import express from "express";
+import { publicClientIp } from "../lib/clientIp";
 import { env } from "../lib/env";
 import { fetchWithTimeout } from "../lib/http";
 import { createLogger } from "../lib/logger";
@@ -68,33 +80,65 @@ const log = createLogger("routes:tucopramp-proxy");
 const router = Router();
 
 const PROXY_PATH_PREFIX = "/api/tucopramp";
-// /v1/p2p/* is the direct (P2P) ramp. The rest are TuCOPRamp's platform
-// API used by the Bridge-backed ramp: party sessions, parties, destinations,
+// /p2p/* is the direct (P2P) ramp. The rest are TuCOPRamp's platform API
+// used by the Bridge-backed ramp: party sessions, parties, destinations,
 // quotes, payments, withdrawals and deposits. Admin and operator surfaces are
 // never proxied; anything else under /api/tucopramp falls through to the
 // app's 404 handler.
 const PROXY_UPSTREAM_PREFIXES: ReadonlyArray<string> = [
-  "/v1/p2p",
-  "/v1/sessions",
-  "/v1/parties",
-  "/v1/destinations",
-  "/v1/quotes",
-  "/v1/payments",
-  "/v1/withdrawals",
-  "/v1/deposits",
+  "/p2p",
+  "/sessions",
+  "/parties",
+  "/destinations",
+  "/quotes",
+  "/payments",
+  "/withdrawals",
+  "/deposits",
 ];
 // Platform routes that act for a party. TuCOPRamp lets an integrator whose own
 // Bridge customer it linked call these with the API key alone; this proxy
 // injects the consumer key for anyone on the internet, so it never forwards
 // them without the caller's own party session.
 const PARTY_SESSION_REQUIRED_PREFIXES: ReadonlyArray<string> = [
-  "/v1/parties",
-  "/v1/destinations",
-  "/v1/quotes",
-  "/v1/payments",
-  "/v1/withdrawals",
-  "/v1/deposits",
+  "/parties",
+  "/destinations",
+  "/quotes",
+  "/payments",
+  "/withdrawals",
+  "/deposits",
 ];
+
+// Routes never proxied even though they sit under an allowed prefix.
+//
+// GET /p2p/onramp/orders lists EVERY on-ramp order of the whole consumer,
+// across all wallets, and takes no wallet filter (TuCOPRamp's handler calls
+// listForConsumer and reads no query params). Each row carries
+// wallet_address, status, gross_amount_cop and outgoing_tx_hash, so exposing
+// it to a client is third-party data disclosure. It is a backend-to-backend
+// read; the wallet lists a user's own orders through GET /p2p/orders, which
+// is wallet-scoped upstream.
+//
+// Matched on method AND path: POST /p2p/onramp/orders creates an order and
+// IS proxied.
+const NEVER_PROXY: ReadonlyArray<{ method: string; path: string }> = [
+  { method: "GET", path: "/p2p/onramp/orders" },
+];
+
+// The on-ramp order creation path, where the destination wallet has to be the
+// wallet that signed (see the check in the handler).
+const ONRAMP_ORDERS_PATH = "/p2p/onramp/orders";
+
+// Path used for gate comparisons only. NEVER for forwarding: the wallet signs
+// the path it sent, so the bytes that go upstream stay exactly as received.
+//
+// Collapsing duplicate slashes and dropping the trailing slash closes a real
+// bypass: Express routes with `strict routing` off, so upstream answers
+// `/p2p/onramp/orders/` exactly as `/p2p/onramp/orders`, and a raw comparison
+// would wave the trailing-slash form straight past the gates below.
+function normalizeForMatch(path: string): string {
+  const collapsed = path.replace(/\/{2,}/g, "/");
+  return collapsed.length > 1 ? collapsed.replace(/\/+$/, "") : collapsed;
+}
 const PROXY_ROUTE_PATTERNS = PROXY_UPSTREAM_PREFIXES.flatMap((prefix) => [
   `${PROXY_PATH_PREFIX}${prefix}`,
   `${PROXY_PATH_PREFIX}${prefix}/*`,
@@ -118,20 +162,31 @@ const WALLET_PASSTHROUGH_HEADERS: ReadonlyArray<string> = [
   // Platform routes act for a party through a session the wallet opened with
   // a signature; the token is the wallet's, not the backend's.
   "X-TuCOPRamp-Party-Session",
-  // The platform API version the wallet was built against. Without it
-  // TuCOPRamp falls back to the consumer's pinned version.
-  "TuCOPRamp-Version",
   "Content-Type",
   "Content-Length",
 ];
+// Deliberately NOT in the list above:
+//
+// - TuCOPRamp-Version. The upstream server reads no version header at all
+//   (its own OpenAPI marks the response header "Deprecated. The single API
+//   version; nothing needs to read it."), and the wallet never sent one. The
+//   comment that used to sit here claimed upstream falls back to "the
+//   consumer's pinned version" without it, which was never true.
+// - X-TuCOPRamp-Client-IP. We DO forward it, but as a value this backend
+//   computes from the connection (see below), never as a header read off the
+//   request. Reading it from the caller is the whole attack: upstream trusts
+//   this relay's word on the header, so a client that could set it would get
+//   to scatter its traffic across addresses it made up. Building the
+//   forwarded set from an explicit allowlist means a client-supplied copy is
+//   dropped here, and the explicit `set()` later overrides it regardless.
 
 // Upstream response headers we echo to the wallet. Explicit allowlist
 // avoids accidentally leaking upstream infra headers (server names,
 // CF-Ray, etc.) that the wallet does not need. HTTP cache-semantic
 // headers (Cache-Control / ETag / Last-Modified / Vary) are forwarded
 // so consumers can honour upstream cache hints and conditional GETs;
-// TuCOPRamp `GET /v1/p2p/limits` and `/v1/p2p/banks` emit
-// `Cache-Control: public, max-age=<n>` per guide v1.3.
+// TuCOPRamp `GET /p2p/limits` and `/p2p/banks` emit
+// `Cache-Control: public, max-age=<n>` (upstream server/openapi.yaml).
 const UPSTREAM_RESPONSE_HEADERS_TO_FORWARD: ReadonlyArray<string> = [
   "Content-Type",
   "Cache-Control",
@@ -192,6 +247,27 @@ router.use(
   express.raw({ type: "*/*", limit: MAX_BODY_BYTES }),
 );
 
+// ALL /api/tucopramp/v1/<...>
+//
+// Upstream retired the `/v1` alias, so forwarding one of these would just
+// buy a 404 from TuCOPRamp on our consumer-key budget. Answering 410 here
+// instead names the actual problem for whoever reads the log or the support
+// ticket: the caller is a build from before the paths lost their version.
+//
+// Registered BEFORE the proxy handler, and intentionally outside the kill
+// switch and the config check: the answer does not depend on either, and an
+// old client deserves the same clear signal whether or not the ramp is up.
+//
+// Only the exact `/v1` segment matches, so `/v10/...` still falls through to
+// the app 404 like any other unlisted path.
+router.all(
+  [`${PROXY_PATH_PREFIX}/v1`, `${PROXY_PATH_PREFIX}/v1/*`],
+  (req: Request, res: ExpressResponse) => {
+    log.warn(`versioned path rejected: ${req.method} ${req.originalUrl}`);
+    return res.status(410).json({ code: "versioned_path_removed" });
+  },
+);
+
 // ALL /api/tucopramp/<allowed prefix>/<...>
 //
 // Handler across every HTTP method for the allowed namespaces. Order
@@ -226,9 +302,22 @@ router.all(PROXY_ROUTE_PATTERNS, async (req: Request, res: ExpressResponse) => {
     ? originalUrl.slice(PROXY_PATH_PREFIX.length)
     : originalUrl;
   const upstreamPath = pathAfterPrefix.split("?")[0] ?? "";
+  // Every gate below compares the normalized form; only the raw
+  // `pathAfterPrefix` is ever forwarded.
+  const matchPath = normalizeForMatch(upstreamPath);
+  const method = req.method.toUpperCase();
+
+  // Blocked outright, no upstream call: nothing to spend the consumer key on
+  // and nothing for the caller to learn from the shape of the answer, so this
+  // is the app's own 404 rather than a 403 that would confirm the route is
+  // real.
+  if (NEVER_PROXY.some((r) => r.method === method && r.path === matchPath)) {
+    log.warn(`blocked consumer-scoped route: ${method} ${matchPath}`);
+    return res.status(404).json({ code: "not_found" });
+  }
+
   const needsPartySession = PARTY_SESSION_REQUIRED_PREFIXES.some(
-    (prefix) =>
-      upstreamPath === prefix || upstreamPath.startsWith(`${prefix}/`),
+    (prefix) => matchPath === prefix || matchPath.startsWith(`${prefix}/`),
   );
   if (needsPartySession && !req.header("X-TuCOPRamp-Party-Session")?.trim()) {
     return res.status(401).json({
@@ -246,6 +335,52 @@ router.all(PROXY_ROUTE_PATTERNS, async (req: Request, res: ExpressResponse) => {
   const rawBody =
     Buffer.isBuffer(req.body) && req.body.length > 0 ? req.body : undefined;
 
+  // On-ramp destination must be the wallet that signed.
+  //
+  // TuCOPRamp verifies the signature over method + path + body hash and so
+  // knows WHICH wallet asked, but it deliberately does not compare that
+  // wallet with `wallet_address` in the body: on-ramping COPm to someone
+  // else's wallet is a case it supports on purpose, and its own source says
+  // so. Our product never offers it, so for us a request whose destination is
+  // a different wallet is either a modified client or someone spending our
+  // consumer-key budget to move COPm somewhere we did not intend.
+  //
+  // The header is only as trustworthy as upstream's signature check, which is
+  // what makes this a complement rather than the whole defense: upstream
+  // proves the signer owns the address in X-Wallet-Address, and this proves
+  // the signer is also the destination. Dropping either half reopens the gap.
+  //
+  // Parse a COPY to validate. `rawBody` is forwarded untouched: re-serialising
+  // it would change the bytes and break the EIP-191 signature, which is what
+  // tests T2 and T3 exist to catch.
+  //
+  // If we ever do want "top up a relative's wallet", this block comes out as a
+  // decision, not by accident.
+  if (method === "POST" && matchPath === ONRAMP_ORDERS_PATH) {
+    const signer = req.header("X-Wallet-Address")?.trim().toLowerCase();
+    let destination: string | undefined;
+    try {
+      const parsed: unknown = JSON.parse(rawBody?.toString("utf8") ?? "{}");
+      const value =
+        typeof parsed === "object" && parsed !== null
+          ? (parsed as { wallet_address?: unknown }).wallet_address
+          : undefined;
+      // A non-string wallet_address is upstream's 400 to give, not a reason
+      // to throw in here.
+      destination =
+        typeof value === "string" ? value.trim().toLowerCase() : undefined;
+    } catch {
+      return res.status(400).json({ code: "invalid_json" });
+    }
+    if (!signer || !destination || signer !== destination) {
+      log.warn(`onramp destination mismatch on ${matchPath}`);
+      return res.status(403).json({
+        code: "onramp_destination_mismatch",
+        detail: "wallet_address must be the signing wallet.",
+      });
+    }
+  }
+
   // Build forwarded headers. Case-preserving because upstream logs
   // and the integration guide reference these exact strings, and
   // some HTTP debug tools sort by case.
@@ -257,6 +392,28 @@ router.all(PROXY_ROUTE_PATTERNS, async (req: Request, res: ExpressResponse) => {
     }
   }
   forwardHeaders.set("X-TuCOPRamp-Key", cfg.key);
+
+  // End-user IP, on EVERY proxied call (TuCOPRamp asked for all of them, not
+  // just the session routes).
+  //
+  // TuCOPRamp marked this backend as a trusted relay, so its per-IP limits
+  // key on this header instead of the Railway egress address everything
+  // arrives from. Without it all of our users share a single bucket: at five
+  // users nobody notices, at five hundred one busy user burns the quota and
+  // every other user gets 429 from a ramp that looks down. Upstream ignores
+  // the header from anyone who is not a trusted relay, so it is inert if the
+  // relay designation is ever withdrawn.
+  //
+  // `req.ip` already resolves X-Forwarded-For under the app's
+  // `trust proxy = 1` (src/app.ts), which is the one hop Railway terminates;
+  // a caller-supplied X-Forwarded-For does not become `req.ip` and is never
+  // forwarded. A private, malformed or absent address sends no header at all,
+  // because a wrong address collides distinct users into one bucket AND tells
+  // upstream something false, which is worse than saying nothing.
+  const clientIp = publicClientIp(req.ip);
+  if (clientIp) {
+    forwardHeaders.set("X-TuCOPRamp-Client-IP", clientIp);
+  }
 
   let upstreamRes: Response;
   try {

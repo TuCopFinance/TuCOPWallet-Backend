@@ -18,6 +18,7 @@ import positionsNotifyRouter from './routes/positions-notify'
 import pricesRouter from './routes/prices'
 import tokensRouter from './routes/tokens'
 import tucoprampProxyRouter from './routes/tucopramp-proxy'
+import tucoprampWebhooksRouter from './routes/tucopramp-webhooks'
 import txStatusRouter from './routes/tx-status'
 import swapRouter from './routes/swap'
 import wriRouter from './routes/wri'
@@ -93,6 +94,13 @@ app.use(
 // Mounting the router here (out of order with the rest of the routers)
 // gives express.raw() first crack at /api/tucopramp/* and lets
 // express.json() no-op after the stream is already consumed.
+// Inbound TuCOPRamp webhooks, mounted BEFORE the proxy router so the
+// webhook path gets its own raw-body middleware rather than inheriting the
+// proxy's. Same reason as the proxy for sitting ahead of express.json():
+// the Standard Webhooks signature covers the raw bytes, so a JSON
+// parse-then-reserialise would make every delivery fail to verify.
+app.use(tucoprampWebhooksRouter)
+
 app.use(tucoprampProxyRouter)
 
 app.use(express.json({ limit: '16kb' }))

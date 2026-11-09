@@ -138,13 +138,13 @@ describe("GET /health/tucopramp-proxy", () => {
   });
 });
 
-describe("ALL /api/tucopramp/v1/p2p/*", () => {
+describe("ALL /api/tucopramp/p2p/*", () => {
   it("T1: GET passes wallet-signed headers unchanged + injects X-TuCOPRamp-Key", async () => {
     // Wallet spec §3: X-Wallet-Address, X-Wallet-Timestamp,
     // X-Wallet-Signature, Idempotency-Key MUST reach upstream verbatim.
     // Backend injects X-TuCOPRamp-Key with the consumer key.
     const res = await request(app)
-      .get("/api/tucopramp/v1/p2p/banks?limit=10")
+      .get("/api/tucopramp/p2p/banks?limit=10")
       .set("X-Wallet-Address", "0x81dCf9160237D0EF0d4db27CFb2EA9743547f882")
       .set("X-Wallet-Timestamp", "1735689600")
       .set("X-Wallet-Signature", "0xdeadbeef")
@@ -152,7 +152,7 @@ describe("ALL /api/tucopramp/v1/p2p/*", () => {
     expect(res.status).toBe(200);
     expect(captured).toHaveLength(1);
     const call = captured[0]!;
-    expect(call.url).toBe("https://api.ramp.tucop.xyz/v1/p2p/banks?limit=10");
+    expect(call.url).toBe("https://api.ramp.tucop.xyz/p2p/banks?limit=10");
     expect(call.init.method).toBe("GET");
     const h = call.init.headers!;
     expect(h.get("X-Wallet-Address")).toBe(
@@ -184,7 +184,7 @@ describe("ALL /api/tucopramp/v1/p2p/*", () => {
     const expectedHash = createHash("sha256").update(payload).digest("hex");
 
     const res = await request(app)
-      .post("/api/tucopramp/v1/p2p/orders")
+      .post("/api/tucopramp/p2p/orders")
       .set("Content-Type", "application/octet-stream")
       .set("X-Wallet-Address", "0x81dc")
       .set("X-Wallet-Signature", "0xsig")
@@ -221,7 +221,7 @@ describe("ALL /api/tucopramp/v1/p2p/*", () => {
       .digest("hex");
 
     const res = await request(app)
-      .post("/api/tucopramp/v1/p2p/orders/ord_123/proof")
+      .post("/api/tucopramp/p2p/orders/ord_123/proof")
       .set("Content-Type", `multipart/form-data; boundary=${boundary}`)
       .set("X-Wallet-Address", "0x81dc")
       .set("X-Wallet-Signature", "0xsig")
@@ -245,7 +245,7 @@ describe("ALL /api/tucopramp/v1/p2p/*", () => {
   it('T4: kill switch OFF returns 503 { code: "proxy_disabled" } without touching upstream', async () => {
     setEnv({ TUCOPRAMP_PROXY_ENABLED: "false" });
     const res = await request(app)
-      .post("/api/tucopramp/v1/p2p/orders")
+      .post("/api/tucopramp/p2p/orders")
       .set("X-Wallet-Address", "0x81dc")
       .send({ any: "payload" });
     expect(res.status).toBe(503);
@@ -268,7 +268,7 @@ describe("ALL /api/tucopramp/v1/p2p/*", () => {
       headers: { "Content-Type": "application/json", "Retry-After": "17" },
     };
     const res = await request(app)
-      .post("/api/tucopramp/v1/p2p/orders")
+      .post("/api/tucopramp/p2p/orders")
       .set("Content-Type", "application/json")
       .set("X-Wallet-Address", "0x81dc")
       .send({ orderId: "ord_new" });
@@ -284,7 +284,7 @@ describe("ALL /api/tucopramp/v1/p2p/*", () => {
   it("T6: missing consumer key returns proxy_misconfigured (guard against silent-degrade)", async () => {
     setEnv({ TUCOPRAMP_CONSUMER_KEY_PROD: undefined });
     const res = await request(app)
-      .get("/api/tucopramp/v1/p2p/banks")
+      .get("/api/tucopramp/p2p/banks")
       .set("X-Wallet-Address", "0x81dc");
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ code: "proxy_misconfigured" });
@@ -294,17 +294,17 @@ describe("ALL /api/tucopramp/v1/p2p/*", () => {
   it("T7: missing upstream URL returns proxy_misconfigured", async () => {
     setEnv({ TUCOPRAMP_UPSTREAM_URL: undefined });
     const res = await request(app)
-      .get("/api/tucopramp/v1/p2p/banks")
+      .get("/api/tucopramp/p2p/banks")
       .set("X-Wallet-Address", "0x81dc");
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ code: "proxy_misconfigured" });
     expect(captured).toHaveLength(0);
   });
 
-  it("T8: paths outside /v1/p2p/* fall through to the app 404 handler (never reach upstream)", async () => {
-    // Wallet spec §2 + §7 scope the proxy to /v1/p2p/*. Any other
-    // path under /api/tucopramp/* must NOT proxy: it should hit the
-    // app's 404 handler so consumer-key budget is not spent on a
+  it("T8: paths outside the allowlist fall through to the app 404 handler (never reach upstream)", async () => {
+    // Wallet spec §2 + §7 scope the proxy to the P2P ramp plus the platform
+    // API. Any other path under /api/tucopramp/* must NOT proxy: it should
+    // hit the app's 404 handler so consumer-key budget is not spent on a
     // wallet mistake.
     const res = await request(app)
       .get("/api/tucopramp/admin/reset")
@@ -314,7 +314,7 @@ describe("ALL /api/tucopramp/v1/p2p/*", () => {
   });
 
   it("T9: forwards HTTP cache-semantic response headers (Cache-Control, ETag, Last-Modified, Vary)", async () => {
-    // TuCOPRamp `GET /v1/p2p/limits` (guide v1.3) and `GET /v1/p2p/banks`
+    // TuCOPRamp `GET /p2p/limits` and `GET /p2p/banks`
     // emit `Cache-Control: public, max-age=<n>`. Consumers that respect
     // HTTP caching semantics need the header to serve conditional or
     // fresh responses correctly; dropping it silently forces every hit
@@ -339,7 +339,7 @@ describe("ALL /api/tucopramp/v1/p2p/*", () => {
         Vary: "X-TuCOPRamp-Key",
       },
     };
-    const res = await request(app).get("/api/tucopramp/v1/p2p/limits");
+    const res = await request(app).get("/api/tucopramp/p2p/limits");
     expect(res.status).toBe(200);
     expect(res.headers["cache-control"]).toBe("public, max-age=300");
     expect(res.headers["etag"]).toBe('W/"abc123"');
@@ -357,7 +357,7 @@ describe("ALL /api/tucopramp/v1/p2p/*", () => {
       body: Buffer.from('{"ok":true}'),
       headers: { "Content-Type": "application/json" },
     };
-    const res = await request(app).get("/api/tucopramp/v1/p2p/banks");
+    const res = await request(app).get("/api/tucopramp/p2p/banks");
     expect(res.status).toBe(200);
     expect(res.headers["cache-control"]).toBeUndefined();
     expect(res.headers["etag"]).toBeUndefined();
@@ -369,12 +369,12 @@ describe("ALL /api/tucopramp/v1/p2p/*", () => {
 describe("ALL /api/tucopramp platform routes (Bridge-backed ramp)", () => {
   it("forwards a party session request with its session header + the consumer key", async () => {
     const res = await request(app)
-      .get("/api/tucopramp/v1/parties/me")
+      .get("/api/tucopramp/parties/me")
       .set("X-TuCOPRamp-Party-Session", "tps_session_token");
     expect(res.status).toBe(200);
     expect(captured).toHaveLength(1);
     const call = captured[0]!;
-    expect(call.url).toBe("https://api.ramp.tucop.xyz/v1/parties/me");
+    expect(call.url).toBe("https://api.ramp.tucop.xyz/parties/me");
     expect(call.init.headers!.get("X-TuCOPRamp-Party-Session")).toBe(
       "tps_session_token",
     );
@@ -383,27 +383,28 @@ describe("ALL /api/tucopramp platform routes (Bridge-backed ramp)", () => {
     );
   });
 
-  it("forwards the platform API version the wallet asks for", async () => {
+  it("does not forward TuCOPRamp-Version (upstream reads no version header)", async () => {
+    // Upstream serves a single API version and reads no version header; its
+    // own OpenAPI marks the response header deprecated. Forwarding it
+    // suggested a pinning behaviour that never existed.
     const res = await request(app)
-      .get("/api/tucopramp/v1/withdrawals/wdr_1")
+      .get("/api/tucopramp/withdrawals/wdr_1")
       .set("X-TuCOPRamp-Party-Session", "tps_session_token")
       .set("TuCOPRamp-Version", "2026-10-08");
     expect(res.status).toBe(200);
-    expect(captured[0]!.init.headers!.get("TuCOPRamp-Version")).toBe(
-      "2026-10-08",
-    );
+    expect(captured[0]!.init.headers!.get("TuCOPRamp-Version")).toBeNull();
   });
 
   it.each([
-    ["POST", "/v1/sessions/wallet/nonce"],
-    ["POST", "/v1/sessions/wallet"],
-    ["POST", "/v1/parties"],
-    ["GET", "/v1/destinations"],
-    ["POST", "/v1/destinations/dst_1/confirm"],
-    ["POST", "/v1/quotes"],
-    ["GET", "/v1/payments/op_1"],
-    ["POST", "/v1/withdrawals"],
-    ["GET", "/v1/deposits/dep_1"],
+    ["POST", "/sessions/wallet/nonce"],
+    ["POST", "/sessions/wallet"],
+    ["POST", "/parties"],
+    ["GET", "/destinations"],
+    ["POST", "/destinations/dst_1/confirm"],
+    ["POST", "/quotes"],
+    ["GET", "/payments/op_1"],
+    ["POST", "/withdrawals"],
+    ["GET", "/deposits/dep_1"],
   ])("%s %s reaches upstream at the same path", async (method, path) => {
     const verb = method.toLowerCase() as "get" | "post";
     const call = request(app)[verb](`/api/tucopramp${path}`);
@@ -419,13 +420,13 @@ describe("ALL /api/tucopramp platform routes (Bridge-backed ramp)", () => {
   });
 
   it.each([
-    ["POST", "/v1/parties"],
-    ["GET", "/v1/parties/me"],
-    ["GET", "/v1/destinations"],
-    ["POST", "/v1/quotes"],
-    ["POST", "/v1/payments"],
-    ["GET", "/v1/withdrawals/wdr_1"],
-    ["POST", "/v1/deposits"],
+    ["POST", "/parties"],
+    ["GET", "/parties/me"],
+    ["GET", "/destinations"],
+    ["POST", "/quotes"],
+    ["POST", "/payments"],
+    ["GET", "/withdrawals/wdr_1"],
+    ["POST", "/deposits"],
   ])(
     "%s %s without a party session never reaches upstream with the consumer key",
     async (method, path) => {
@@ -442,13 +443,13 @@ describe("ALL /api/tucopramp platform routes (Bridge-backed ramp)", () => {
     },
   );
 
-  it("revokes a party session through DELETE /v1/sessions/current", async () => {
+  it("revokes a party session through DELETE /sessions/current", async () => {
     const res = await request(app)
-      .delete("/api/tucopramp/v1/sessions/current")
+      .delete("/api/tucopramp/sessions/current")
       .set("X-TuCOPRamp-Party-Session", "tps_session_token");
     expect(res.status).toBe(200);
     expect(captured[0]!.url).toBe(
-      "https://api.ramp.tucop.xyz/v1/sessions/current",
+      "https://api.ramp.tucop.xyz/sessions/current",
     );
     expect(captured[0]!.init.method).toBe("DELETE");
     expect(captured[0]!.init.headers!.get("X-TuCOPRamp-Party-Session")).toBe(
@@ -457,14 +458,389 @@ describe("ALL /api/tucopramp platform routes (Bridge-backed ramp)", () => {
   });
 
   it.each([
-    "/v1/admin/orders",
-    "/v1/consumers/me",
-    "/v1/events",
-    "/v1/prereg/status",
-    "/v1/partiesx",
+    "/admin/orders",
+    "/consumers/me",
+    "/events",
+    "/prereg/status",
+    "/partiesx",
+    "/rates",
+    "/document-types",
   ])("%s is not proxied", async (path) => {
     const res = await request(app).get(`/api/tucopramp${path}`);
     expect(res.status).toBe(404);
     expect(captured).toHaveLength(0);
+  });
+});
+
+describe("ALL /api/tucopramp/v1/* (retired version prefix)", () => {
+  it.each([
+    "/v1/p2p/banks",
+    "/v1/p2p/onramp/orders",
+    "/v1/sessions/wallet",
+    "/v1/parties/me",
+  ])("%s answers 410 without touching upstream", async (path) => {
+    // Upstream deleted its /v1 alias, so forwarding would spend consumer-key
+    // budget on a guaranteed 404. 410 names the real problem instead: the
+    // caller is a build from before the paths lost their version.
+    const res = await request(app).get(`/api/tucopramp${path}`);
+    expect(res.status).toBe(410);
+    expect(res.body).toEqual({ code: "versioned_path_removed" });
+    expect(captured).toHaveLength(0);
+  });
+
+  it("answers 410 on the bare /v1 path", async () => {
+    const res = await request(app).get("/api/tucopramp/v1");
+    expect(res.status).toBe(410);
+    expect(res.body).toEqual({ code: "versioned_path_removed" });
+    expect(captured).toHaveLength(0);
+  });
+
+  it("answers 410 on a POST too, body and all", async () => {
+    const res = await request(app)
+      .post("/api/tucopramp/v1/p2p/onramp/orders")
+      .set("Content-Type", "application/json")
+      .send('{"wallet_address":"0x1111111111111111111111111111111111111111"}');
+    expect(res.status).toBe(410);
+    expect(res.body).toEqual({ code: "versioned_path_removed" });
+    expect(captured).toHaveLength(0);
+  });
+
+  it("answers 410 even with the kill switch OFF", async () => {
+    // An old client deserves the same clear signal whether or not the ramp
+    // is up; the answer does not depend on the switch.
+    setEnv({ TUCOPRAMP_PROXY_ENABLED: "false" });
+    const res = await request(app).get("/api/tucopramp/v1/p2p/banks");
+    expect(res.status).toBe(410);
+    expect(res.body).toEqual({ code: "versioned_path_removed" });
+    expect(captured).toHaveLength(0);
+  });
+
+  it("leaves /v10 alone: only the exact /v1 segment is retired", async () => {
+    const res = await request(app).get("/api/tucopramp/v10/p2p/banks");
+    expect(res.status).toBe(404);
+    expect(res.body).not.toEqual({ code: "versioned_path_removed" });
+    expect(captured).toHaveLength(0);
+  });
+});
+
+describe("upstream prefix allowlist (unversioned)", () => {
+  it.each([
+    ["/p2p/banks", false],
+    ["/sessions/wallet/nonce", true],
+    ["/parties/me", true],
+    ["/destinations", true],
+    ["/quotes/qt_1", true],
+    ["/payments/op_1", true],
+    ["/withdrawals/wdr_1", true],
+    ["/deposits/dep_1", true],
+  ] as ReadonlyArray<[string, boolean]>)(
+    "%s forwards to upstream at the same path",
+    async (path, needsSession) => {
+      const call = request(app).get(`/api/tucopramp${path}`);
+      const res = needsSession
+        ? await call.set("X-TuCOPRamp-Party-Session", "tps_session_token")
+        : await call;
+      expect(res.status).toBe(200);
+      expect(captured).toHaveLength(1);
+      expect(captured[0]!.url).toBe(`https://api.ramp.tucop.xyz${path}`);
+    },
+  );
+});
+
+describe("X-TuCOPRamp-Client-IP", () => {
+  it("forwards the end-user address on a p2p route", async () => {
+    // Upstream treats this backend as a trusted relay and keys its per-IP
+    // limits on this header; without it every user shares one bucket.
+    const res = await request(app)
+      .get("/api/tucopramp/p2p/banks")
+      .set("X-Forwarded-For", "8.8.8.8");
+    expect(res.status).toBe(200);
+    expect(captured[0]!.init.headers!.get("X-TuCOPRamp-Client-IP")).toBe(
+      "8.8.8.8",
+    );
+  });
+
+  it("forwards it on platform routes too, not just the session ones", async () => {
+    const res = await request(app)
+      .get("/api/tucopramp/withdrawals/wdr_1")
+      .set("X-TuCOPRamp-Party-Session", "tps_session_token")
+      .set("X-Forwarded-For", "1.1.1.1");
+    expect(res.status).toBe(200);
+    expect(captured[0]!.init.headers!.get("X-TuCOPRamp-Client-IP")).toBe(
+      "1.1.1.1",
+    );
+  });
+
+  it("forwards it on a POST as well", async () => {
+    const res = await request(app)
+      .post("/api/tucopramp/p2p/orders/ord_1/cancel")
+      .set("Content-Type", "application/json")
+      .set("X-Forwarded-For", "8.8.8.8")
+      .send("{}");
+    expect(res.status).toBe(200);
+    expect(captured[0]!.init.headers!.get("X-TuCOPRamp-Client-IP")).toBe(
+      "8.8.8.8",
+    );
+  });
+
+  it.each(["10.0.0.5", "192.168.1.9", "127.0.0.1", "169.254.1.1"])(
+    "sends no header when the resolved address is private (%s)",
+    async (ip) => {
+      // A private address collides distinct users into one bucket AND tells
+      // upstream something false, which is worse than saying nothing.
+      const res = await request(app)
+        .get("/api/tucopramp/p2p/banks")
+        .set("X-Forwarded-For", ip);
+      expect(res.status).toBe(200);
+      expect(
+        captured[0]!.init.headers!.has("X-TuCOPRamp-Client-IP"),
+      ).toBe(false);
+    },
+  );
+
+  it("sends no header when the resolved address is malformed", async () => {
+    const res = await request(app)
+      .get("/api/tucopramp/p2p/banks")
+      .set("X-Forwarded-For", "not-an-ip");
+    expect(res.status).toBe(200);
+    expect(captured[0]!.init.headers!.has("X-TuCOPRamp-Client-IP")).toBe(false);
+  });
+
+  it("sends no header for a loopback connection with no forwarded address", async () => {
+    const res = await request(app).get("/api/tucopramp/p2p/banks");
+    expect(res.status).toBe(200);
+    expect(captured[0]!.init.headers!.has("X-TuCOPRamp-Client-IP")).toBe(false);
+  });
+
+  it("never forwards a client-supplied X-TuCOPRamp-Client-IP", async () => {
+    // The whole attack: upstream trusts this relay's word on the header, so a
+    // client that could set it would scatter its traffic over made-up
+    // addresses. The value must come from the connection, never from the
+    // request.
+    const res = await request(app)
+      .get("/api/tucopramp/p2p/banks")
+      .set("X-TuCOPRamp-Client-IP", "203.0.113.7")
+      .set("X-Forwarded-For", "8.8.8.8");
+    expect(res.status).toBe(200);
+    expect(captured[0]!.init.headers!.get("X-TuCOPRamp-Client-IP")).toBe(
+      "8.8.8.8",
+    );
+  });
+
+  it("drops a spoofed header entirely when the connection yields no public address", async () => {
+    const res = await request(app)
+      .get("/api/tucopramp/p2p/banks")
+      .set("X-TuCOPRamp-Client-IP", "203.0.113.7");
+    expect(res.status).toBe(200);
+    expect(captured[0]!.init.headers!.has("X-TuCOPRamp-Client-IP")).toBe(false);
+  });
+
+  it("never forwards the caller's X-Forwarded-For", async () => {
+    const res = await request(app)
+      .get("/api/tucopramp/p2p/banks")
+      .set("X-Forwarded-For", "8.8.8.8");
+    expect(res.status).toBe(200);
+    expect(captured[0]!.init.headers!.has("X-Forwarded-For")).toBe(false);
+  });
+});
+
+describe("GET /p2p/onramp/orders (consumer-wide listing)", () => {
+  it("is blocked backend-side with a 404 and never reaches upstream", async () => {
+    // The upstream route lists EVERY on-ramp order of the whole consumer,
+    // across all wallets, and takes no wallet filter. Exposing it to a client
+    // is third-party data disclosure.
+    const res = await request(app)
+      .get("/api/tucopramp/p2p/onramp/orders")
+      .set("X-Wallet-Address", "0x1111111111111111111111111111111111111111");
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ code: "not_found" });
+    expect(captured).toHaveLength(0);
+  });
+
+  it("stays blocked with a trailing slash", async () => {
+    // Upstream routes with `strict routing` off, so `/orders/` is answered as
+    // `/orders`. A raw path comparison would wave this straight through.
+    const res = await request(app).get("/api/tucopramp/p2p/onramp/orders/");
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ code: "not_found" });
+    expect(captured).toHaveLength(0);
+  });
+
+  it("stays blocked with a query string", async () => {
+    const res = await request(app).get(
+      "/api/tucopramp/p2p/onramp/orders?wallet_address=0x1111111111111111111111111111111111111111",
+    );
+    expect(res.status).toBe(404);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("does not block the wallet-scoped GET /p2p/orders", async () => {
+    const res = await request(app).get("/api/tucopramp/p2p/orders");
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.url).toBe("https://api.ramp.tucop.xyz/p2p/orders");
+  });
+
+  it("does not block GET /p2p/onramp/receiving-account", async () => {
+    const res = await request(app).get(
+      "/api/tucopramp/p2p/onramp/receiving-account",
+    );
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(1);
+  });
+});
+
+describe("POST /p2p/onramp/orders destination", () => {
+  const SIGNER = "0x1111111111111111111111111111111111111111";
+  const OTHER = "0x2222222222222222222222222222222222222222";
+
+  it("forwards when the destination is the signing wallet", async () => {
+    // Sent as a string, not a Buffer: superagent JSON-serialises a Buffer
+    // under an application/json Content-Type, which would rewrite the bytes
+    // before they ever reach the proxy.
+    const res = await request(app)
+      .post("/api/tucopramp/p2p/onramp/orders")
+      .set("Content-Type", "application/json")
+      .set("X-Wallet-Address", SIGNER)
+      .set("X-Wallet-Signature", "0xsig")
+      .send(`{"wallet_address":"${SIGNER}", "gross_amount_cop":50000 }\n`);
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(1);
+  });
+
+  it("forwards the body byte-identically despite parsing it to validate", async () => {
+    // The destination check parses a COPY. If it ever re-serialised the body,
+    // the EIP-191 signature would break upstream -- the same invariant T2 and
+    // T3 protect, asserted here on the one route that now reads the body.
+    // Intentionally non-canonical JSON (space after colon, space before the
+    // comma, trailing newline): if anything round-tripped the body through
+    // JSON.parse + stringify, these bytes would not survive.
+    const payloadString = `{"wallet_address":"${SIGNER}", "gross_amount_cop":50000 ,"cedula":"123"}\n`;
+    const payload = Buffer.from(payloadString);
+    const expectedHash = createHash("sha256").update(payload).digest("hex");
+
+    const res = await request(app)
+      .post("/api/tucopramp/p2p/onramp/orders")
+      .set("Content-Type", "application/json")
+      .set("X-Wallet-Address", SIGNER)
+      .send(payloadString);
+    expect(res.status).toBe(200);
+    const forwardedBody = captured[0]!.init.body;
+    expect(forwardedBody).toBeDefined();
+    expect(createHash("sha256").update(forwardedBody!).digest("hex")).toBe(
+      expectedHash,
+    );
+    expect(forwardedBody!.equals(payload)).toBe(true);
+  });
+
+  it("rejects a destination that is not the signer, without touching upstream", async () => {
+    // Upstream deliberately does not compare the two: on-ramping to someone
+    // else's wallet is a case it supports. Our product does not offer it.
+    const res = await request(app)
+      .post("/api/tucopramp/p2p/onramp/orders")
+      .set("Content-Type", "application/json")
+      .set("X-Wallet-Address", SIGNER)
+      .send(`{"wallet_address":"${OTHER}"}`);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("onramp_destination_mismatch");
+    expect(captured).toHaveLength(0);
+  });
+
+  it("compares addresses case-insensitively", async () => {
+    const res = await request(app)
+      .post("/api/tucopramp/p2p/onramp/orders")
+      .set("Content-Type", "application/json")
+      .set("X-Wallet-Address", "0x1111111111111111111111111111111111111111")
+      .send('{"wallet_address":"0x1111111111111111111111111111111111111111"}');
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(1);
+  });
+
+  it("accepts a checksummed header against a lowercase body", async () => {
+    const checksummed = "0xAbC1111111111111111111111111111111111111";
+    const res = await request(app)
+      .post("/api/tucopramp/p2p/onramp/orders")
+      .set("Content-Type", "application/json")
+      .set("X-Wallet-Address", checksummed)
+      .send(`{"wallet_address":"${checksummed.toLowerCase()}"}`);
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(1);
+  });
+
+  it("rejects a non-JSON body with 400 invalid_json", async () => {
+    const res = await request(app)
+      .post("/api/tucopramp/p2p/onramp/orders")
+      .set("Content-Type", "application/json")
+      .set("X-Wallet-Address", SIGNER)
+      .send("not json at all");
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ code: "invalid_json" });
+    expect(captured).toHaveLength(0);
+  });
+
+  it("rejects a request with no X-Wallet-Address", async () => {
+    const res = await request(app)
+      .post("/api/tucopramp/p2p/onramp/orders")
+      .set("Content-Type", "application/json")
+      .send(`{"wallet_address":"${SIGNER}"}`);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("onramp_destination_mismatch");
+    expect(captured).toHaveLength(0);
+  });
+
+  it("rejects a body with no wallet_address", async () => {
+    const res = await request(app)
+      .post("/api/tucopramp/p2p/onramp/orders")
+      .set("Content-Type", "application/json")
+      .set("X-Wallet-Address", SIGNER)
+      .send('{"gross_amount_cop":50000}');
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("onramp_destination_mismatch");
+    expect(captured).toHaveLength(0);
+  });
+
+  it("rejects a non-string wallet_address instead of throwing", async () => {
+    // A crafted body must not turn into a 500 inside the gate.
+    const res = await request(app)
+      .post("/api/tucopramp/p2p/onramp/orders")
+      .set("Content-Type", "application/json")
+      .set("X-Wallet-Address", SIGNER)
+      .send('{"wallet_address":12345}');
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("onramp_destination_mismatch");
+    expect(captured).toHaveLength(0);
+  });
+
+  it("enforces the check on the trailing-slash form too", async () => {
+    const res = await request(app)
+      .post("/api/tucopramp/p2p/onramp/orders/")
+      .set("Content-Type", "application/json")
+      .set("X-Wallet-Address", SIGNER)
+      .send(`{"wallet_address":"${OTHER}"}`);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("onramp_destination_mismatch");
+    expect(captured).toHaveLength(0);
+  });
+
+  it("leaves POST /p2p/offramp/orders alone", async () => {
+    // The off-ramp sends COPm FROM the signer; there is no destination wallet
+    // to compare, and the gate must not touch it.
+    const res = await request(app)
+      .post("/api/tucopramp/p2p/offramp/orders")
+      .set("Content-Type", "application/json")
+      .set("X-Wallet-Address", SIGNER)
+      .send('{"gross_amount_copm":"50000"}');
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(1);
+  });
+
+  it("leaves POST /p2p/onramp/quote alone", async () => {
+    const res = await request(app)
+      .post("/api/tucopramp/p2p/onramp/quote")
+      .set("Content-Type", "application/json")
+      .set("X-Wallet-Address", SIGNER)
+      .send('{"gross_amount_cop":50000,"cedula":"123"}');
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(1);
   });
 });
