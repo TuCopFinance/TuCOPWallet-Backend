@@ -278,6 +278,12 @@ const diaBatchFetch: ProviderBatchFetch = async (symbols) => {
       }
     }),
   )
+  // Every eligible token failed, so throw instead of returning an empty map.
+  // An empty map reads as a partial success and the circuit breaker never
+  // opens, which is how a dead provider stays silently in the rotation.
+  if (out.size === 0 && eligible.length > 0) {
+    throw new Error(`dia: all ${eligible.length} token fetches failed`)
+  }
   return out
 }
 
