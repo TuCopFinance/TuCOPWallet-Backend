@@ -14,7 +14,12 @@ import { Sentry } from './sentry'
 // for the Neeru indexer since #19):
 //
 //   - Endpoints are tried in the canonical order defined by
-//     `getCeloRpcFallbackUrls()` (primary -> forno -> ankr -> drpc).
+//     `getCeloRpcFallbackUrls()`. PRIMARY_RPC_URL is tried LAST, not first:
+//     see the ordering in celoClient.ts. That is deliberate and load-bearing,
+//     because the endpoint configured as "primary" has been observed
+//     answering 200 with block=0, which stalled an indexer for three days
+//     while every health check looked green. Do not "fix" this by moving it
+//     to the front.
 //   - Each endpoint has its own consecutive-failure counter. After
 //     `SKIP_AFTER_FAILURES` consecutive failures the endpoint is skipped
 //     for `SKIP_DURATION_MS` before being reconsidered. A success at any
