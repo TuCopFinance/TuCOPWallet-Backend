@@ -204,3 +204,15 @@ export async function refreshRelayBalanceMetric(): Promise<void> {
     // the balance value alone.
   }
 }
+
+// Inbound TuCOPRamp webhook events (POST /api/tucopramp/webhooks/p2p).
+// Labels: type (the event type, e.g. p2p_order.updated), outcome
+// (stored|duplicate|ignored). `duplicate` is the normal, expected result of
+// a TuCOPRamp retry; a `stored` rate that drops to zero while orders are
+// moving means the notice endpoint stopped reaching us.
+export const tucoprampWebhookEventsTotal = new Counter({
+  name: 'tucopramp_webhook_events_total',
+  help: 'Inbound TuCOPRamp webhook events by type and outcome',
+  labelNames: ['type', 'outcome'],
+  registers: [metricsRegistry],
+})

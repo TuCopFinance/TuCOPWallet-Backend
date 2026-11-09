@@ -369,8 +369,8 @@ const envSchema = z.object({
     .transform((v) => v !== 'false'),
 
   // TuCOPRamp pass-through proxy (2026-08-30 wallet request). The proxy
-  // route lives at `/api/tucopramp/v1/p2p/*` and forwards to
-  // `${TUCOPRAMP_UPSTREAM_URL}/v1/p2p/*` (stripping the /api/tucopramp
+  // route lives at `/api/tucopramp/p2p/*` and forwards to
+  // `${TUCOPRAMP_UPSTREAM_URL}/p2p/*` (stripping the /api/tucopramp
   // prefix), preserving the wallet-signed body byte-for-byte and
   // injecting the consumer key via `X-TuCOPRamp-Key` server-side so
   // the wallet never holds the secret. TuCOPRamp has a single
@@ -392,6 +392,15 @@ const envSchema = z.object({
     .transform((v) => v === 'true'),
   TUCOPRAMP_UPSTREAM_URL: zHttpsUrl.optional(),
   TUCOPRAMP_CONSUMER_KEY_PROD: z.string().optional(),
+
+  // Signing secret for the inbound TuCOPRamp webhook receiver
+  // (`POST /api/tucopramp/webhooks/p2p`). Issued by the TuCOPRamp console
+  // when the endpoint is registered under the `p2p` notice category, in the
+  // Standard Webhooks `whsec_<base64>` form. Optional here only so the rest
+  // of the service boots without it: the route answers 503 while it is unset,
+  // which keeps TuCOPRamp retrying rather than silently dropping events.
+  // Never logged, never sent to Sentry.
+  TUCOPRAMP_WEBHOOK_SECRET_P2P: z.string().optional(),
 
   // Shared secret gating the admin endpoints (currently just
   // POST /api/admin/reset-backfill). REQUIRED for those routes to
