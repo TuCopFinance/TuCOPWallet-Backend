@@ -464,7 +464,6 @@ describe("ALL /api/tucopramp platform routes (Bridge-backed ramp)", () => {
     "/prereg/status",
     "/partiesx",
     "/rates",
-    "/document-types",
   ])("%s is not proxied", async (path) => {
     const res = await request(app).get(`/api/tucopramp${path}`);
     expect(res.status).toBe(404);
@@ -533,6 +532,7 @@ describe("upstream prefix allowlist (unversioned)", () => {
     ["/payments/op_1", true],
     ["/withdrawals/wdr_1", true],
     ["/deposits/dep_1", true],
+    ["/document-types", false],
   ] as ReadonlyArray<[string, boolean]>)(
     "%s forwards to upstream at the same path",
     async (path, needsSession) => {
@@ -842,5 +842,44 @@ describe("POST /p2p/onramp/orders destination", () => {
       .send('{"gross_amount_cop":50000,"cedula":"123"}');
     expect(res.status).toBe(200);
     expect(captured).toHaveLength(1);
+  });
+});
+
+describe("GET /document-types", () => {
+  it("forwards on the consumer key alone, with no party session", async () => {
+    // Upstream serves this catalogue behind the key only. Requiring a party
+    // session here would make it unreachable before a session exists, which
+    // is exactly when the wallet needs it to render the document picker.
+    const res = await request(app).get("/api/tucopramp/document-types");
+    expect(res.status).toBe(200);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.url).toBe("https://api.ramp.tucop.xyz/document-types");
+    expect(captured[0]!.init.headers!.get("X-TuCOPRamp-Key")).toBe(
+      "tcr_prod_test_key_cafebabe",
+    );
+  });
+
+  it("forwards a country query string byte-identically", async () => {
+    const res = await request(app).get("/api/tucopramp/document-types?country=CO");
+    expect(res.status).toBe(200);
+    expect(captured[0]!.url).toBe(
+      "https://api.ramp.tucop.xyz/document-types?country=CO",
+    );
+  });
+
+  it("passes upstream cache headers through so the wallet can cache it", async () => {
+    nextUpstreamResponse = {
+      status: 200,
+      body: Buffer.from('{"document_types":[{"code":"CC"}]}'),
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=3600",
+        ETag: 'W/"doctypes-1"',
+      },
+    };
+    const res = await request(app).get("/api/tucopramp/document-types");
+    expect(res.status).toBe(200);
+    expect(res.headers["cache-control"]).toBe("public, max-age=3600");
+    expect(res.headers["etag"]).toBe('W/"doctypes-1"');
   });
 });
