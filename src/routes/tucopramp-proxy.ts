@@ -82,9 +82,9 @@ const router = Router();
 const PROXY_PATH_PREFIX = "/api/tucopramp";
 // /p2p/* is the direct (P2P) ramp. The rest are TuCOPRamp's platform API
 // used by the Bridge-backed ramp: party sessions, parties, destinations,
-// quotes, payments, withdrawals and deposits. Admin and operator surfaces are
-// never proxied; anything else under /api/tucopramp falls through to the
-// app's 404 handler.
+// quotes, payments, withdrawals, deposits and the identity-document
+// catalogue. Admin and operator surfaces are never proxied; anything else
+// under /api/tucopramp falls through to the app's 404 handler.
 const PROXY_UPSTREAM_PREFIXES: ReadonlyArray<string> = [
   "/p2p",
   "/sessions",
@@ -94,6 +94,14 @@ const PROXY_UPSTREAM_PREFIXES: ReadonlyArray<string> = [
   "/payments",
   "/withdrawals",
   "/deposits",
+  // GET /document-types: the identity documents accepted per country, for
+  // the parties / KYC track. Static, cacheable, and upstream serves it on
+  // the consumer key alone, so it is deliberately NOT in the
+  // party-session list below. The wallet must not hardcode this catalogue
+  // (TuCOPRamp requires that, and it differs from the P2P document set,
+  // which stays a fixed enum because those six values are the contract its
+  // zod schema validates).
+  "/document-types",
 ];
 // Platform routes that act for a party. TuCOPRamp lets an integrator whose own
 // Bridge customer it linked call these with the API key alone; this proxy
